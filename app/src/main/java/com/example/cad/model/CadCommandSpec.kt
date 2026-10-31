@@ -80,9 +80,16 @@ enum class CadCommandId(
     companion object {
         fun fromText(input: String): CadCommandId? {
             val token = input.trim().uppercase()
-            return entries.firstOrNull {
-                it.commandName == token || it.primaryAlias == token
-            }
+            if (token.isEmpty()) return null
+            // 1. Check exact primary alias or commandName on CadCommandId
+            entries.firstOrNull {
+                it.primaryAlias.equals(token, ignoreCase = true) ||
+                    it.commandName.equals(token, ignoreCase = true)
+            }?.let { return it }
+            // 2. Check secondary aliases in CadCommandCompatibilityCatalog
+            return CadCommandCompatibilityCatalog.allSpecs.firstOrNull { spec ->
+                spec.aliases.any { alias -> alias.equals(token, ignoreCase = true) }
+            }?.id
         }
     }
 }
@@ -99,6 +106,52 @@ data class CadCommandCompatibilitySpec(
 )
 
 object CadCommandCompatibilityCatalog {
+
+    /**
+     * Section 14.3 — Prefix-based command autocomplete ranking.
+     * Ranks commands matching [rawQuery] strictly in order of:
+     * 1. Exact primary alias match (e.g. "L" -> LINE)
+     * 2. Exact secondary alias or full command name match
+     * 3. Primary alias prefix match (e.g. "L" -> LA, LE, LEN)
+     * 4. Command name or short label prefix match
+     * 5. Secondary alias prefix match
+     * Unrelated commands that do not match the prefix are excluded.
+     */
+    fun rankSuggestionsForPrefix(rawQuery: String): List<CadCommandCompatibilitySpec> {
+        val q = rawQuery.trim().uppercase()
+        if (q.isEmpty()) return emptyList()
+        // If user is typing a coordinate expression (contains ',', '<', '@', or starts with digit/minus), do not show command suggestions
+        if (q.startsWith("@") || q.contains(",") || q.contains("<") || q.first().isDigit() || q.startsWith("-")) {
+            return emptyList()
+        }
+
+        data class RankedSpec(val spec: CadCommandCompatibilitySpec, val tier: Int, val tieBreaker: Int)
+
+        val matches = mutableListOf<RankedSpec>()
+        for (spec in allSpecs) {
+            val cmd = spec.id
+            val cmdName = cmd.commandName.uppercase()
+            val primaryAlias = cmd.primaryAlias.uppercase()
+            val shortLabel = cmd.shortLabel.uppercase()
+            val upperAliases = spec.aliases.map { it.uppercase() }
+
+            val tier: Int? = when {
+                primaryAlias == q -> 1
+                cmdName == q || upperAliases.any { it == q } -> 2
+                primaryAlias.startsWith(q) -> 3
+                cmdName.startsWith(q) || shortLabel.startsWith(q) -> 4
+                upperAliases.any { it.startsWith(q) } -> 5
+                else -> null
+            }
+            if (tier != null) {
+                matches.add(RankedSpec(spec, tier, primaryAlias.length * 10 + cmdName.length))
+            }
+        }
+        return matches
+            .sortedWith(compareBy<RankedSpec> { it.tier }.thenBy { it.tieBreaker }.thenBy { it.spec.id.commandName })
+            .map { it.spec }
+    }
+
     val allSpecs: List<CadCommandCompatibilitySpec> = listOf(
         // DRAW
         CadCommandCompatibilitySpec(

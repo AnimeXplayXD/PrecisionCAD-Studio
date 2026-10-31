@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -81,14 +83,21 @@ import com.example.ui.theme.CadTextSecondary
 import kotlin.math.hypot
 import kotlin.math.pow
 
+enum class ControllerDockState {
+    COMPACT_DOCK,
+    EXPANDED_CONTROLLER
+}
+
 /**
- * Dedicated Velocity-Sensitive Virtual Cursor Controller (Section 4 of Specification).
+ * Dedicated Velocity-Sensitive Virtual Cursor Controller (Sections 4 & 14.5 of Specification).
  * Supports:
  * - Mode A: Relative Touchpad (finger displacement moves cursor without relocating on lift/re-touch)
  * - Mode B: Velocity-Sensitive Virtual Joystick (deflection magnitude controls speed via fine-control curve,
  *   releasing stops cursor movement immediately with zero drift)
  * - Discrete Step Increment Nudging (10, 5, 1, 0.5, 0.1, 0.01, Custom)
  * - Pick Point / Confirm / Cancel triggers without touching the drawing viewport.
+ * - Collapsible Compact Dock (`COMPACT_DOCK`) showing only Touchpad, Joystick, X, Y, and Settings,
+ *   with swipe-down to collapse and swipe-up to expand on the header/drag handle.
  */
 @Composable
 fun VirtualCursorControllerDeck(
@@ -108,12 +117,14 @@ fun VirtualCursorControllerDeck(
     onIncrementSelect: (Double) -> Unit,
     onOpenControllerSettings: () -> Unit,
     onToggleCollapse: () -> Unit,
+    onSetCollapsed: ((Boolean) -> Unit)? = null,
     onOpenCoordinateDialog: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Normalized joystick deflection vector in [-1f, +1f]. Reset to Offset.Zero immediately on release.
     var joystickDeflection by remember { mutableStateOf(Offset.Zero) }
     var isJoystickHeld by remember { mutableStateOf(false) }
+    var headerDragAccumulatorY by remember { mutableFloatStateOf(0f) }
 
     // 60fps velocity integration loop for Velocity-Sensitive Virtual Joystick
     LaunchedEffect(isJoystickHeld, config.mode) {
@@ -147,20 +158,72 @@ fun VirtualCursorControllerDeck(
     Surface(
         modifier = modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
             .border(1.dp, CadBorderHairline, RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
             .testTag("virtual_cursor_controller_deck"),
         color = CadPanelSurface,
         shape = RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp),
-        tonalElevation = 6.dp
+        tonalElevation = 0.dp
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            // Top Header Row: Mode Switcher + Live Coordinate Readout (Tappable for Direct Numeric Entry) + Collapse
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)) {
+            // Drag Handle Pill for Swipe-Down to Collapse / Swipe-Up to Expand (isolated from touchpad/joystick)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(config.isCollapsed) {
+                        detectVerticalDragGestures(
+                            onDragStart = { headerDragAccumulatorY = 0f },
+                            onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                headerDragAccumulatorY += dragAmount
+                                if (!config.isCollapsed && headerDragAccumulatorY > 24f) {
+                                    headerDragAccumulatorY = 0f
+                                    if (onSetCollapsed != null) onSetCollapsed(true) else onToggleCollapse()
+                                } else if (config.isCollapsed && headerDragAccumulatorY < -24f) {
+                                    headerDragAccumulatorY = 0f
+                                    if (onSetCollapsed != null) onSetCollapsed(false) else onToggleCollapse()
+                                }
+                            }
+                        )
+                    }
+                    .testTag("controller_drag_handle"),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(vertical = 2.dp)
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(CadBorderHairline)
+                )
+            }
+
+            // Top Header / Compact Dock Row:
+            // [1. Touchpad Mode] [2. Joystick Mode] [3. X Coordinate] [4. Y Coordinate] [5. Controller Settings + Chevron]
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(config.isCollapsed) {
+                        detectVerticalDragGestures(
+                            onDragStart = { headerDragAccumulatorY = 0f },
+                            onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                headerDragAccumulatorY += dragAmount
+                                if (!config.isCollapsed && headerDragAccumulatorY > 24f) {
+                                    headerDragAccumulatorY = 0f
+                                    if (onSetCollapsed != null) onSetCollapsed(true) else onToggleCollapse()
+                                } else if (config.isCollapsed && headerDragAccumulatorY < -24f) {
+                                    headerDragAccumulatorY = 0f
+                                    if (onSetCollapsed != null) onSetCollapsed(false) else onToggleCollapse()
+                                }
+                            }
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Touchpad vs Joystick Mode Pill
+                // Touchpad vs Joystick Mode Pill (Opaque surfaces)
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -173,8 +236,10 @@ fun VirtualCursorControllerDeck(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isTouchpad) CadCyanPrimary.copy(alpha = 0.22f) else Color.Transparent)
-                            .clickable { onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD) }
+                            .background(if (isTouchpad) Color(0xFF0B3544) else CadPanelElevated)
+                            .clickable {
+                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
+                            }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                             .testTag("controller_mode_touchpad")
                     ) {
@@ -197,8 +262,10 @@ fun VirtualCursorControllerDeck(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (!isTouchpad) CadAmberSnap.copy(alpha = 0.22f) else Color.Transparent)
-                            .clickable { onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK) }
+                            .background(if (!isTouchpad) Color(0xFF3A2B09) else CadPanelElevated)
+                            .clickable {
+                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
+                            }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                             .testTag("controller_mode_joystick")
                     ) {
@@ -220,22 +287,34 @@ fun VirtualCursorControllerDeck(
                     }
                 }
 
-                // Tappable Live Cursor Coordinate Pill -> Opens Direct Coordinate Input
+                // Tappable Live Cursor X & Y Readout -> Opens Direct Coordinate Input
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
                         .background(CadPanelElevated)
-                        .border(1.dp, CadCyanPrimary.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
-                        .clickable { onOpenCoordinateDialog() }
+                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                         .testTag("cursor_coordinate_hud_button"),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "X: ${precision.formatCoord(cursorModelPos.x, storageUnit, displayUnit)}  Y: ${precision.formatCoord(cursorModelPos.y, storageUnit, displayUnit)}",
+                        text = "X: ${precision.formatCoord(cursorModelPos.x, storageUnit, displayUnit)}",
                         style = MaterialTheme.typography.labelMedium,
                         color = CadCyanPrimary,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { onOpenCoordinateDialog() }
+                            .testTag("cursor_coord_x_text")
+                    )
+                    Text(
+                        text = "Y: ${precision.formatCoord(cursorModelPos.y, storageUnit, displayUnit)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CadCyanPrimary,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { onOpenCoordinateDialog() }
+                            .testTag("cursor_coord_y_text")
                     )
                 }
 

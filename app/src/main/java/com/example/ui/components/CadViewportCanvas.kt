@@ -3,13 +3,17 @@ package com.example.ui.components
 import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -22,6 +26,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
@@ -64,6 +69,65 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
+/**
+ * Section 14.1 & 14.7 — Authoritative Viewport Gesture State Machine.
+ * The CAD sheet is strictly navigation-only:
+ * - 1 pointer (`ONE_POINTER_SUPPRESSED`): suppressed; never picks points, draws, or selects entities.
+ * - 2 pointers (`TWO_POINTER_TRANSFORM`): two-finger pinch-to-zoom and two-finger pan around centroid.
+ * - If a 2-pointer gesture drops to 1 pointer, it returns to `ONE_POINTER_SUPPRESSED` until all pointers lift.
+ */
+enum class ViewportGestureState {
+    IDLE,
+    ONE_POINTER_SUPPRESSED,
+    TWO_POINTER_TRANSFORM,
+    CANCELLED
+}
+
+object ViewportGesturePolicy {
+    fun resolveState(
+        pressedPointerCount: Int,
+        isCancelled: Boolean = false
+    ): ViewportGestureState = when {
+        isCancelled -> ViewportGestureState.CANCELLED
+        pressedPointerCount <= 0 -> ViewportGestureState.IDLE
+        pressedPointerCount == 1 -> ViewportGestureState.ONE_POINTER_SUPPRESSED
+        pressedPointerCount == 2 -> ViewportGestureState.TWO_POINTER_TRANSFORM
+        else -> ViewportGestureState.CANCELLED
+    }
+
+    fun transitionState(
+        currentState: ViewportGestureState,
+        activePointerCount: Int
+    ): ViewportGestureState {
+        if (activePointerCount <= 0) return ViewportGestureState.IDLE
+        if (currentState == ViewportGestureState.CANCELLED) return ViewportGestureState.CANCELLED
+        return when (activePointerCount) {
+            1 -> ViewportGestureState.ONE_POINTER_SUPPRESSED
+            2 -> ViewportGestureState.TWO_POINTER_TRANSFORM
+            else -> ViewportGestureState.CANCELLED
+        }
+    }
+
+    fun applyTwoFingerTransform(
+        viewport: ViewportTransform,
+        centroidScreen: Offset,
+        panDeltaScreen: Offset,
+        zoomFactor: Float
+    ): ViewportTransform {
+        var updated = viewport
+        if (centroidScreen != Offset.Unspecified && zoomFactor.isFinite() && abs(zoomFactor - 1f) > 0.001f) {
+            updated = updated.zoomAroundScreenPoint(centroidScreen, zoomFactor)
+        }
+        if (panDeltaScreen != Offset.Zero && panDeltaScreen.x.isFinite() && panDeltaScreen.y.isFinite()) {
+            updated = updated.copy(
+                panScreenX = updated.panScreenX + panDeltaScreen.x,
+                panScreenY = updated.panScreenY + panDeltaScreen.y
+            )
+        }
+        return updated
+    }
+}
+
 data class SelectionBoxDragState(
     val startModel: Point2D,
     val currentModel: Point2D
@@ -81,9 +145,10 @@ data class SelectionBoxDragState(
 }
 
 /**
- * Pure 2D Technical CAD Viewport (Section 2 of Specification).
- * Renders grid, paper/model space sheets, wireframes with lineweights & linetypes,
- * hatch patterns, adaptive dimensions, selection windows, OSNAP markers, and the CAD crosshair.
+ * Pure 2D Technical CAD Viewport (Sections 5 & 14 of Specification).
+ * Accepts ONLY two-finger pinch-to-zoom and two-finger pan gestures on the drawing surface.
+ * All single-finger touches on the drawing surface are suppressed so the user never triggers
+ * accidental point picks, direct drawing, or selection drags with a palm or single finger.
  */
 @Composable
 fun CadViewportCanvas(
@@ -107,13 +172,17 @@ fun CadViewportCanvas(
     viewport: ViewportTransform,
     onViewportChanged: (ViewportTransform) -> Unit,
     onViewportSizeChanged: (widthPx: Float, heightPx: Float) -> Unit,
-    onDirectTapModelPoint: (Point2D) -> Unit,
-    onSelectionDragStart: (Point2D) -> Unit,
-    onSelectionDragUpdate: (Point2D) -> Unit,
-    onSelectionDragEnd: () -> Unit,
+    onGestureStateChanged: (ViewportGestureState) -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onDirectTapModelPoint: (Point2D) -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onSelectionDragStart: (Point2D) -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onSelectionDragUpdate: (Point2D) -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onSelectionDragEnd: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val layerMap = remember(layers) { layers.associateBy { it.name } }
+    val currentViewport by rememberUpdatedState(viewport)
+    val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
+    val currentOnGestureStateChanged by rememberUpdatedState(onGestureStateChanged)
 
     val textPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -128,45 +197,57 @@ fun CadViewportCanvas(
             .onSizeChanged { size ->
                 onViewportSizeChanged(size.width.toFloat(), size.height.toFloat())
             }
-            .pointerInput(viewport) {
-                detectTransformGestures { centroid, pan, zoom, _ ->
-                    var updated = viewport
-                    if (abs(zoom - 1f) > 0.005f) {
-                        updated = updated.zoomAroundScreenPoint(centroid, zoom)
-                    }
-                    if (pan != Offset.Zero) {
-                        updated = updated.copy(
-                            panScreenX = updated.panScreenX + pan.x,
-                            panScreenY = updated.panScreenY + pan.y
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var gestureState = ViewportGestureState.ONE_POINTER_SUPPRESSED
+                    currentOnGestureStateChanged(gestureState)
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val canceled = event.changes.any { it.isConsumed }
+                        val pressedChanges = event.changes.filter { it.pressed }
+                        val pointerCount = pressedChanges.size
+
+                        val nextState = ViewportGesturePolicy.resolveState(
+                            pressedPointerCount = pointerCount,
+                            isCancelled = canceled
                         )
-                    }
-                    onViewportChanged(updated)
+                        if (nextState != gestureState) {
+                            gestureState = nextState
+                            currentOnGestureStateChanged(gestureState)
+                        }
+
+                        if (gestureState == ViewportGestureState.TWO_POINTER_TRANSFORM) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            val updated = ViewportGesturePolicy.applyTwoFingerTransform(
+                                viewport = currentViewport,
+                                centroidScreen = centroid,
+                                panDeltaScreen = panChange,
+                                zoomFactor = zoomChange
+                            )
+                            if (updated != currentViewport) {
+                                currentOnViewportChanged(updated)
+                            }
+                            event.changes.forEach { change ->
+                                if (change.positionChanged()) {
+                                    change.consume()
+                                }
+                            }
+                        } else {
+                            // Suppress all 1-finger taps, drags, and long-presses on the sheet
+                            event.changes.forEach { change ->
+                                if (change.positionChanged()) {
+                                    change.consume()
+                                }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    currentOnGestureStateChanged(ViewportGestureState.IDLE)
                 }
-            }
-            .pointerInput(viewport) {
-                detectTapGestures(
-                    onTap = { tapOffset ->
-                        val modelPt = viewport.screenToModel(tapOffset)
-                        onDirectTapModelPoint(modelPt)
-                    }
-                )
-            }
-            .pointerInput(viewport) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        onSelectionDragStart(viewport.screenToModel(offset))
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        onSelectionDragUpdate(viewport.screenToModel(change.position))
-                    },
-                    onDragEnd = {
-                        onSelectionDragEnd()
-                    },
-                    onDragCancel = {
-                        onSelectionDragEnd()
-                    }
-                )
             }
             .testTag("cad_technical_viewport")
     ) {
@@ -188,11 +269,31 @@ fun CadViewportCanvas(
             }
             drawOriginAxes(viewport)
 
-            // 4. Stored Document Entities
+            // 4. Stored Document Entities (with Viewport-Bounds Culling + Overscan Margin)
+            val visibleModelRect = viewport.visibleModelBounds(
+                canvasWidthPx = size.width,
+                canvasHeightPx = size.height,
+                overscanPx = 72f
+            )
+            val cullToleranceModel = (48f / viewport.pixelsPerModelUnit.coerceAtLeast(0.05f)).toDouble()
+
             for (entity in entities) {
                 if (isolatedEntityIds != null && entity.id !in isolatedEntityIds) continue
                 val layer = layerMap[entity.layerName]
                 if (layer != null && (!layer.isVisible || layer.isFrozen)) continue
+
+                // Cull off-screen finite entities while keeping semi-infinite/infinite rays & xlines visible
+                if (entity !is CadEntity.RayEntity && entity !is CadEntity.XLineEntity) {
+                    val entityBounds = if (entity is CadEntity.BlockInsertEntity) {
+                        entity.boundingBox(blocks)
+                    } else {
+                        entity.boundingBox()
+                    }
+                    if (!visibleModelRect.intersects(entityBounds, tolerance = cullToleranceModel)) {
+                        continue
+                    }
+                }
+
                 val isSelected = entity.id in selectedEntityIds
 
                 drawCadEntity(
@@ -240,7 +341,7 @@ fun CadViewportCanvas(
                 )
             }
 
-            // 7. Window / Crossing Selection Box Overlay
+            // 7. Window / Crossing Selection Box Overlay (driven by cursor PICK PT corners)
             if (selectionBoxDrag != null) {
                 drawSelectionBoxOverlay(selectionBoxDrag, viewport)
             }

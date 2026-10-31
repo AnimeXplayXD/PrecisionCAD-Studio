@@ -282,8 +282,53 @@ sealed class CadEntity {
                 return sum
             }
 
-        override fun boundingBox(): BoundingBox2D =
-            BoundingBox2D.fromPoints(vertices.map { it.position })
+        override fun boundingBox(): BoundingBox2D {
+            if (vertices.isEmpty()) return BoundingBox2D(0.0, 0.0, 0.0, 0.0)
+            if (vertices.size == 1) {
+                val p = vertices.first().position
+                return BoundingBox2D(p.x, p.y, p.x, p.y)
+            }
+            val pts = vertices.map { it.position }.toMutableList()
+            val segCount = if (isClosed) vertices.size else vertices.size - 1
+            for (i in 0 until segCount) {
+                val v1 = vertices[i]
+                val v2 = vertices[(i + 1) % vertices.size]
+                if (abs(v1.bulge) >= 1e-6) {
+                    val chord = v1.position.distanceTo(v2.position)
+                    if (chord > 1e-9) {
+                        val sweepRad = 4.0 * kotlin.math.atan(v1.bulge)
+                        val sinHalf = sin(abs(sweepRad) * 0.5).coerceAtLeast(1e-8)
+                        val radius = abs(chord / (2.0 * sinHalf))
+                        val mid = v1.position.midpointTo(v2.position)
+                        val distMidToCenter = (chord * 0.25) * (1.0 / v1.bulge - v1.bulge)
+                        val chordAngleRad = atan2(v2.position.y - v1.position.y, v2.position.x - v1.position.x)
+                        val normalAngleRad = chordAngleRad + PI * 0.5
+                        val center = Point2D(
+                            mid.x + distMidToCenter * cos(normalAngleRad),
+                            mid.y + distMidToCenter * sin(normalAngleRad)
+                        )
+                        val startAngle = center.angleToDeg(v1.position)
+                        val sweepDeg = Math.toDegrees(sweepRad)
+                        val arc = ArcEntity(
+                            center = center,
+                            radius = radius,
+                            startAngleDeg = startAngle,
+                            sweepAngleDeg = sweepDeg
+                        )
+                        val arcBox = arc.boundingBox()
+                        pts.add(Point2D(arcBox.minX, arcBox.minY))
+                        pts.add(Point2D(arcBox.maxX, arcBox.maxY))
+                    }
+                }
+            }
+            val baseBox = BoundingBox2D.fromPoints(pts)
+            return if (globalWidth > 0.0) {
+                val hw = globalWidth * 0.5
+                BoundingBox2D(baseBox.minX - hw, baseBox.minY - hw, baseBox.maxX + hw, baseBox.maxY + hw)
+            } else {
+                baseBox
+            }
+        }
 
         override fun translate(dx: Double, dy: Double) = copy(
             vertices = vertices.map { it.copy(position = it.position.offset(dx, dy)) }
@@ -773,13 +818,22 @@ sealed class CadEntity {
     ) : CadEntity() {
         override val typeName: String get() = "MTEXT"
         override fun boundingBox(): BoundingBox2D {
-            val estWidth = (text.length * height * 0.65).coerceAtLeast(height)
-            return BoundingBox2D(
-                position.x,
-                position.y - height * 0.3,
-                position.x + estWidth,
-                position.y + height * 1.2
+            val lines = text.lines().ifEmpty { listOf(text) }
+            val maxChars = lines.maxOfOrNull { it.length } ?: text.length
+            val estWidth = (maxChars * height * 0.65).coerceAtLeast(height)
+            val totalHeight = (lines.size * height * 1.2).coerceAtLeast(height)
+            val localCorners = listOf(
+                Point2D(position.x, position.y - totalHeight * 0.8),
+                Point2D(position.x + estWidth, position.y - totalHeight * 0.8),
+                Point2D(position.x + estWidth, position.y + height * 0.4),
+                Point2D(position.x, position.y + height * 0.4)
             )
+            val rotatedCorners = if (abs(rotationDeg) > 1e-4) {
+                localCorners.map { it.rotateAround(position, rotationDeg) }
+            } else {
+                localCorners
+            }
+            return BoundingBox2D.fromPoints(rotatedCorners)
         }
         override fun translate(dx: Double, dy: Double) = copy(position = position.offset(dx, dy))
         override fun rotate(pivot: Point2D, angleDeg: Double) = copy(
@@ -821,9 +875,21 @@ sealed class CadEntity {
         val textHeight: Double = 3.0
     ) : CadEntity() {
         override val typeName: String get() = "MLEADER"
-        override fun boundingBox(): BoundingBox2D = BoundingBox2D.fromPoints(
-            listOf(arrowTip, shoulderPoint, landingEnd, landingEnd.offset(text.length * textHeight * 0.6, textHeight))
-        )
+        override fun boundingBox(): BoundingBox2D {
+            val shelfMidX = (shoulderPoint.x + landingEnd.x) * 0.5
+            val halfTextW = (text.length * textHeight * 0.36).coerceAtLeast(textHeight)
+            val topY = max(shoulderPoint.y, landingEnd.y) + textHeight * 1.4
+            val botY = min(shoulderPoint.y, landingEnd.y) - textHeight * 0.4
+            return BoundingBox2D.fromPoints(
+                listOf(
+                    arrowTip,
+                    shoulderPoint,
+                    landingEnd,
+                    Point2D(shelfMidX - halfTextW, botY),
+                    Point2D(shelfMidX + halfTextW, topY)
+                )
+            )
+        }
         override fun translate(dx: Double, dy: Double) = copy(
             arrowTip = arrowTip.offset(dx, dy),
             shoulderPoint = shoulderPoint.offset(dx, dy),
@@ -914,6 +980,20 @@ sealed class CadEntity {
             insertionPoint.x + 10.0 * scaleFactor,
             insertionPoint.y + 10.0 * scaleFactor
         )
+
+        fun boundingBox(blocks: Map<String, BlockDefinition>): BoundingBox2D {
+            val def = blocks[blockName] ?: return boundingBox()
+            if (def.entities.isEmpty()) return boundingBox()
+            val transformedBoxes = def.entities.map { child ->
+                child
+                    .translate(-def.basePoint.x, -def.basePoint.y)
+                    .scale(Point2D(0.0, 0.0), scaleFactor)
+                    .rotate(Point2D(0.0, 0.0), rotationDeg)
+                    .translate(insertionPoint.x, insertionPoint.y)
+                    .boundingBox()
+            }
+            return transformedBoxes.reduce { a, b -> a.union(b) }
+        }
         override fun translate(dx: Double, dy: Double) = copy(insertionPoint = insertionPoint.offset(dx, dy))
         override fun rotate(pivot: Point2D, angleDeg: Double) = copy(
             insertionPoint = insertionPoint.rotateAround(pivot, angleDeg),
@@ -996,8 +1076,88 @@ sealed class CadEntity {
             return if (toleranceText.isNotBlank()) "$withPrefix ($toleranceText)" else withPrefix
         }
 
-        override fun boundingBox(): BoundingBox2D =
-            BoundingBox2D.fromPoints(listOfNotNull(anchor1, anchor2, dimensionLinePoint, angularVertex))
+        override fun boundingBox(): BoundingBox2D {
+            val pts = mutableListOf(anchor1, anchor2, dimensionLinePoint)
+            angularVertex?.let { pts.add(it) }
+            val estCharCount = (textOverride?.length ?: 8) + customPrefix.length + toleranceText.length
+            val estTextHalfW = (estCharCount * 1.35).coerceIn(4.0, 22.0)
+            val estTextPadH = 4.0
+
+            when (dimensionType) {
+                DimensionType.LINEAR_HORIZONTAL -> {
+                    val x1 = min(anchor1.x, anchor2.x)
+                    val x2 = max(anchor1.x, anchor2.x)
+                    val dimY = dimensionLinePoint.y
+                    val overshoot = if (dimY >= max(anchor1.y, anchor2.y)) 2.5 else -2.5
+                    pts.add(Point2D(x1, dimY + overshoot))
+                    pts.add(Point2D(x2, dimY + overshoot))
+                    val midX = (x1 + x2) * 0.5
+                    pts.add(Point2D(midX - estTextHalfW, dimY - estTextPadH))
+                    pts.add(Point2D(midX + estTextHalfW, dimY + estTextPadH))
+                }
+                DimensionType.LINEAR_VERTICAL -> {
+                    val y1 = min(anchor1.y, anchor2.y)
+                    val y2 = max(anchor1.y, anchor2.y)
+                    val dimX = dimensionLinePoint.x
+                    val overshoot = if (dimX >= max(anchor1.x, anchor2.x)) 2.5 else -2.5
+                    pts.add(Point2D(dimX + overshoot, y1))
+                    pts.add(Point2D(dimX + overshoot, y2))
+                    val midY = (y1 + y2) * 0.5
+                    pts.add(Point2D(dimX - estTextPadH, midY - estTextHalfW))
+                    pts.add(Point2D(dimX + estTextPadH, midY + estTextHalfW))
+                }
+                DimensionType.RADIUS, DimensionType.DIAMETER -> {
+                    val center = anchor1
+                    val radiusModel = center.distanceTo(anchor2).coerceAtLeast(0.5)
+                    val rayAngleDeg = if (center.distanceTo(anchor2) > 1e-4) {
+                        center.angleToDeg(anchor2)
+                    } else {
+                        center.angleToDeg(dimensionLinePoint)
+                    }
+                    val rimContact = center.polarOffset(radiusModel, rayAngleDeg)
+                    pts.add(rimContact)
+                    if (dimensionType == DimensionType.DIAMETER) {
+                        pts.add(center.polarOffset(radiusModel, rayAngleDeg + 180.0))
+                    }
+                    val shoulderDist = max(radiusModel + 6.0, center.distanceTo(dimensionLinePoint))
+                    val shoulderPt = center.polarOffset(shoulderDist, rayAngleDeg)
+                    val shelfDir = if (cos(Math.toRadians(rayAngleDeg)) >= -0.05) 1.0 else -1.0
+                    val shelfLen = (estTextHalfW * 2.1).coerceAtLeast(8.0)
+                    val landingEndPt = shoulderPt.offset(shelfDir * shelfLen, 0.0)
+                    pts.add(shoulderPt)
+                    pts.add(landingEndPt)
+                    pts.add(Point2D(min(shoulderPt.x, landingEndPt.x) - 2.0, shoulderPt.y - 2.0))
+                    pts.add(Point2D(max(shoulderPt.x, landingEndPt.x) + 2.0, shoulderPt.y + estTextPadH * 1.4))
+                }
+                DimensionType.ANGULAR -> {
+                    val v = angularVertex ?: anchor1
+                    val r = max(v.distanceTo(dimensionLinePoint), max(v.distanceTo(anchor1), v.distanceTo(anchor2)) * 0.65)
+                    val a1 = v.angleToDeg(anchor1)
+                    val a2 = v.angleToDeg(anchor2)
+                    var sweep = ((a2 - a1) + 360.0) % 360.0
+                    val startAng = if (sweep > 180.0) {
+                        sweep = 360.0 - sweep
+                        a2
+                    } else a1
+                    val arc = ArcEntity(center = v, radius = r + 3.0, startAngleDeg = startAng, sweepAngleDeg = sweep)
+                    val ab = arc.boundingBox()
+                    pts.add(Point2D(ab.minX, ab.minY))
+                    pts.add(Point2D(ab.maxX, ab.maxY))
+                }
+                else -> {
+                    val mid = anchor1.midpointTo(anchor2)
+                    val offX = dimensionLinePoint.x - mid.x
+                    val offY = dimensionLinePoint.y - mid.y
+                    val d1 = anchor1.offset(offX, offY)
+                    val d2 = anchor2.offset(offX, offY)
+                    pts.add(d1)
+                    pts.add(d2)
+                    pts.add(Point2D(dimensionLinePoint.x - estTextHalfW, dimensionLinePoint.y - estTextPadH))
+                    pts.add(Point2D(dimensionLinePoint.x + estTextHalfW, dimensionLinePoint.y + estTextPadH))
+                }
+            }
+            return BoundingBox2D.fromPoints(pts)
+        }
 
         override fun translate(dx: Double, dy: Double) = copy(
             anchor1 = anchor1.offset(dx, dy),

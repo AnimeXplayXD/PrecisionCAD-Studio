@@ -19,7 +19,9 @@ import com.example.cad.io.DxfDocumentPayload
 import com.example.cad.kernel.CadGeometryKernel
 import com.example.cad.kernel.CadModificationEngine
 import com.example.cad.kernel.CadSnapAndCoordEngine
+import com.example.cad.kernel.FitDrawingPolicy
 import com.example.cad.kernel.SnapCandidate
+import com.example.cad.kernel.UsableViewportRect
 import com.example.cad.kernel.ViewportTransform
 import com.example.cad.model.BlockDefinition
 import com.example.cad.model.BoundingBox2D
@@ -31,7 +33,6 @@ import com.example.cad.model.CadLineType
 import com.example.cad.model.CadUnit
 import com.example.cad.model.ConstraintType
 import com.example.cad.model.CursorControllerConfig
-import com.example.cad.model.DimensionHierarchyTier
 import com.example.cad.model.DimensionType
 import com.example.cad.model.GeometricConstraintRecord
 import com.example.cad.model.GridAndSnapConfig
@@ -43,7 +44,11 @@ import com.example.cad.model.SheetSetupConfig
 import com.example.cad.model.UnitChangeMode
 import com.example.cad.model.VirtualControllerMode
 import com.example.cad.model.WorkspaceSpace
+import com.example.ui.components.ControllerDockState
 import com.example.ui.components.SelectionBoxDragState
+import com.example.ui.components.ViewportGestureState
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -55,6 +60,36 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
+
+enum class ToolDrawerState {
+    COLLAPSED,
+    EXPANDED
+}
+
+sealed interface CommandPanelState {
+    data object Hidden : CommandPanelState
+    data class Editing(val query: String) : CommandPanelState
+    data class Running(
+        val command: CadCommandId,
+        val prompt: String,
+        val stepIndex: Int
+    ) : CommandPanelState
+}
+
+enum class NotificationCategory {
+    INFO,
+    SUCCESS,
+    WARNING,
+    ERROR
+}
+
+data class TransientNotification(
+    val id: String = UUID.randomUUID().toString(),
+    val message: String,
+    val category: NotificationCategory = NotificationCategory.INFO,
+    val isPersistentError: Boolean = false,
+    val timestampMs: Long = System.currentTimeMillis()
+)
 
 data class DocumentSnapshot(
     val entities: List<CadEntity>,
@@ -78,21 +113,38 @@ data class CadWorkspaceUiState(
     val dimensionStyle: DimensionStyleConfig = DimensionStyleConfig(),
     val gridSnapConfig: GridAndSnapConfig = GridAndSnapConfig(),
     val controllerConfig: CursorControllerConfig = CursorControllerConfig(),
+    val toolDrawerState: ToolDrawerState = ToolDrawerState.COLLAPSED,
+    val commandPanelState: CommandPanelState = CommandPanelState.Hidden,
+    val controllerDockState: ControllerDockState = ControllerDockState.EXPANDED_CONTROLLER,
+    val viewportGestureState: ViewportGestureState = ViewportGestureState.IDLE,
     val activeCategory: CadCommandCategory = CadCommandCategory.DRAW,
     val activeCommand: CadCommandId = CadCommandId.SELECT,
     val commandSubOption: String = "Default",
     val commandParameterValue: Double = 5.0,
     val commandStepPoints: List<Point2D> = emptyList(),
-    val commandPromptBanner: String = "READY • Select objects or invoke a CAD command",
+    val commandPromptBanner: String = "READY • Use controller PICK PT, CMD, or + Launcher",
+    val activeNotification: TransientNotification? = null,
+    val notificationQueue: List<TransientNotification> = emptyList(),
     val commandHistoryLog: List<String> = listOf(
         "PrecisionCAD Studio initialized (2D Technical Viewport).",
         "Loaded template: CNC 6-Hole Mounting Plate (120 × 80 mm)."
+    ),
+    val recentCommands: List<CadCommandId> = listOf(
+        CadCommandId.LINE,
+        CadCommandId.POLYLINE,
+        CadCommandId.CIRCLE,
+        CadCommandId.RECTANGLE,
+        CadCommandId.FILLET,
+        CadCommandId.TRIM,
+        CadCommandId.QDIM,
+        CadCommandId.MEASURE
     ),
     val layers: List<CadLayer> = CadLayer.defaultLayers(),
     val activeLayerName: String = "0",
     val entities: List<CadEntity> = emptyList(),
     val blocks: Map<String, BlockDefinition> = emptyMap(),
     val selectedEntityIds: Set<String> = emptySet(),
+    val previousSelectedEntityIds: Set<String> = emptySet(),
     val isolatedEntityIds: Set<String>? = null,
     val rawCursorModelPos: Point2D = Point2D(60.0, 40.0),
     val snappedCursorModelPos: Point2D = Point2D(60.0, 40.0),
@@ -101,6 +153,8 @@ data class CadWorkspaceUiState(
     val viewport: ViewportTransform = ViewportTransform(),
     val viewportWidthPx: Float = 800f,
     val viewportHeightPx: Float = 600f,
+    val usableViewportRect: UsableViewportRect = UsableViewportRect(0f, 0f, 800f, 600f),
+    val fitDrawingPolicy: FitDrawingPolicy = FitDrawingPolicy.ALL_VISIBLE,
     val isQuickDimensionEnabled: Boolean = false,
     val qdimDensity: QDimDensityPolicy = QDimDensityPolicy.BALANCED,
     val qdimArrangementPreference: DimensionArrangementPreference = DimensionArrangementPreference.AUTO_CHAIN,
@@ -128,6 +182,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     private val undoStack = ArrayDeque<DocumentSnapshot>()
     private val redoStack = ArrayDeque<DocumentSnapshot>()
+    private var notificationDismissJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -167,6 +222,80 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
     }
 
+    // --- Transient Notification System (Section 4) ---
+
+    fun emitTransientNotification(
+        message: String,
+        category: NotificationCategory = NotificationCategory.INFO,
+        isPersistentError: Boolean = false
+    ) {
+        val current = _uiState.value
+        val active = current.activeNotification
+        // Coalesce identical consecutive messages
+        if (active != null && active.message == message) {
+            val refreshed = active.copy(timestampMs = System.currentTimeMillis(), isPersistentError = isPersistentError)
+            _uiState.update { it.copy(activeNotification = refreshed) }
+            scheduleNotificationAutoDismiss(refreshed)
+            return
+        }
+
+        val incoming = TransientNotification(
+            message = message,
+            category = category,
+            isPersistentError = isPersistentError
+        )
+        if (active == null) {
+            _uiState.update { it.copy(activeNotification = incoming) }
+            scheduleNotificationAutoDismiss(incoming)
+        } else if (!active.isPersistentError) {
+            // Immediately replace standard transient notice so the latest CAD operation feedback is snappy
+            _uiState.update {
+                it.copy(
+                    activeNotification = incoming,
+                    notificationQueue = it.notificationQueue.filterNot { q -> q.message == message }.takeLast(2)
+                )
+            }
+            scheduleNotificationAutoDismiss(incoming)
+        } else {
+            // Queue behind persistent error (bounded to max 3 queued items)
+            _uiState.update {
+                val nextQ = (it.notificationQueue.filterNot { q -> q.message == message } + incoming).takeLast(3)
+                it.copy(notificationQueue = nextQ)
+            }
+        }
+    }
+
+    private fun scheduleNotificationAutoDismiss(notification: TransientNotification) {
+        notificationDismissJob?.cancel()
+        if (notification.isPersistentError) return
+        notificationDismissJob = viewModelScope.launch {
+            delay(2500L)
+            advanceNotificationQueue()
+        }
+    }
+
+    fun dismissNotification() {
+        notificationDismissJob?.cancel()
+        advanceNotificationQueue()
+    }
+
+    private fun advanceNotificationQueue() {
+        val st = _uiState.value
+        val next = st.notificationQueue.firstOrNull()
+        val remaining = if (st.notificationQueue.isNotEmpty()) st.notificationQueue.drop(1) else emptyList()
+        _uiState.update {
+            it.copy(
+                activeNotification = next,
+                notificationQueue = remaining
+            )
+        }
+        if (next != null) {
+            scheduleNotificationAutoDismiss(next)
+        }
+    }
+
+    // --- Undo / Redo ---
+
     private fun recordUndoSnapshot() {
         val st = _uiState.value
         undoStack.addLast(
@@ -200,6 +329,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             )
         )
         val prev = undoStack.removeLast()
+        val msg = "UNDO • Restored previous document state (${prev.entities.size} entities)"
         _uiState.update {
             it.copy(
                 entities = prev.entities,
@@ -211,9 +341,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 isQuickDimensionEnabled = prev.isQuickDimensionEnabled,
                 canUndo = undoStack.isNotEmpty(),
                 canRedo = redoStack.isNotEmpty(),
-                commandPromptBanner = "UNDO • Restored previous document state (${prev.entities.size} entities)"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     fun redo() {
@@ -231,6 +362,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             )
         )
         val next = redoStack.removeLast()
+        val msg = "REDO • Restored state (${next.entities.size} entities)"
         _uiState.update {
             it.copy(
                 entities = next.entities,
@@ -242,12 +374,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 isQuickDimensionEnabled = next.isQuickDimensionEnabled,
                 canUndo = undoStack.isNotEmpty(),
                 canRedo = redoStack.isNotEmpty(),
-                commandPromptBanner = "REDO • Restored state (${next.entities.size} entities)"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
-    // --- Cursor Controller & Coordinate Input ---
+    // --- Cursor Controller, Automatic Boundary Tracking (Section 17) & Coordinate Input ---
 
     fun moveCursorByDelta(dxModel: Double, dyModel: Double) {
         val st = _uiState.value
@@ -266,11 +399,21 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             x = base.x + dxDisplayUnits * displayToStorage,
             y = base.y + dyDisplayUnits * displayToStorage
         )
+        val refPt = st.commandStepPoints.lastOrNull()
+        val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+            cursorModelPos = target,
+            usableRect = st.usableViewportRect,
+            referencePoint = refPt,
+            minSafeMarginPx = 32f
+        )
+        val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = target)
         _uiState.update {
             it.copy(
                 rawCursorModelPos = target,
                 snappedCursorModelPos = target,
-                activeSnapCandidate = null
+                activeSnapCandidate = null,
+                viewport = trackedViewport,
+                selectionBoxDrag = updatedSelectionBox
             )
         }
     }
@@ -285,11 +428,21 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             snapConfig = st.gridSnapConfig,
             viewport = st.viewport
         )
+        // Section 17: Automatically pan/adjust viewport so the cursor never disappears off-screen
+        val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+            cursorModelPos = snapped,
+            usableRect = st.usableViewportRect,
+            referencePoint = refPt,
+            minSafeMarginPx = 32f
+        )
+        val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = snapped)
         _uiState.update {
             it.copy(
                 rawCursorModelPos = newRawModel,
                 snappedCursorModelPos = snapped,
-                activeSnapCandidate = candidate
+                activeSnapCandidate = candidate,
+                viewport = trackedViewport,
+                selectionBoxDrag = updatedSelectionBox
             )
         }
     }
@@ -306,14 +459,79 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    fun toggleControllerCollapse() {
+    fun setControllerDockState(dockState: ControllerDockState) {
+        val collapsed = dockState == ControllerDockState.COMPACT_DOCK
         _uiState.update {
-            it.copy(controllerConfig = it.controllerConfig.copy(isCollapsed = !it.controllerConfig.isCollapsed))
+            it.copy(
+                controllerDockState = dockState,
+                controllerConfig = it.controllerConfig.copy(isCollapsed = collapsed)
+            )
+        }
+    }
+
+    fun toggleControllerCollapse() {
+        val nextCollapsed = !_uiState.value.controllerConfig.isCollapsed
+        setControllerDockState(
+            if (nextCollapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+        )
+    }
+
+    fun setToolDrawerState(state: ToolDrawerState) {
+        _uiState.update { it.copy(toolDrawerState = state) }
+    }
+
+    fun toggleToolDrawer() {
+        _uiState.update {
+            val next = if (it.toolDrawerState == ToolDrawerState.COLLAPSED) {
+                ToolDrawerState.EXPANDED
+            } else {
+                ToolDrawerState.COLLAPSED
+            }
+            it.copy(toolDrawerState = next)
+        }
+    }
+
+    fun onViewportGestureStateChanged(state: ViewportGestureState) {
+        _uiState.update { it.copy(viewportGestureState = state) }
+    }
+
+    // --- Contextual Command Line State (Section 14.4) ---
+
+    fun openCommandLineEditing(initialQuery: String = "") {
+        _uiState.update {
+            it.copy(commandPanelState = CommandPanelState.Editing(initialQuery))
+        }
+    }
+
+    fun updateCommandInputQuery(query: String) {
+        _uiState.update {
+            it.copy(commandPanelState = CommandPanelState.Editing(query))
+        }
+    }
+
+    fun closeCommandLineEditing() {
+        _uiState.update { st ->
+            val nextPanelState = if (st.activeCommand == CadCommandId.SELECT && st.commandStepPoints.isEmpty()) {
+                CommandPanelState.Hidden
+            } else {
+                CommandPanelState.Running(
+                    command = st.activeCommand,
+                    prompt = st.commandPromptBanner,
+                    stepIndex = st.commandStepPoints.size
+                )
+            }
+            st.copy(commandPanelState = nextPanelState)
         }
     }
 
     fun updateControllerConfig(newConfig: CursorControllerConfig) {
-        _uiState.update { it.copy(controllerConfig = newConfig) }
+        val dockState = if (newConfig.isCollapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+        _uiState.update {
+            it.copy(
+                controllerConfig = newConfig,
+                controllerDockState = dockState
+            )
+        }
     }
 
     fun updateGridSnapConfig(newConfig: GridAndSnapConfig) {
@@ -350,16 +568,22 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun toggleWorkspaceSpace() {
+        val next = if (_uiState.value.workspaceSpace == WorkspaceSpace.MODEL_SPACE) {
+            WorkspaceSpace.PAPER_SPACE
+        } else {
+            WorkspaceSpace.MODEL_SPACE
+        }
+        val msg = "WORKSPACE • Switched to ${next.label}"
         _uiState.update {
-            val next = if (it.workspaceSpace == WorkspaceSpace.MODEL_SPACE) WorkspaceSpace.PAPER_SPACE else WorkspaceSpace.MODEL_SPACE
             it.copy(
                 workspaceSpace = next,
-                commandPromptBanner = "Switched to ${next.label}"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
-    // --- Viewport & Orientation Sizing ---
+    // --- Viewport, Usable Rect Rebasing & Fit Drawing (Section 5 & Section 6) ---
 
     fun updateViewport(newViewport: ViewportTransform) {
         _uiState.update { it.copy(viewport = newViewport) }
@@ -368,29 +592,118 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     fun updateViewportDimensions(widthPx: Float, heightPx: Float) {
         val prev = _uiState.value
         val isInitialResize = abs(prev.viewportWidthPx - 800f) < 1f && abs(prev.viewportHeightPx - 600f) < 1f
-        _uiState.update { it.copy(viewportWidthPx = widthPx, viewportHeightPx = heightPx) }
-        if (isInitialResize && prev.entities.isNotEmpty()) {
-            zoomExtents()
+        val fallbackRect = if (prev.usableViewportRect.widthPx == 800f && prev.usableViewportRect.heightPx == 600f) {
+            UsableViewportRect(0f, 0f, widthPx, heightPx)
+        } else {
+            prev.usableViewportRect
         }
+        _uiState.update {
+            it.copy(
+                viewportWidthPx = widthPx,
+                viewportHeightPx = heightPx,
+                usableViewportRect = fallbackRect
+            )
+        }
+        if (isInitialResize && prev.entities.isNotEmpty()) {
+            fitDrawing()
+        }
+    }
+
+    fun updateUsableViewportRect(newRect: UsableViewportRect) {
+        if (newRect.widthPx <= 1f || newRect.heightPx <= 1f) return
+        val prev = _uiState.value
+        val wasDefault = abs(prev.usableViewportRect.widthPx - 800f) < 1f && abs(prev.usableViewportRect.heightPx - 600f) < 1f
+        if (wasDefault) {
+            _uiState.update { it.copy(usableViewportRect = newRect) }
+            if (prev.entities.isNotEmpty()) {
+                fitDrawing(notify = false)
+            }
+        } else {
+            val rebased = prev.viewport.rebaseForUsableRectChange(prev.usableViewportRect, newRect)
+            _uiState.update {
+                it.copy(
+                    usableViewportRect = newRect,
+                    viewport = rebased
+                )
+            }
+        }
+    }
+
+    fun setFitDrawingPolicy(policy: FitDrawingPolicy) {
+        _uiState.update { it.copy(fitDrawingPolicy = policy) }
+        fitDrawing(policy = policy, notify = true)
+    }
+
+    fun fitDrawing(
+        policy: FitDrawingPolicy = _uiState.value.fitDrawingPolicy,
+        notify: Boolean = true
+    ) {
+        val st = _uiState.value
+        val visibleLayers = st.layers.filter { it.isVisible && !it.isFrozen }.map { it.name }.toSet()
+        val baseVisible = st.entities
+            .filter { it.layerName in visibleLayers }
+            .filter { st.isolatedEntityIds == null || it.id in st.isolatedEntityIds }
+
+        var fallbackNote = ""
+        val targetEntities = when (policy) {
+            FitDrawingPolicy.SELECTED_ONLY -> {
+                val sel = baseVisible.filter { it.id in st.selectedEntityIds }
+                if (sel.isEmpty()) {
+                    fallbackNote = " (no selection; fitted all visible)"
+                    baseVisible
+                } else {
+                    sel
+                }
+            }
+            FitDrawingPolicy.GEOMETRY_ONLY -> {
+                val geo = baseVisible.filterNot {
+                    it is CadEntity.DimensionEntity || it is CadEntity.LeaderEntity || it is CadEntity.TextEntity
+                }
+                geo.ifEmpty { baseVisible }
+            }
+            FitDrawingPolicy.ALL_VISIBLE -> baseVisible
+        }
+
+        if (targetEntities.isEmpty()) {
+            val resetBounds = BoundingBox2D(0.0, 0.0, 120.0, 80.0)
+            val resetVp = st.viewport.fitToUsableViewport(resetBounds, st.usableViewportRect, marginPx = 28f)
+            val msg = "FIT DRAWING • Empty sheet — reset to default view"
+            _uiState.update {
+                it.copy(
+                    viewport = resetVp,
+                    fitDrawingPolicy = policy,
+                    commandPromptBanner = msg
+                )
+            }
+            if (notify) emitTransientNotification(msg, NotificationCategory.INFO)
+            return
+        }
+
+        val combinedBounds = targetEntities.map { ent ->
+            if (ent is CadEntity.BlockInsertEntity) ent.boundingBox(st.blocks) else ent.boundingBox()
+        }.reduce { a, b -> a.union(b) }
+
+        val fittedViewport = st.viewport.fitToUsableViewport(
+            bounds = combinedBounds,
+            usableRect = st.usableViewportRect,
+            marginPx = 28f
+        )
+        val msg = "FIT DRAWING • Fitted ${targetEntities.size} visible entities$fallbackNote"
+        _uiState.update {
+            it.copy(
+                viewport = fittedViewport,
+                fitDrawingPolicy = policy,
+                commandPromptBanner = msg
+            )
+        }
+        if (notify) emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun zoomExtents() {
-        val st = _uiState.value
-        val bounds = if (st.entities.isEmpty()) {
-            BoundingBox2D(0.0, 0.0, 150.0, 100.0)
-        } else {
-            st.entities.map { it.boundingBox() }.reduce { a, b -> a.union(b) }
-        }
-        val fitted = st.viewport.fitToBounds(bounds, st.viewportWidthPx, st.viewportHeightPx)
-        _uiState.update {
-            it.copy(
-                viewport = fitted,
-                commandPromptBanner = "ZOOM EXTENTS • Fitted ${st.entities.size} entities to viewport"
-            )
-        }
+        fitDrawing(policy = _uiState.value.fitDrawingPolicy, notify = true)
     }
 
-    // --- Units & Sheet Configuration (Section 3.1–3.4) ---
+    // --- Units & Sheet Configuration ---
 
     fun applyUnitsAndPrecision(
         targetUnit: CadUnit,
@@ -408,23 +721,24 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             .apply()
 
         if (mode == UnitChangeMode.CONVERT_DISPLAY_UNITS) {
-            // Mode A: Physical geometry remains unchanged; display unit and selected mode persist
             recordUndoSnapshot()
+            val msg = "UNITS (Option A Active) • Display unit set to ${targetUnit.symbol} (physical geometry preserved)"
             _uiState.update {
                 it.copy(
                     displayUnit = targetUnit,
                     unitChangeMode = mode,
                     precision = newPrecision,
-                    commandPromptBanner = "UNITS (Option A Active) • Display unit set to ${targetUnit.symbol} (physical geometry preserved)"
+                    commandPromptBanner = msg
                 )
             }
+            emitTransientNotification(msg, NotificationCategory.SUCCESS)
         } else {
-            // Mode B: Rescale stored model-space coordinates by conversion factor and persist mode
             recordUndoSnapshot()
             val scaleFactor = st.storageUnit.toMillimetersFactor / targetUnit.toMillimetersFactor
             val origin = Point2D(0.0, 0.0)
             val rescaledEntities = st.entities.map { it.scale(origin, scaleFactor) }
             val rescaledCursor = st.snappedCursorModelPos.scaleFrom(origin, scaleFactor)
+            val msg = "UNITS (Option B Active) • Rescaled model coordinates by ${String.format(Locale.US, "%.4f", scaleFactor)} to ${targetUnit.symbol}"
             _uiState.update {
                 it.copy(
                     storageUnit = targetUnit,
@@ -434,10 +748,11 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     entities = rescaledEntities,
                     rawCursorModelPos = rescaledCursor,
                     snappedCursorModelPos = rescaledCursor,
-                    commandPromptBanner = "UNITS (Option B Active) • Rescaled model coordinates by ${String.format(Locale.US, "%.4f", scaleFactor)} to ${targetUnit.symbol}"
+                    commandPromptBanner = msg
                 )
             }
-            zoomExtents()
+            fitDrawing(notify = false)
+            emitTransientNotification(msg, NotificationCategory.SUCCESS)
         }
     }
 
@@ -445,6 +760,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val prev = _uiState.value
         val isNewSheetPage = prev.sheetSetup.preset != newSetup.preset ||
             prev.sheetSetup.titleBlockDrawingNo != newSetup.titleBlockDrawingNo
+        val msg = "PAGESETUP • Sheet updated to ${newSetup.preset.label} (${newSetup.orientation.label}, Scale ${newSetup.scaleLabel})"
         _uiState.update {
             val cleanedEntities = if (isNewSheetPage) {
                 AutoDimensionEngine.removeAutoDimensions(it.entities)
@@ -456,9 +772,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 entities = cleanedEntities,
                 isQuickDimensionEnabled = if (isNewSheetPage) false else it.isQuickDimensionEnabled,
                 dimensionStyle = it.dimensionStyle.copy(standard = newSetup.draftingStandard),
-                commandPromptBanner = "PAGESETUP • Sheet updated to ${newSetup.preset.label} (${newSetup.orientation.label}, Scale ${newSetup.scaleLabel})"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     // --- Quick Dimension (QDIM) Toggle, Refresh & Execution ---
@@ -479,14 +796,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         } else {
             recordUndoSnapshot()
             val withoutAutoDims = AutoDimensionEngine.removeAutoDimensions(st.entities)
+            val msg = "QDIM (OFF) • Quick Dimension & Alignment disabled (manual dimensions preserved)"
             _uiState.update {
                 it.copy(
                     entities = withoutAutoDims,
                     isQuickDimensionEnabled = false,
                     lastAlignmentReport = null,
-                    commandPromptBanner = "QDIM (OFF) • Quick Dimension & Alignment disabled (manual dimensions preserved)"
+                    commandPromptBanner = msg
                 )
             }
+            emitTransientNotification(msg, NotificationCategory.INFO)
         }
     }
 
@@ -498,12 +817,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             replaceAutoDims = true,
             arrangementPreference = st.qdimArrangementPreference
         )
+        val msg = "QDIM REFRESH (${st.qdimArrangementPreference.label}) • Refreshed quick alignment & dimensions for all sheet structures"
         _uiState.update {
             it.copy(
                 isQuickDimensionEnabled = true,
-                commandPromptBanner = "QDIM REFRESH (${st.qdimArrangementPreference.label}) • Refreshed quick alignment & dimensions for all sheet structures"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun setQDimDensity(density: QDimDensityPolicy) {
@@ -562,21 +883,24 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             viewport = st.viewport
         )
         val dimCount = updatedEntities.count { it is CadEntity.DimensionEntity }
+        val msg = "${mode.commandToken} (${density.label} • ${arrangementPreference.label} • ON) • Refreshed $dimCount associative dimensions"
         _uiState.update {
             it.copy(
                 activeCommand = CadCommandId.QDIM,
                 activeCategory = CadCommandId.QDIM.category,
+                commandPanelState = CommandPanelState.Running(CadCommandId.QDIM, msg, 0),
                 entities = updatedEntities,
                 isQuickDimensionEnabled = true,
                 qdimDensity = density,
                 qdimArrangementPreference = arrangementPreference,
                 lastAlignmentReport = alignmentReport,
-                commandPromptBanner = "${mode.commandToken} (${density.label} • ${arrangementPreference.label} • ON) • Refreshed $dimCount associative dimensions"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
-    // --- Command Selection & Execution State Machine ---
+    // --- Command Selection & Execution State Machine (Section 14) ---
 
     fun selectCategory(category: CadCommandCategory) {
         _uiState.update { it.copy(activeCategory = category) }
@@ -584,13 +908,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     fun activateCommand(command: CadCommandId, subOption: String = "Default") {
         val st = _uiState.value
+        val updatedRecents = (listOf(command) + st.recentCommands.filter { it != command }).take(8)
+
         when (command) {
             CadCommandId.UNDO_REDO -> {
                 undo()
                 return
             }
             CadCommandId.QDIM -> {
-                // Running the Quick Dimension command enables & refreshes Quick Dimension and activates QDIM in the function bar
                 executeQuickDimension(
                     mode = if (st.selectedEntityIds.isNotEmpty()) QDimOperatingMode.QDIM_SELECT else QDimOperatingMode.QDIM_ALL,
                     density = st.qdimDensity,
@@ -604,13 +929,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     recordUndoSnapshot()
                     val joined = CadModificationEngine.joinEntities(sel)
                     val remaining = st.entities.filterNot { it.id in st.selectedEntityIds } + joined
-                    _uiState.update {
-                        it.copy(
-                            entities = remaining,
-                            selectedEntityIds = joined.map { e -> e.id }.toSet(),
-                            commandPromptBanner = "JOIN • Merged ${sel.size} segments into ${joined.size} polyline/line"
-                        )
-                    }
+                    val msg = "JOIN • Merged ${sel.size} segments into ${joined.size} polyline/line"
+                    updateSelectionAndState(
+                        entities = remaining,
+                        nextSelection = joined.map { e -> e.id }.toSet(),
+                        banner = msg,
+                        returnToIdle = true
+                    )
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     return
                 }
             }
@@ -620,31 +946,38 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     recordUndoSnapshot()
                     val exploded = sel.flatMap { CadModificationEngine.explodeEntity(it, st.blocks) }
                     val remaining = st.entities.filterNot { it.id in st.selectedEntityIds } + exploded
-                    _uiState.update {
-                        it.copy(
-                            entities = remaining,
-                            selectedEntityIds = emptySet(),
-                            commandPromptBanner = "EXPLODE • Decomposed ${sel.size} compound objects into ${exploded.size} primitives"
-                        )
-                    }
+                    val msg = "EXPLODE • Decomposed ${sel.size} compound objects into ${exploded.size} primitives"
+                    updateSelectionAndState(
+                        entities = remaining,
+                        nextSelection = emptySet(),
+                        banner = msg,
+                        returnToIdle = true
+                    )
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     return
                 }
             }
             CadCommandId.ISOLATE -> {
                 if (st.isolatedEntityIds != null) {
+                    val msg = "UNISOLATE • Restored visibility of all entities"
                     _uiState.update {
                         it.copy(
                             isolatedEntityIds = null,
-                            commandPromptBanner = "UNISOLATE • Restored visibility of all entities"
+                            commandPromptBanner = msg
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.INFO)
                 } else if (st.selectedEntityIds.isNotEmpty()) {
+                    val msg = "ISOLATE • Isolated ${st.selectedEntityIds.size} selected objects"
                     _uiState.update {
                         it.copy(
                             isolatedEntityIds = st.selectedEntityIds,
-                            commandPromptBanner = "ISOLATE • Isolated ${st.selectedEntityIds.size} selected objects (tap Isolate again to restore)"
+                            commandPromptBanner = msg
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.INFO)
+                } else {
+                    emitTransientNotification("ISOLATE • Select entities first using SELECT command", NotificationCategory.WARNING)
                 }
                 return
             }
@@ -657,12 +990,15 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     } else {
                         CadModificationEngine.createRectangularArray(sel, rows = 2, cols = 3, rowSpacing = 25.0, colSpacing = 30.0)
                     }
+                    val msg = "ARRAY • Created ${generated.size} arrayed entities"
                     _uiState.update {
                         it.copy(
                             entities = it.entities + generated,
-                            commandPromptBanner = "ARRAY • Created ${generated.size} arrayed entities"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     return
                 }
             }
@@ -676,12 +1012,15 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                             ent.copy(isClosed = !ent.isClosed)
                         } else ent
                     }
+                    val msg = "PEDIT • Toggled closed state on ${selPolys.size} polylines"
                     _uiState.update {
                         it.copy(
                             entities = updated,
-                            commandPromptBanner = "PEDIT • Toggled closed state on ${selPolys.size} polylines"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     return
                 }
             }
@@ -698,23 +1037,49 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             else -> st.commandParameterValue
         }
 
+        val effectiveSubOption = if (command == CadCommandId.SELECT && subOption == "Default") "Single" else subOption
+        val prompt = promptForCommand(command, 0, effectiveSubOption)
         _uiState.update {
             it.copy(
+                activeCategory = command.category,
                 activeCommand = command,
-                commandSubOption = subOption,
+                commandSubOption = effectiveSubOption,
                 commandParameterValue = defaultParam,
                 commandStepPoints = emptyList(),
-                commandPromptBanner = promptForCommand(command, 0, subOption)
+                selectionBoxDrag = null,
+                commandPromptBanner = prompt,
+                commandPanelState = CommandPanelState.Running(command, prompt, 0),
+                recentCommands = updatedRecents
             )
         }
     }
 
     fun setCommandSubOption(subOption: String) {
         val st = _uiState.value
+        if (st.activeCommand == CadCommandId.SELECT) {
+            when (subOption) {
+                "SelectAll" -> {
+                    selectAllEntities()
+                    return
+                }
+                "Previous" -> {
+                    selectPreviousEntities()
+                    return
+                }
+                "Clear" -> {
+                    clearSelection()
+                    return
+                }
+            }
+        }
+        val prompt = promptForCommand(st.activeCommand, 0, subOption)
         _uiState.update {
             it.copy(
                 commandSubOption = subOption,
-                commandPromptBanner = promptForCommand(st.activeCommand, st.commandStepPoints.size, subOption)
+                commandStepPoints = emptyList(),
+                selectionBoxDrag = null,
+                commandPromptBanner = prompt,
+                commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, 0)
             )
         }
     }
@@ -729,24 +1094,28 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 CadCommandId.POLYGON -> "Sides=${coerced.toInt()}"
                 else -> "Val=${fmt(coerced)}"
             }
+            val prompt = "${st.activeCommand.commandName} ($paramLabel) • ${promptForCommand(st.activeCommand, st.commandStepPoints.size, st.commandSubOption)}"
             st.copy(
                 commandParameterValue = coerced,
-                commandPromptBanner = "${st.activeCommand.commandName} ($paramLabel) • ${promptForCommand(st.activeCommand, st.commandStepPoints.size, st.commandSubOption)}"
+                commandPromptBanner = prompt,
+                commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, st.commandStepPoints.size)
             )
         }
     }
 
     /**
-     * Triggered when user taps "PICK PT" on the Virtual Cursor Controller,
-     * submits a numeric coordinate, or taps directly in the viewport.
+     * Triggered when user taps "PICK PT" on the Virtual Cursor Controller or submits a numeric coordinate.
      */
     fun pickPointAtCursor() {
         handlePointPick(_uiState.value.snappedCursorModelPos)
     }
 
+    /**
+     * Section 14.1: Direct single-finger taps on the sheet are strictly forbidden from picking points or selecting entities.
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun handleDirectTapModelPoint(rawModelPt: Point2D) {
-        updateCursorPositionInternal(rawModelPt)
-        handlePointPick(_uiState.value.snappedCursorModelPos)
+        // Intentional no-op per Section 14.1 navigation-only sheet contract.
     }
 
     fun submitCommandOrCoordinateInput(rawText: String) {
@@ -756,10 +1125,22 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             return
         }
 
-        // 1. Check special keywords ("C" to close line/polyline, "U" to undo, "ALL" to select all, "QDIM ALL")
+        // 1. Check special keywords ("C" to close line/polyline, "ALL" to select all, "PREV" for previous selection, "QDIM ...")
         val upper = trimmed.uppercase()
-        if (upper == "ALL") {
+        if (upper == "ALL" || upper == "SELECT ALL" || upper == "SELALL") {
             selectAllEntities()
+            return
+        }
+        if (upper == "PREV" || upper == "PREVIOUS") {
+            selectPreviousEntities()
+            return
+        }
+        if (upper == "CLEAR" || upper == "DESELECT") {
+            clearSelection()
+            return
+        }
+        if (upper == "FIT" || upper == "ZOOM EXTENTS" || upper == "ZE") {
+            fitDrawing()
             return
         }
         if (upper.startsWith("QDIM")) {
@@ -790,13 +1171,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             return
         }
 
-        // 2. Check explicit radius/distance assignments like "R=5", "R 5", "R5", "D=5" or plain numeric parameter for FILLET/CHAMFER/OFFSET/POLYGON/DONUT/LENGTHEN
+        // 2. Check explicit radius/distance assignments like "R=5", "R 5", "R5", "D=5" or plain numeric parameter
         val st = _uiState.value
         val radiusMatch = Regex("""^(?:R|RADIUS|D|DIST)\s*[=:]?\s*([0-9]+(?:\.[0-9]+)?)$""", RegexOption.IGNORE_CASE).matchEntire(trimmed)
         if (radiusMatch != null) {
             val v = radiusMatch.groupValues[1].toDoubleOrNull()
             if (v != null) {
                 setCommandParameterValue(v)
+                emitTransientNotification("${st.activeCommand.commandName} • Parameter set to ${fmt(v)}", NotificationCategory.INFO)
                 return
             }
         }
@@ -807,10 +1189,11 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             )
         ) {
             setCommandParameterValue(plainNumber)
+            emitTransientNotification("${st.activeCommand.commandName} • Parameter set to ${fmt(plainNumber)}", NotificationCategory.INFO)
             return
         }
 
-        // 3. Check if input is a CAD Command Name or Alias (e.g. L, PL, C, REC, TR, F, CHA, O, M, CO, RO)
+        // 3. Check if input is a CAD Command Name or Alias
         val matchedCmd = CadCommandId.fromText(upper)
         if (matchedCmd != null) {
             activateCommand(matchedCmd)
@@ -835,14 +1218,27 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 parsedDisplayPt.x * displayToStorage,
                 parsedDisplayPt.y * displayToStorage
             )
+            // Section 17: Track viewport to keep coordinate-entered cursor visible
+            val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+                cursorModelPos = modelPt,
+                usableRect = st.usableViewportRect,
+                referencePoint = st.commandStepPoints.lastOrNull(),
+                minSafeMarginPx = 32f
+            )
             _uiState.update {
                 it.copy(
                     rawCursorModelPos = modelPt,
                     snappedCursorModelPos = modelPt,
-                    activeSnapCandidate = null
+                    activeSnapCandidate = null,
+                    viewport = trackedViewport
                 )
             }
             handlePointPick(modelPt)
+        } else {
+            emitTransientNotification(
+                "Unknown command or coordinate '$trimmed'",
+                NotificationCategory.WARNING
+            )
         }
     }
 
@@ -854,18 +1250,76 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
         when (cmd) {
             CadCommandId.SELECT -> {
-                val hit = findNearestSelectableEntity(pt)
-                val nextSel = if (hit != null) {
-                    if (hit.id in st.selectedEntityIds) st.selectedEntityIds - hit.id else st.selectedEntityIds + hit.id
-                } else {
-                    emptySet()
-                }
-                _uiState.update {
-                    it.copy(
-                        selectedEntityIds = nextSel,
-                        commandPromptBanner = if (nextSel.isEmpty()) "READY • 0 objects selected"
-                        else "SELECTED • ${nextSel.size} object(s) selected (${hit?.typeName ?: ""})"
-                    )
+                when (st.commandSubOption) {
+                    "Window", "Crossing" -> {
+                        val isCrossing = st.commandSubOption == "Crossing"
+                        if (pts.size == 1) {
+                            val prompt = "SELECT (${st.commandSubOption}) • Corner 1 set at (${fmt(pt.x)}, ${fmt(pt.y)}). Move cursor to opposite corner and tap PICK PT"
+                            _uiState.update {
+                                it.copy(
+                                    commandStepPoints = pts,
+                                    selectionBoxDrag = SelectionBoxDragState(
+                                        startModel = pt,
+                                        currentModel = pt
+                                    ),
+                                    commandPromptBanner = prompt,
+                                    commandPanelState = CommandPanelState.Running(cmd, prompt, 1)
+                                )
+                            }
+                        } else {
+                            val box = BoundingBox2D.fromPoints(listOf(pts[0], pts[1]))
+                            val frozenOrHiddenLayers = st.layers.filter { !it.isVisible || it.isFrozen }.map { it.name }.toSet()
+                            val matchedIds = st.entities
+                                .filter { it.layerName !in frozenOrHiddenLayers }
+                                .filter { st.isolatedEntityIds == null || it.id in st.isolatedEntityIds }
+                                .filter { CadGeometryKernel.isEntitySelectedByBox(it, box, isCrossingMode = isCrossing) }
+                                .map { it.id }
+                                .toSet()
+                            val modeLabel = if (isCrossing) "CROSSING SELECTION" else "WINDOW SELECTION"
+                            val msg = "$modeLabel • Selected ${matchedIds.size} object(s)"
+                            val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+                            _uiState.update {
+                                it.copy(
+                                    selectedEntityIds = matchedIds,
+                                    previousSelectedEntityIds = prevSel,
+                                    commandStepPoints = emptyList(),
+                                    selectionBoxDrag = null,
+                                    commandPromptBanner = msg,
+                                    commandPanelState = CommandPanelState.Running(cmd, msg, 0)
+                                )
+                            }
+                            emitTransientNotification(msg, NotificationCategory.INFO)
+                        }
+                    }
+                    else -> {
+                        val hit = findNearestSelectableEntity(pt)
+                        val nextSel = if (hit != null) {
+                            if (hit.id in st.selectedEntityIds) st.selectedEntityIds - hit.id else st.selectedEntityIds + hit.id
+                        } else {
+                            emptySet()
+                        }
+                        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+                        val msg = if (nextSel.isEmpty()) {
+                            "SELECT • 0 objects selected (move cursor over entity and tap PICK PT)"
+                        } else {
+                            "SELECTED • ${nextSel.size} object(s) selected (${hit?.typeName ?: ""})"
+                        }
+                        _uiState.update {
+                            it.copy(
+                                selectedEntityIds = nextSel,
+                                previousSelectedEntityIds = prevSel,
+                                commandPromptBanner = msg,
+                                commandPanelState = if (it.commandPanelState is CommandPanelState.Running) {
+                                    CommandPanelState.Running(cmd, msg, 0)
+                                } else {
+                                    it.commandPanelState
+                                }
+                            )
+                        }
+                        if (hit != null) {
+                            emitTransientNotification(msg, NotificationCategory.INFO)
+                        }
+                    }
                 }
             }
 
@@ -876,29 +1330,35 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     if (p1.distanceTo(p2) > 1e-4) {
                         recordUndoSnapshot()
                         val seg = CadEntity.LineEntity(layerName = layer, start = p1, end = p2)
+                        val prompt = "LINE • Segment added (${st.precision.formatLinear(seg.length, st.storageUnit, st.displayUnit)}). Pick next point, 'C' to close, or ✓ to finish"
                         _uiState.update {
                             it.copy(
                                 entities = it.entities + seg,
                                 commandStepPoints = pts,
-                                commandPromptBanner = "LINE • Segment added (${st.precision.formatLinear(seg.length, st.storageUnit, st.displayUnit)}). Pick next point, 'C' to close, or ✓ to finish"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                             )
                         }
                     }
                 } else {
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
                     _uiState.update {
                         it.copy(
                             commandStepPoints = pts,
-                            commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)
+                            commandPromptBanner = prompt,
+                            commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                         )
                     }
                 }
             }
 
             CadCommandId.POLYLINE, CadCommandId.SPLINE -> {
+                val prompt = "${cmd.commandName} • Vertex ${pts.size} added. Pick next point or tap ✓ (Enter) to complete"
                 _uiState.update {
                     it.copy(
                         commandStepPoints = pts,
-                        commandPromptBanner = "${cmd.commandName} • Vertex ${pts.size} added. Pick next point or tap ✓ (Enter) to complete"
+                        commandPromptBanner = prompt,
+                        commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                     )
                 }
             }
@@ -910,10 +1370,19 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         if (c != null) {
                             commitSingleEntity(c.copy(layerName = layer), "CIRCLE (3P) • Created R=${st.precision.formatLinear(c.radius, st.storageUnit, st.displayUnit)}")
                         } else {
-                            _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = "CIRCLE (3P) • Points are collinear; pick 3 non-collinear points") }
+                            val err = "CIRCLE (3P) • Points are collinear; pick 3 non-collinear points"
+                            _uiState.update {
+                                it.copy(
+                                    commandStepPoints = emptyList(),
+                                    commandPromptBanner = err,
+                                    commandPanelState = CommandPanelState.Running(cmd, err, 0)
+                                )
+                            }
+                            emitTransientNotification(err, NotificationCategory.WARNING)
                         }
                     } else {
-                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, "3P")) }
+                        val prompt = promptForCommand(cmd, pts.size, "3P")
+                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                     }
 
                     "2P" -> if (pts.size >= 2) {
@@ -923,7 +1392,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                             commitSingleEntity(CadEntity.CircleEntity(layerName = layer, center = center, radius = r), "CIRCLE (2P) • Created ⌀=${st.precision.formatLinear(r * 2, st.storageUnit, st.displayUnit)}")
                         }
                     } else {
-                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, "2P")) }
+                        val prompt = promptForCommand(cmd, pts.size, "2P")
+                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                     }
 
                     "TTR" -> if (pts.size >= 2) {
@@ -934,10 +1404,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         if (ttr != null) {
                             commitSingleEntity(ttr.copy(layerName = layer), "CIRCLE (TTR) • Created tangent circle R=$r")
                         } else {
-                            _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = "CIRCLE (TTR) • Pick two non-parallel lines") }
+                            val err = "CIRCLE (TTR) • Pick two non-parallel lines"
+                            _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = err, commandPanelState = CommandPanelState.Running(cmd, err, 0)) }
+                            emitTransientNotification(err, NotificationCategory.WARNING)
                         }
                     } else {
-                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "CIRCLE (TTR) • Pick second tangent line") }
+                        val prompt = "CIRCLE (TTR) • Pick second tangent line"
+                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                     }
 
                     else -> if (pts.size >= 2) {
@@ -950,7 +1423,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                             )
                         }
                     } else {
-                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)) }
+                        val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
+                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                     }
                 }
             }
@@ -973,7 +1447,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         commitSingleEntity(arc, "ARC • Created R=${fmt(arc.radius)}, sweep=${fmt(arc.sweepAngleDeg)}°")
                     }
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)) }
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -990,7 +1465,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     )
                     commitSingleEntity(rect, "RECTANGLE • Created ${fmt(rect.boundingBox().width)} × ${fmt(rect.boundingBox().height)}")
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "RECTANGLE • Pick opposite corner point") }
+                    val prompt = "RECTANGLE • Pick opposite corner point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1009,7 +1485,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     )
                     commitSingleEntity(poly, "POLYGON • Created $sides-sided polygon")
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "POLYGON • Pick radius/corner point") }
+                    val prompt = "POLYGON • Pick radius/corner point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1030,7 +1507,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "ELLIPSE • Created ${fmt(majR * 2)} × ${fmt(minR * 2)}"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)) }
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1049,7 +1527,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "RAY • Created at ∠${fmt(ang)}°"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "RAY • Pick through point for direction") }
+                    val prompt = "RAY • Pick through point for direction"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1061,7 +1540,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         val ang = pts[0].angleToDeg(pts[1])
                         commitSingleEntity(CadEntity.XLineEntity(rootPoint = pts[0], angleDeg = ang), "XLINE • Placed at ∠${fmt(ang)}°")
                     } else {
-                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "XLINE • Pick second point for direction") }
+                        val prompt = "XLINE • Pick second point for direction"
+                        _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                     }
                 }
             }
@@ -1087,7 +1567,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     )
                     commitSingleEntity(hatch, "HATCH (${pattern.name}) • Applied to closed boundary")
                 } else {
-                    _uiState.update { it.copy(commandPromptBanner = "HATCH • Pick a point inside a closed boundary loop") }
+                    val err = "HATCH • Pick a point inside a closed boundary loop"
+                    _uiState.update { it.copy(commandPromptBanner = err, commandPanelState = CommandPanelState.Running(cmd, err, 0)) }
+                    emitTransientNotification(err, NotificationCategory.WARNING)
                 }
             }
 
@@ -1096,7 +1578,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 if (boundaryPoly != null) {
                     commitSingleEntity(boundaryPoly, "BOUNDARY • Traced closed polyline (${boundaryPoly.vertices.size} vertices)")
                 } else {
-                    _uiState.update { it.copy(commandPromptBanner = "BOUNDARY • Closed boundary could not be determined at picked point") }
+                    val err = "BOUNDARY • Closed boundary could not be determined at picked point"
+                    _uiState.update { it.copy(commandPromptBanner = err, commandPanelState = CommandPanelState.Running(cmd, err, 0)) }
+                    emitTransientNotification(err, NotificationCategory.WARNING)
                 }
             }
 
@@ -1106,7 +1590,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 val sel = getUnlockedSelectedEntities()
                 if (sel.isEmpty()) {
                     val hit = findNearestSelectableEntity(pt)
-                    if (hit != null) _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = "MOVE • Pick base point") }
+                    if (hit != null) {
+                        val prompt = "MOVE • Pick base point"
+                        _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    }
                 } else if (pts.size >= 2) {
                     val dx = pts[1].x - pts[0].x
                     val dy = pts[1].y - pts[0].y
@@ -1114,15 +1601,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val selIds = sel.map { it.id }.toSet()
                     val moved = st.entities.map { if (it.id in selIds) it.translate(dx, dy) else it }
                     val updated = CadModificationEngine.updateAssociativeDimensions(moved)
+                    val msg = "MOVE • Displaced ${sel.size} object(s) by (${fmt(dx)}, ${fmt(dy)})"
                     _uiState.update {
                         it.copy(
                             entities = updated,
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "MOVE • Displaced ${sel.size} object(s) by (${fmt(dx)}, ${fmt(dy)})"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "MOVE • Pick destination point") }
+                    val prompt = "MOVE • Pick destination point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1130,21 +1622,28 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 val sel = getUnlockedSelectedEntities()
                 if (sel.isEmpty()) {
                     val hit = findNearestSelectableEntity(pt)
-                    if (hit != null) _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = "COPY • Pick base point") }
+                    if (hit != null) {
+                        val prompt = "COPY • Pick base point"
+                        _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    }
                 } else if (pts.size >= 2) {
                     val dx = pts.last().x - pts.first().x
                     val dy = pts.last().y - pts.first().y
                     recordUndoSnapshot()
                     val clones = sel.map { it.withNewId().translate(dx, dy) }
+                    val prompt = "COPY • Placed ${clones.size} copy. Pick another destination or tap ✓ to finish"
                     _uiState.update {
                         it.copy(
                             entities = it.entities + clones,
-                            commandStepPoints = listOf(pts.first()), // Stay in multiple copy mode
-                            commandPromptBanner = "COPY • Placed ${clones.size} copy. Pick another destination or tap ✓ to finish"
+                            commandStepPoints = listOf(pts.first()),
+                            commandPromptBanner = prompt,
+                            commandPanelState = CommandPanelState.Running(cmd, prompt, 1)
                         )
                     }
+                    emitTransientNotification("COPY • Placed ${clones.size} copy", NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "COPY • Pick destination point") }
+                    val prompt = "COPY • Pick destination point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1152,7 +1651,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 val sel = getUnlockedSelectedEntities()
                 if (sel.isEmpty()) {
                     val hit = findNearestSelectableEntity(pt)
-                    if (hit != null) _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = "ROTATE • Pick base pivot point") }
+                    if (hit != null) {
+                        val prompt = "ROTATE • Pick base pivot point"
+                        _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    }
                 } else if (pts.size >= 2) {
                     val pivot = pts[0]
                     val angle = pivot.angleToDeg(pts[1])
@@ -1160,15 +1662,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val selIds = sel.map { it.id }.toSet()
                     val rotated = st.entities.map { if (it.id in selIds) it.rotate(pivot, angle) else it }
                     val updated = CadModificationEngine.updateAssociativeDimensions(rotated)
+                    val msg = "ROTATE • Rotated ${sel.size} object(s) by ${fmt(angle)}°"
                     _uiState.update {
                         it.copy(
                             entities = updated,
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "ROTATE • Rotated ${sel.size} object(s) by ${fmt(angle)}°"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "ROTATE • Pick rotation angle point") }
+                    val prompt = "ROTATE • Pick rotation angle point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1176,7 +1683,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 val sel = getUnlockedSelectedEntities()
                 if (sel.isEmpty()) {
                     val hit = findNearestSelectableEntity(pt)
-                    if (hit != null) _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = "SCALE • Pick base point") }
+                    if (hit != null) {
+                        val prompt = "SCALE • Pick base point"
+                        _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    }
                 } else if (pts.size >= 2) {
                     val pivot = pts[0]
                     val dist = pivot.distanceTo(pts[1])
@@ -1185,15 +1695,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val selIds = sel.map { it.id }.toSet()
                     val scaled = st.entities.map { if (it.id in selIds) it.scale(pivot, factor) else it }
                     val updated = CadModificationEngine.updateAssociativeDimensions(scaled)
+                    val msg = "SCALE • Scaled ${sel.size} object(s) by ${fmt(factor)}x"
                     _uiState.update {
                         it.copy(
                             entities = updated,
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "SCALE • Scaled ${sel.size} object(s) by ${fmt(factor)}x"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "SCALE • Pick scale factor point") }
+                    val prompt = "SCALE • Pick scale factor point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1201,19 +1716,27 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 val sel = getUnlockedSelectedEntities()
                 if (sel.isEmpty()) {
                     val hit = findNearestSelectableEntity(pt)
-                    if (hit != null) _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = "MIRROR • Pick first point of mirror line") }
+                    if (hit != null) {
+                        val prompt = "MIRROR • Pick first point of mirror line"
+                        _uiState.update { it.copy(selectedEntityIds = setOf(hit.id), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    }
                 } else if (pts.size >= 2) {
                     recordUndoSnapshot()
                     val mirrored = sel.map { it.withNewId().mirror(pts[0], pts[1]) }
+                    val msg = "MIRROR • Mirrored ${mirrored.size} object(s)"
                     _uiState.update {
                         it.copy(
                             entities = it.entities + mirrored,
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "MIRROR • Mirrored ${mirrored.size} object(s)"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "MIRROR • Pick second point of mirror axis") }
+                    val prompt = "MIRROR • Pick second point of mirror axis"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1221,11 +1744,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 if (pts.size == 1) {
                     val hit = findNearestSelectableEntity(pts[0])
                     if (hit != null) {
+                        val prompt = "OFFSET (d=${fmt(st.commandParameterValue)}) • Pick side to offset"
                         _uiState.update {
                             it.copy(
                                 selectedEntityIds = setOf(hit.id),
                                 commandStepPoints = pts,
-                                commandPromptBanner = "OFFSET (d=${fmt(st.commandParameterValue)}) • Pick side to offset"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                             )
                         }
                     }
@@ -1235,15 +1760,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         val offsetEnt = CadModificationEngine.offsetEntity(target, st.commandParameterValue, pts[1])
                         if (offsetEnt != null) {
                             recordUndoSnapshot()
+                            val msg = "OFFSET • Created parallel offset at d=${fmt(st.commandParameterValue)}"
                             _uiState.update {
                                 it.copy(
                                     entities = it.entities + offsetEnt,
                                     commandStepPoints = emptyList(),
-                                    commandPromptBanner = "OFFSET • Created parallel offset at d=${fmt(st.commandParameterValue)}"
+                                    commandPromptBanner = msg,
+                                    commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                                 )
                             }
+                            emitTransientNotification(msg, NotificationCategory.SUCCESS)
                         } else {
-                            _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = "OFFSET • Invalid offset radius/distance") }
+                            val err = "OFFSET • Invalid offset radius/distance"
+                            _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = err) }
+                            emitTransientNotification(err, NotificationCategory.WARNING)
                         }
                     }
                 }
@@ -1255,13 +1785,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     recordUndoSnapshot()
                     val trimmed = CadModificationEngine.trimEntityAtPick(hit, pt, st.entities)
                     val remaining = st.entities.filterNot { it.id == hit.id } + trimmed
+                    val msg = "TRIM • Trimmed ${hit.typeName}"
                     _uiState.update {
                         it.copy(
                             entities = CadModificationEngine.updateAssociativeDimensions(remaining),
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "TRIM • Trimmed ${hit.typeName}"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 }
             }
 
@@ -1271,13 +1804,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     recordUndoSnapshot()
                     val extended = CadModificationEngine.extendEntityAtPick(hit, pt, st.entities)
                     val updated = st.entities.map { if (it.id == hit.id) extended else it }
+                    val msg = "EXTEND • Extended ${hit.typeName} to boundary"
                     _uiState.update {
                         it.copy(
                             entities = CadModificationEngine.updateAssociativeDimensions(updated),
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "EXTEND • Extended ${hit.typeName} to boundary"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 }
             }
 
@@ -1286,18 +1822,22 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 if (pts.size == 1) {
                     val hit1 = CadModificationEngine.hasLinearEdgeAtPick(st.entities, pts[0], pickTolerance)
                     if (hit1 != null) {
+                        val prompt = "FILLET (R=${fmt(st.commandParameterValue)}) • First edge picked (${hit1.typeName}). Now pick second intersecting edge"
                         _uiState.update {
                             it.copy(
                                 selectedEntityIds = setOf(hit1.id),
                                 commandStepPoints = pts,
-                                commandPromptBanner = "FILLET (R=${fmt(st.commandParameterValue)}) • First edge picked (${hit1.typeName}). Now pick second intersecting edge"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                             )
                         }
                     } else {
+                        val prompt = "FILLET (R=${fmt(st.commandParameterValue)}) • Move cursor onto first line/rectangle edge and tap PICK PT"
                         _uiState.update {
                             it.copy(
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "FILLET (R=${fmt(st.commandParameterValue)}) • Move cursor onto first line/rectangle edge and tap PICK PT"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, 0)
                             )
                         }
                     }
@@ -1313,21 +1853,27 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     if (filletedEntities != null) {
                         recordUndoSnapshot()
                         val updated = CadModificationEngine.updateAssociativeDimensions(filletedEntities)
+                        val msg = "FILLET • Created tangent fillet with R=${fmt(st.commandParameterValue)}"
                         _uiState.update {
                             it.copy(
                                 entities = updated,
                                 selectedEntityIds = emptySet(),
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "FILLET • Created tangent fillet with R=${fmt(st.commandParameterValue)}"
+                                commandPromptBanner = msg,
+                                commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                             )
                         }
+                        emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     } else {
+                        val err = "FILLET • Could not fillet selected edges with R=${fmt(st.commandParameterValue)} (ensure edges are non-parallel and long enough)"
                         _uiState.update {
                             it.copy(
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "FILLET • Could not fillet selected edges with R=${fmt(st.commandParameterValue)} (ensure edges are non-parallel and long enough)"
+                                commandPromptBanner = err,
+                                commandPanelState = CommandPanelState.Running(cmd, err, 0)
                             )
                         }
+                        emitTransientNotification(err, NotificationCategory.WARNING)
                     }
                 }
             }
@@ -1337,18 +1883,22 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 if (pts.size == 1) {
                     val hit1 = CadModificationEngine.hasLinearEdgeAtPick(st.entities, pts[0], pickTolerance)
                     if (hit1 != null) {
+                        val prompt = "CHAMFER (D=${fmt(st.commandParameterValue)}) • First edge picked (${hit1.typeName}). Now pick second intersecting edge"
                         _uiState.update {
                             it.copy(
                                 selectedEntityIds = setOf(hit1.id),
                                 commandStepPoints = pts,
-                                commandPromptBanner = "CHAMFER (D=${fmt(st.commandParameterValue)}) • First edge picked (${hit1.typeName}). Now pick second intersecting edge"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)
                             )
                         }
                     } else {
+                        val prompt = "CHAMFER (D=${fmt(st.commandParameterValue)}) • Move cursor onto first line/rectangle edge and tap PICK PT"
                         _uiState.update {
                             it.copy(
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "CHAMFER (D=${fmt(st.commandParameterValue)}) • Move cursor onto first line/rectangle edge and tap PICK PT"
+                                commandPromptBanner = prompt,
+                                commandPanelState = CommandPanelState.Running(cmd, prompt, 0)
                             )
                         }
                     }
@@ -1366,21 +1916,27 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     if (chamferedEntities != null) {
                         recordUndoSnapshot()
                         val updated = CadModificationEngine.updateAssociativeDimensions(chamferedEntities)
+                        val msg = "CHAMFER • Applied ${fmt(d)} × ${fmt(d)} bevel"
                         _uiState.update {
                             it.copy(
                                 entities = updated,
                                 selectedEntityIds = emptySet(),
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "CHAMFER • Applied ${fmt(d)} × ${fmt(d)} bevel"
+                                commandPromptBanner = msg,
+                                commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                             )
                         }
+                        emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     } else {
+                        val err = "CHAMFER • Could not chamfer selected edges with D=${fmt(d)}"
                         _uiState.update {
                             it.copy(
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "CHAMFER • Could not chamfer selected edges with D=${fmt(d)}"
+                                commandPromptBanner = err,
+                                commandPanelState = CommandPanelState.Running(cmd, err, 0)
                             )
                         }
+                        emitTransientNotification(err, NotificationCategory.WARNING)
                     }
                 }
             }
@@ -1392,15 +1948,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val dy = pts[2].y - pts[1].y
                     recordUndoSnapshot()
                     val stretched = st.entities.map { CadModificationEngine.stretchEntity(it, box, dx, dy) }
+                    val msg = "STRETCH • Stretched crossing region by (${fmt(dx)}, ${fmt(dy)})"
                     _uiState.update {
                         it.copy(
                             entities = CadModificationEngine.updateAssociativeDimensions(stretched),
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "STRETCH • Stretched crossing region by (${fmt(dx)}, ${fmt(dy)})"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)) }
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1411,16 +1972,21 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         recordUndoSnapshot()
                         val broken = CadModificationEngine.breakEntity(target, pts[0], pts[1])
                         val remaining = st.entities.filterNot { it.id == target.id } + broken
+                        val msg = "BREAK • Split ${target.typeName}"
                         _uiState.update {
                             it.copy(
                                 entities = remaining,
+                                activeCommand = CadCommandId.SELECT,
                                 commandStepPoints = emptyList(),
-                                commandPromptBanner = "BREAK • Split ${target.typeName}"
+                                commandPromptBanner = msg,
+                                commandPanelState = CommandPanelState.Hidden
                             )
                         }
+                        emitTransientNotification(msg, NotificationCategory.SUCCESS)
                     }
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "BREAK • Pick second break point") }
+                    val prompt = "BREAK • Pick second break point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1431,15 +1997,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val aligned = CadModificationEngine.alignEntities(sel, pts[0], pts[1], pts[2], pts[3], scaleToFit = true)
                     val alignedMap = aligned.associateBy { it.id }
                     val updated = st.entities.map { alignedMap[it.id] ?: it }
+                    val msg = "ALIGN • Aligned ${sel.size} object(s)"
                     _uiState.update {
                         it.copy(
                             entities = CadModificationEngine.updateAssociativeDimensions(updated),
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "ALIGN • Aligned ${sel.size} object(s)"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "ALIGN • Pick point ${pts.size + 1} of 4 (Src1 -> Dst1 -> Src2 -> Dst2)") }
+                    val prompt = "ALIGN • Pick point ${pts.size + 1} of 4 (Src1 -> Dst1 -> Src2 -> Dst2)"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1450,13 +2021,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     val lengthened = CadModificationEngine.lengthenEntity(line, pt, targetTotalLength = st.commandParameterValue)
                     val newLen = (lengthened as? CadEntity.LineEntity)?.length ?: st.commandParameterValue
                     val updated = st.entities.map { if (it.id == line.id) lengthened else it }
+                    val msg = "LENGTHEN • Set total length to ${fmt(newLen)}"
                     _uiState.update {
                         it.copy(
                             entities = CadModificationEngine.updateAssociativeDimensions(updated),
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "LENGTHEN • Set total length to ${fmt(newLen)}"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Running(cmd, msg, 0)
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 }
             }
 
@@ -1475,11 +2049,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         it.copy(
                             commandStepPoints = emptyList(),
                             commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Running(cmd, msg, 0),
                             commandHistoryLog = (it.commandHistoryLog + msg).takeLast(30)
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.INFO)
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "MEASURE (DIST) • Pick second point") }
+                    val prompt = "MEASURE (DIST) • Pick second point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1504,7 +2081,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "${cmd.commandName} • Placed manual dimension"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = promptForCommand(cmd, pts.size, st.commandSubOption)) }
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1522,7 +2100,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "DIMANGULAR • Placed angular dimension"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "DIMANGULAR • Pick point ${pts.size + 1} (Vertex -> Arm 1 -> Arm 2)") }
+                    val prompt = "DIMANGULAR • Pick point ${pts.size + 1} (Vertex -> Arm 1 -> Arm 2)"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1545,7 +2124,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "${cmd.commandName} • Placed ISO/ASME ${type.label} dimension ($prefix${fmt(if (type == DimensionType.DIAMETER) circularFeature.radius * 2 else circularFeature.radius)})"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = "${cmd.commandName} • Move cursor over a Circle, Arc, or Filleted Corner and tap PICK PT") }
+                    val prompt = "${cmd.commandName} • Move cursor over a Circle, Arc, or Filleted Corner and tap PICK PT"
+                    _uiState.update { it.copy(commandStepPoints = emptyList(), commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    emitTransientNotification(prompt, NotificationCategory.WARNING)
                 }
             }
 
@@ -1565,7 +2146,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "DIMORDINATE • Placed ${if (isXDatum) "X-Datum" else "Y-Datum"} ordinate"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "DIMORDINATE • Pick leader landing point") }
+                    val prompt = "DIMORDINATE • Pick leader landing point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1584,7 +2166,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "MLEADER • Placed technical leader callout"
                     )
                 } else {
-                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = "MLEADER • Pick leader shoulder point") }
+                    val prompt = "MLEADER • Pick leader shoulder point"
+                    _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
 
@@ -1611,7 +2194,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         "CENTERMARK • Placed associative center mark"
                     )
                 } else {
-                    _uiState.update { it.copy(commandPromptBanner = "CENTERMARK • Pick a Circle, Arc, or Filleted Corner") }
+                    val prompt = "CENTERMARK • Pick a Circle, Arc, or Filleted Corner"
+                    _uiState.update { it.copy(commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, 0)) }
+                    emitTransientNotification(prompt, NotificationCategory.WARNING)
                 }
             }
 
@@ -1631,20 +2216,28 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         start = pts.last(),
                         end = pts.first()
                     )
+                    val msg = "LINE (Closed) • Closed loop to start point"
                     _uiState.update {
                         it.copy(
                             entities = it.entities + closeSeg,
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "LINE (Closed) • Closed loop to start point"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.SUCCESS)
                 } else {
+                    val msg = "LINE • Command completed"
                     _uiState.update {
                         it.copy(
+                            activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
-                            commandPromptBanner = "LINE • Command completed"
+                            commandPromptBanner = msg,
+                            commandPanelState = CommandPanelState.Hidden
                         )
                     }
+                    emitTransientNotification(msg, NotificationCategory.INFO)
                 }
             }
             CadCommandId.POLYLINE -> {
@@ -1657,7 +2250,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         },
                         isClosed = closeLoop || st.commandSubOption == "Close"
                     )
-                    commitSingleEntity(poly, "POLYLINE • Created ${pts.size}-vertex polyline")
+                    commitSingleEntity(poly, "POLYLINE • Created ${pts.size}-vertex polyline", returnToIdle = true)
                 } else {
                     cancelCurrentCommand()
                 }
@@ -1669,16 +2262,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         controlPoints = pts,
                         isClosed = closeLoop
                     )
-                    commitSingleEntity(spline, "SPLINE • Created smooth spline through ${pts.size} points")
+                    commitSingleEntity(spline, "SPLINE • Created smooth spline through ${pts.size} points", returnToIdle = true)
                 } else {
                     cancelCurrentCommand()
                 }
             }
             else -> {
+                val msg = "READY • ${st.activeCommand.commandName} finished"
                 _uiState.update {
                     it.copy(
+                        activeCommand = CadCommandId.SELECT,
                         commandStepPoints = emptyList(),
-                        commandPromptBanner = "READY • ${st.activeCommand.commandName} finished"
+                        selectionBoxDrag = null,
+                        commandPromptBanner = msg,
+                        commandPanelState = CommandPanelState.Hidden
                     )
                 }
             }
@@ -1686,87 +2283,134 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun cancelCurrentCommand() {
+        val msg = "CANCELLED • Ready for command or controller action"
         _uiState.update {
             it.copy(
                 activeCommand = CadCommandId.SELECT,
                 commandStepPoints = emptyList(),
                 selectionBoxDrag = null,
-                commandPromptBanner = "CANCELLED • Ready for selection or command"
+                commandPromptBanner = msg,
+                commandPanelState = CommandPanelState.Hidden
             )
         }
     }
 
-    // --- Window & Crossing Selection Drag ---
+    // --- Selection Commands (Section 14.3 — No Sheet Taps Required) ---
 
+    @Suppress("UNUSED_PARAMETER")
     fun onSelectionDragStart(modelPt: Point2D) {
-        if (_uiState.value.activeCommand != CadCommandId.SELECT) return
-        _uiState.update {
-            it.copy(selectionBoxDrag = SelectionBoxDragState(startModel = modelPt, currentModel = modelPt))
-        }
+        // Intentional no-op per Section 14.1 navigation-only sheet contract.
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun onSelectionDragUpdate(modelPt: Point2D) {
-        val currentDrag = _uiState.value.selectionBoxDrag ?: return
-        _uiState.update {
-            it.copy(selectionBoxDrag = currentDrag.copy(currentModel = modelPt))
-        }
+        // Intentional no-op per Section 14.1 navigation-only sheet contract.
     }
 
     fun onSelectionDragEnd() {
-        val st = _uiState.value
-        val drag = st.selectionBoxDrag ?: return
-        val box = drag.boundingBox
-        val isCrossing = drag.isCrossingMode
-        val frozenOrHiddenLayers = st.layers.filter { !it.isVisible || it.isFrozen }.map { it.name }.toSet()
-
-        val matchedIds = st.entities
-            .filter { it.layerName !in frozenOrHiddenLayers }
-            .filter { CadGeometryKernel.isEntitySelectedByBox(it, box, isCrossingMode = isCrossing) }
-            .map { it.id }
-            .toSet()
-
-        val modeLabel = if (isCrossing) "CROSSING SELECTION" else "WINDOW SELECTION"
-        _uiState.update {
-            it.copy(
-                selectedEntityIds = matchedIds,
-                selectionBoxDrag = null,
-                commandPromptBanner = "$modeLabel • Selected ${matchedIds.size} object(s)"
-            )
-        }
+        // Intentional no-op per Section 14.1 navigation-only sheet contract.
     }
 
     fun selectAllEntities() {
         val st = _uiState.value
         val visibleLayers = st.layers.filter { it.isVisible && !it.isFrozen }.map { it.name }.toSet()
-        val allIds = st.entities.filter { it.layerName in visibleLayers }.map { it.id }.toSet()
+        val allIds = st.entities
+            .filter { it.layerName in visibleLayers }
+            .filter { st.isolatedEntityIds == null || it.id in st.isolatedEntityIds }
+            .map { it.id }
+            .toSet()
+        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+        val msg = "SELECT ALL • Selected ${allIds.size} object(s)"
         _uiState.update {
             it.copy(
                 selectedEntityIds = allIds,
-                commandPromptBanner = "SELECT ALL • Selected ${allIds.size} object(s)"
+                previousSelectedEntityIds = prevSel,
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
+    }
+
+    fun selectPreviousEntities() {
+        val st = _uiState.value
+        val validIds = st.entities.map { it.id }.toSet()
+        val restored = st.previousSelectedEntityIds.intersect(validIds)
+        val msg = "SELECT PREVIOUS • Restored ${restored.size} object(s)"
+        _uiState.update {
+            it.copy(
+                selectedEntityIds = restored,
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
+    }
+
+    fun selectEntitiesByLayer(layerName: String) {
+        val st = _uiState.value
+        val matched = st.entities.filter { it.layerName == layerName }.map { it.id }.toSet()
+        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+        val msg = "SELECT LAYER '$layerName' • Selected ${matched.size} object(s)"
+        _uiState.update {
+            it.copy(
+                selectedEntityIds = matched,
+                previousSelectedEntityIds = prevSel,
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
+    }
+
+    fun selectEntitiesByType(typeName: String) {
+        val st = _uiState.value
+        val visibleLayers = st.layers.filter { it.isVisible && !it.isFrozen }.map { it.name }.toSet()
+        val matched = st.entities
+            .filter { it.layerName in visibleLayers && it.typeName.equals(typeName, true) }
+            .map { it.id }
+            .toSet()
+        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+        val msg = "SELECT TYPE '$typeName' • Selected ${matched.size} object(s)"
+        _uiState.update {
+            it.copy(
+                selectedEntityIds = matched,
+                previousSelectedEntityIds = prevSel,
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     fun clearSelection() {
+        val st = _uiState.value
+        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+        val msg = "CLEAR SELECTION • 0 objects selected"
         _uiState.update {
             it.copy(
                 selectedEntityIds = emptySet(),
-                commandPromptBanner = "Selection cleared"
+                previousSelectedEntityIds = prevSel,
+                selectionBoxDrag = null,
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     fun deleteSelectedEntities() {
         val sel = getUnlockedSelectedEntities().map { it.id }.toSet()
-        if (sel.isEmpty()) return
+        if (sel.isEmpty()) {
+            emitTransientNotification("ERASE • No unlocked entities selected", NotificationCategory.WARNING)
+            return
+        }
         recordUndoSnapshot()
+        val msg = "ERASE • Removed ${sel.size} object(s)"
         _uiState.update {
             it.copy(
                 entities = it.entities.filterNot { e -> e.id in sel },
                 selectedEntityIds = emptySet(),
-                commandPromptBanner = "ERASE • Removed ${sel.size} object(s)"
+                commandPromptBanner = msg,
+                commandPanelState = CommandPanelState.Hidden
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     // --- Layer, Block, Properties & Constraint Actions ---
@@ -1780,13 +2424,15 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         if (st.layers.any { it.name.equals(name, true) }) return
         recordUndoSnapshot()
         val newLayer = CadLayer(name = name, colorHex = colorHex, lineType = lineType, lineWeightMm = weightMm)
+        val msg = "LAYER • Added and activated layer '$name'"
         _uiState.update {
             it.copy(
                 layers = it.layers + newLayer,
                 activeLayerName = name,
-                commandPromptBanner = "LAYER • Added and activated layer '$name'"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun updateLayer(updated: CadLayer) {
@@ -1800,24 +2446,28 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val sel = getUnlockedSelectedEntities().map { it.id }.toSet()
         if (sel.isEmpty()) return
         recordUndoSnapshot()
+        val msg = "PROPERTIES • Moved ${sel.size} object(s) to layer '$targetLayer'"
         _uiState.update { st ->
             st.copy(
                 entities = st.entities.map { if (it.id in sel) it.withStyle(layerName = targetLayer) else it },
-                commandPromptBanner = "PROPERTIES • Moved ${sel.size} object(s) to layer '$targetLayer'"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun changeSelectedEntitiesLineType(lineType: CadLineType) {
         val sel = getUnlockedSelectedEntities().map { it.id }.toSet()
         if (sel.isEmpty()) return
         recordUndoSnapshot()
+        val msg = "PROPERTIES • Set linetype to ${lineType.label}"
         _uiState.update { st ->
             st.copy(
                 entities = st.entities.map { if (it.id in sel) it.withStyle(lineTypeOverride = lineType) else it },
-                commandPromptBanner = "PROPERTIES • Set linetype to ${lineType.label}"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun updateCircleRadius(entityId: String, newRadius: Double) {
@@ -1830,12 +2480,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 else -> ent
             }
         }
+        val msg = "PROPERTIES • Updated radius to ${fmt(r)} (associative dimensions updated)"
         _uiState.update {
             it.copy(
                 entities = CadModificationEngine.updateAssociativeDimensions(updated),
-                commandPromptBanner = "PROPERTIES • Updated radius to ${fmt(r)} (associative dimensions updated)"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun applyGeometricConstraintToSelected(type: ConstraintType) {
@@ -1849,12 +2501,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
         val solved = CadGeometryKernel.applyGeometricConstraint(rec, _uiState.value.entities)
         val withDims = CadModificationEngine.updateAssociativeDimensions(solved)
+        val msg = "CONSTRAINT (${type.label}) • Solved geometric constraint and updated associative dimensions"
         _uiState.update {
             it.copy(
                 entities = withDims,
-                commandPromptBanner = "CONSTRAINT (${type.label}) • Solved geometric constraint and updated associative dimensions"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun createBlockFromSelection(blockName: String) {
@@ -1863,12 +2517,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         recordUndoSnapshot()
         val bounds = sel.map { it.boundingBox() }.reduce { a, b -> a.union(b) }
         val def = BlockDefinition(name = blockName, basePoint = bounds.center, entities = sel)
+        val msg = "BLOCK • Created reusable block '$blockName' (${sel.size} entities)"
         _uiState.update {
             it.copy(
                 blocks = it.blocks + (blockName to def),
-                commandPromptBanner = "BLOCK • Created reusable block '$blockName' (${sel.size} entities)"
+                commandPromptBanner = msg
             )
         }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun insertBlockAtCursor(blockName: String) {
@@ -1963,12 +2619,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(dir, "${_uiState.value.currentProjectId}.dxf")
         file.writeText(dxfString)
+        emitTransientNotification("DXF EXPORT • Exported AC1015 DXF (${payload.entities.size} entities)", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "application/dxf")
     }
 
     fun exportAndSharePdf(context: Context) {
         val payload = currentDxfPayload()
         val file = CadDxfInterchange.exportToPdfFile(context, "${_uiState.value.currentProjectId}.pdf", payload)
+        emitTransientNotification("PDF EXPORT • Plotted ISO/ASME technical sheet PDF", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "application/pdf")
     }
 
@@ -1978,27 +2636,34 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(dir, "${_uiState.value.currentProjectId}.svg")
         file.writeText(svgString)
+        emitTransientNotification("SVG EXPORT • Exported vector SVG sheet", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "image/svg+xml")
     }
 
     fun importDxfString(dxfText: String) {
         val imported = CadDxfInterchange.importFromDxf(dxfText)
-        if (imported.entities.isEmpty()) return
+        if (imported.entities.isEmpty()) {
+            emitTransientNotification("DXFIN • No entities found in DXF content", NotificationCategory.WARNING)
+            return
+        }
         recordUndoSnapshot()
+        val cleaned = AutoDimensionEngine.removeAutoDimensions(imported.entities)
+        val msg = "DXFIN • Imported ${cleaned.size} entities (${imported.displayUnit.symbol}) • Quick Dimension OFF"
         _uiState.update {
             it.copy(
                 storageUnit = imported.storageUnit,
                 displayUnit = imported.displayUnit,
                 layers = imported.layers,
-                // New imported sheet defaults to Quick Dimension OFF
-                entities = AutoDimensionEngine.removeAutoDimensions(imported.entities),
+                entities = cleaned,
                 blocks = imported.blocks.associateBy { b -> b.name },
                 selectedEntityIds = emptySet(),
                 isQuickDimensionEnabled = false,
-                commandPromptBanner = "DXFIN • Imported ${imported.entities.size} entities (${imported.displayUnit.symbol}) • Quick Dimension OFF"
+                commandPromptBanner = msg,
+                commandPanelState = CommandPanelState.Hidden
             )
         }
-        zoomExtents()
+        fitDrawing(notify = false)
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun saveCurrentProject(projectName: String) {
@@ -2011,12 +2676,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 description = "2D Technical Drawing (${st.entities.size} entities, ${st.displayUnit.symbol})",
                 payload = payload
             )
+            val msg = "SAVE • Saved '$projectName' to local Room & DXF store"
             _uiState.update {
                 it.copy(
                     currentProjectName = projectName,
-                    commandPromptBanner = "SAVE • Saved '$projectName' to local Room & DXF store"
+                    commandPromptBanner = msg
                 )
             }
+            emitTransientNotification(msg, NotificationCategory.SUCCESS)
         }
     }
 
@@ -2026,8 +2693,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val meta = savedProjects.value.firstOrNull { it.projectId == projectId }
             undoStack.clear()
             redoStack.clear()
-            // On opening a sheet/project, Quick Dimension is always OFF by default
             val entitiesWithoutAutoDim = AutoDimensionEngine.removeAutoDimensions(loaded.entities)
+            val msg = "OPEN • Loaded '${meta?.name ?: projectId}' (${entitiesWithoutAutoDim.size} entities • Quick Dimension OFF)"
             _uiState.update {
                 it.copy(
                     currentProjectId = projectId,
@@ -2038,13 +2705,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     entities = entitiesWithoutAutoDim,
                     blocks = loaded.blocks.associateBy { b -> b.name },
                     selectedEntityIds = emptySet(),
+                    previousSelectedEntityIds = emptySet(),
                     isQuickDimensionEnabled = false,
                     canUndo = false,
                     canRedo = false,
-                    commandPromptBanner = "OPEN • Loaded '${meta?.name ?: projectId}' (${entitiesWithoutAutoDim.size} entities • Quick Dimension OFF)"
+                    commandPromptBanner = msg,
+                    commandPanelState = CommandPanelState.Hidden
                 )
             }
-            zoomExtents()
+            fitDrawing(notify = false)
+            emitTransientNotification(msg, NotificationCategory.SUCCESS)
         }
     }
 
@@ -2053,6 +2723,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         redoStack.clear()
         val newId = "proj_${UUID.randomUUID().toString().take(8)}"
         prefs.edit().putString("display_unit", unit.name).apply()
+        val msg = "NEW • Created blank drawing '$name' in ${unit.label} (Quick Dimension OFF)"
         _uiState.update {
             it.copy(
                 currentProjectId = newId,
@@ -2062,15 +2733,40 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 layers = CadLayer.defaultLayers(),
                 entities = emptyList(),
                 selectedEntityIds = emptySet(),
+                previousSelectedEntityIds = emptySet(),
                 isQuickDimensionEnabled = false,
                 canUndo = false,
                 canRedo = false,
-                commandPromptBanner = "NEW • Created blank drawing '$name' in ${unit.label} (Quick Dimension OFF)"
+                commandPromptBanner = msg,
+                commandPanelState = CommandPanelState.Hidden
             )
         }
+        fitDrawing(notify = false)
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     // --- Helpers ---
+
+    private fun updateSelectionAndState(
+        entities: List<CadEntity>,
+        nextSelection: Set<String>,
+        banner: String,
+        returnToIdle: Boolean = false
+    ) {
+        val st = _uiState.value
+        val prevSel = if (st.selectedEntityIds.isNotEmpty()) st.selectedEntityIds else st.previousSelectedEntityIds
+        _uiState.update {
+            it.copy(
+                entities = entities,
+                selectedEntityIds = nextSelection,
+                previousSelectedEntityIds = prevSel,
+                activeCommand = if (returnToIdle) CadCommandId.SELECT else it.activeCommand,
+                commandStepPoints = emptyList(),
+                commandPromptBanner = banner,
+                commandPanelState = if (returnToIdle) CommandPanelState.Hidden else it.commandPanelState
+            )
+        }
+    }
 
     private data class CircularFeaturePick(
         val sourceEntityId: String,
@@ -2143,16 +2839,23 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         return bestFeature
     }
 
-    private fun commitSingleEntity(entity: CadEntity, bannerMessage: String) {
+    private fun commitSingleEntity(
+        entity: CadEntity,
+        bannerMessage: String,
+        returnToIdle: Boolean = true
+    ) {
         recordUndoSnapshot()
         _uiState.update {
             it.copy(
                 entities = it.entities + entity,
+                activeCommand = if (returnToIdle) CadCommandId.SELECT else it.activeCommand,
                 commandStepPoints = emptyList(),
                 commandPromptBanner = bannerMessage,
+                commandPanelState = if (returnToIdle) CommandPanelState.Hidden else CommandPanelState.Running(it.activeCommand, bannerMessage, 0),
                 commandHistoryLog = (it.commandHistoryLog + bannerMessage).takeLast(30)
             )
         }
+        emitTransientNotification(bannerMessage, NotificationCategory.SUCCESS)
     }
 
     private fun getUnlockedSelectedEntities(): List<CadEntity> {
@@ -2186,7 +2889,12 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun promptForCommand(cmd: CadCommandId, stepCount: Int, subOption: String): String = when (cmd) {
-        CadCommandId.LINE -> if (stepCount == 0) "LINE • Pick start point (or enter X,Y)" else "LINE • Pick next point, 'C' to close, or ✓ to finish"
+        CadCommandId.SELECT -> when (subOption) {
+            "Window" -> if (stepCount == 0) "SELECT (Window) • Move cursor to Corner 1 and tap PICK PT" else "SELECT (Window) • Move cursor to Corner 2 and tap PICK PT"
+            "Crossing" -> if (stepCount == 0) "SELECT (Crossing) • Move cursor to Corner 1 and tap PICK PT" else "SELECT (Crossing) • Move cursor to Corner 2 and tap PICK PT"
+            else -> "SELECT • Position cursor over object and tap PICK PT (or choose Window / Crossing / All)"
+        }
+        CadCommandId.LINE -> if (stepCount == 0) "LINE • Pick start point (PICK PT or X,Y)" else "LINE • Pick next point, 'C' to close, or ✓ to finish"
         CadCommandId.POLYLINE -> "POLYLINE ($subOption) • Pick vertex ${stepCount + 1}, or tap ✓ to finish"
         CadCommandId.CIRCLE -> when (subOption) {
             "2P" -> if (stepCount == 0) "CIRCLE (2P) • Pick first diameter endpoint" else "CIRCLE (2P) • Pick second diameter endpoint"

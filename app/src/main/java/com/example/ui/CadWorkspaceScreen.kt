@@ -1,5 +1,13 @@
 package com.example.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -8,41 +16,51 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Straighten
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,21 +79,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.cad.dimension.DimensionArrangementPreference
 import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.io.CadDxfInterchange
+import com.example.cad.kernel.FitDrawingPolicy
+import com.example.cad.kernel.UsableViewportRect
+import com.example.ui.components.ControllerDockState
 import com.example.cad.model.CadCommandCategory
+import com.example.cad.model.CadCommandCompatibilityCatalog
 import com.example.cad.model.CadCommandId
 import com.example.cad.model.HatchPattern
+import com.example.cad.model.Point2D
 import com.example.cad.model.UnitChangeMode
 import com.example.cad.model.WorkspaceSpace
 import com.example.ui.components.CadViewportCanvas
@@ -97,9 +125,18 @@ import com.example.ui.theme.CadHudSurface
 import com.example.ui.theme.CadModelSpaceBg
 import com.example.ui.theme.CadPanelElevated
 import com.example.ui.theme.CadPanelSurface
+import com.example.ui.theme.CadRedAlert
+import com.example.ui.theme.CadSurfaceCard
 import com.example.ui.theme.CadTextMuted
 import com.example.ui.theme.CadTextPrimary
 import com.example.ui.theme.CadTextSecondary
+import kotlin.math.abs
+
+// Solid 100% opaque active surface tints (Section 3 — No alpha bleed-through)
+private val OpaqueCyanBadgeBg = Color(0xFF0E2A38)
+private val OpaqueAmberBadgeBg = Color(0xFF2D220E)
+private val OpaqueEmeraldBadgeBg = Color(0xFF0C2920)
+private val OpaqueRedBadgeBg = Color(0xFF331418)
 
 @Composable
 fun CadWorkspaceScreen(
@@ -108,6 +145,7 @@ fun CadWorkspaceScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val savedProjects by viewModel.savedProjects.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val density = LocalDensity.current
 
     // Dialog states preserved across orientation changes
     var showUnitsDialog by rememberSaveable { mutableStateOf(false) }
@@ -119,6 +157,7 @@ fun CadWorkspaceScreen(
     var showControllerSettingsDialog by rememberSaveable { mutableStateOf(false) }
     var showPropertiesDialog by rememberSaveable { mutableStateOf(false) }
     var showProjectHubDialog by rememberSaveable { mutableStateOf(false) }
+    var showActionLauncherDialog by rememberSaveable { mutableStateOf(false) }
     var commandLineInput by rememberSaveable { mutableStateOf("") }
 
     val previewEntities = remember(
@@ -138,25 +177,22 @@ fun CadWorkspaceScreen(
             CadCommandId.LAYER, CadCommandId.BLOCK -> showLayerBlockDialog = true
             CadCommandId.PROPERTIES, CadCommandId.CONSTRAINT -> showPropertiesDialog = true
             CadCommandId.DXF_IO -> showProjectHubDialog = true
-            CadCommandId.QDIM -> {
-                // Selecting Quick Dimension from the function bar refreshes/enables QDIM and shows the QDIM function bar controls (Toggle + Refresh)
-                viewModel.activateCommand(cmd)
-            }
+            CadCommandId.QDIM -> viewModel.activateCommand(cmd)
             else -> viewModel.activateCommand(cmd)
         }
     }
 
+    // Section 16: Full-screen immersive container without status/navigation bar padding reservation
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(CadModelSpaceBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
+            .windowInsetsPadding(WindowInsets.displayCutout)
     ) {
         val isLandscape = maxWidth >= 660.dp
 
         if (!isLandscape) {
-            // --- PORTRAIT ADAPTIVE LAYOUT (Section 6.1) ---
+            // --- PORTRAIT ADAPTIVE FULL-SCREEN WORKSPACE ---
             Column(modifier = Modifier.fillMaxSize()) {
                 // 1. Top Compact Engineering Header Bar
                 TopEngineeringHeaderBar(
@@ -165,6 +201,7 @@ fun CadWorkspaceScreen(
                     unitChangeMode = uiState.unitChangeMode,
                     isQuickDimensionEnabled = uiState.isQuickDimensionEnabled,
                     workspaceSpace = uiState.workspaceSpace,
+                    fitDrawingPolicy = uiState.fitDrawingPolicy,
                     canUndo = uiState.canUndo,
                     canRedo = uiState.canRedo,
                     onOpenProjectHub = { showProjectHubDialog = true },
@@ -173,16 +210,42 @@ fun CadWorkspaceScreen(
                     onOpenSheetSetup = { showSheetDialog = true },
                     onOpenQDim = { showQDimDialog = true },
                     onOpenMatrix = { showMatrixDialog = true },
+                    onOpenLayers = { showLayerBlockDialog = true },
+                    onOpenProperties = { showPropertiesDialog = true },
+                    onOpenActionLauncher = { showActionLauncherDialog = true },
                     onUndo = viewModel::undo,
                     onRedo = viewModel::redo,
-                    onZoomExtents = viewModel::zoomExtents
+                    onFitDrawing = { viewModel.fitDrawing() },
+                    onSelectFitPolicy = viewModel::setFitDrawingPolicy
                 )
 
-                // 2. Main 2D Technical CAD Viewport (Upper Majority of Screen)
+                // 2. Transient Operation Notification Banner (Section 4)
+                TransientNotificationBanner(
+                    notification = uiState.activeNotification,
+                    onDismiss = viewModel::dismissNotification
+                )
+
+                // 3. Main 2D Technical CAD Viewport (Navigation-Only Sheet + Retractable Side Tool Drawer)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .onSizeChanged { size ->
+                            val topHudPx = with(density) { 42.dp.toPx() }
+                            val leftDrawerPx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
+                                with(density) { 188.dp.toPx() }
+                            } else {
+                                with(density) { 28.dp.toPx() }
+                            }
+                            viewModel.updateUsableViewportRect(
+                                UsableViewportRect(
+                                    leftPx = leftDrawerPx.coerceAtMost(size.width * 0.45f),
+                                    topPx = topHudPx.coerceAtMost(size.height * 0.25f),
+                                    rightPx = size.width.toFloat(),
+                                    bottomPx = size.height.toFloat()
+                                )
+                            )
+                        }
                 ) {
                     CadViewportCanvas(
                         workspaceSpace = uiState.workspaceSpace,
@@ -205,13 +268,10 @@ fun CadWorkspaceScreen(
                         viewport = uiState.viewport,
                         onViewportChanged = viewModel::updateViewport,
                         onViewportSizeChanged = viewModel::updateViewportDimensions,
-                        onDirectTapModelPoint = viewModel::handleDirectTapModelPoint,
-                        onSelectionDragStart = viewModel::onSelectionDragStart,
-                        onSelectionDragUpdate = viewModel::onSelectionDragUpdate,
-                        onSelectionDragEnd = viewModel::onSelectionDragEnd
+                        onGestureStateChanged = viewModel::onViewportGestureStateChanged
                     )
 
-                    // Floating Top-Left Command Prompt & Snap Status HUD
+                    // Top-Left Opaque Status & Snap Toggle Strip
                     ViewportFloatingStatusHud(
                         uiState = uiState,
                         onToggleGrid = viewModel::toggleGridVisibility,
@@ -223,31 +283,67 @@ fun CadWorkspaceScreen(
                         onSelectAll = viewModel::selectAllEntities,
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .padding(8.dp)
+                            .padding(start = 34.dp, top = 6.dp, end = 6.dp)
+                    )
+
+                    // Section 14.5: Retractable Left-Edge Command-Category Drawer (Collapsed by default)
+                    RetractableSideToolDrawer(
+                        uiState = uiState,
+                        onToggleDrawer = viewModel::toggleToolDrawer,
+                        onSelectCategory = viewModel::selectCategory,
+                        onSelectCommand = { cmd ->
+                            handleCommandSelection(cmd)
+                            viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
+                        },
+                        onSelectAll = viewModel::selectAllEntities,
+                        onSelectPrevious = viewModel::selectPreviousEntities,
+                        onClearSelection = viewModel::clearSelection,
+                        modifier = Modifier.align(Alignment.CenterStart)
                     )
                 }
 
-                // 3. Compact Expandable Command Ribbon & Sub-Options + Command Line Bar
-                CommandRibbonAndInputBar(
+                // 4. Contextual Command Line, Prefix Autocomplete & Active Command Options (Section 14.4)
+                ContextualCommandAndOptionsDock(
                     uiState = uiState,
                     commandLineInput = commandLineInput,
-                    onCommandLineInputChange = { commandLineInput = it },
+                    onCommandLineInputChange = { query ->
+                        commandLineInput = query
+                        viewModel.updateCommandInputQuery(query)
+                    },
+                    onOpenCommandEditing = {
+                        viewModel.openCommandLineEditing(commandLineInput)
+                    },
+                    onCloseCommandEditing = {
+                        commandLineInput = ""
+                        viewModel.closeCommandLineEditing()
+                    },
                     onSubmitCommandLine = {
                         viewModel.submitCommandOrCoordinateInput(commandLineInput)
                         commandLineInput = ""
                     },
-                    onSelectCategory = viewModel::selectCategory,
-                    onSelectCommand = handleCommandSelection,
+                    onSelectCommand = { cmd ->
+                        commandLineInput = ""
+                        handleCommandSelection(cmd)
+                    },
                     onSelectSubOption = viewModel::setCommandSubOption,
                     onParameterChange = viewModel::setCommandParameterValue,
                     onToggleQDim = viewModel::setQuickDimensionEnabled,
                     onRefreshQDim = viewModel::refreshQuickDimensions,
                     onSelectQDimDensity = viewModel::setQDimDensity,
                     onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                    onOpenQDimDialog = { showQDimDialog = true }
+                    onOpenQDimDialog = { showQDimDialog = true },
+                    onOpenActionLauncher = { showActionLauncherDialog = true },
+                    onToggleToolDrawer = viewModel::toggleToolDrawer,
+                    onOpenProperties = { showPropertiesDialog = true },
+                    onDeleteSelected = viewModel::deleteSelectedEntities,
+                    onClearSelection = viewModel::clearSelection,
+                    onSelectByLayer = viewModel::selectEntitiesByLayer,
+                    onSelectByType = viewModel::selectEntitiesByType,
+                    onFinishCommand = { viewModel.finishCurrentCommand() },
+                    onCancelCommand = viewModel::cancelCurrentCommand
                 )
 
-                // 4. Dedicated Velocity-Sensitive Virtual Cursor Controller (Lower Dock)
+                // 5. Collapsible Virtual Cursor Controller Dock (Section 14.6)
                 VirtualCursorControllerDeck(
                     config = uiState.controllerConfig,
                     cursorModelPos = uiState.snappedCursorModelPos,
@@ -265,11 +361,16 @@ fun CadWorkspaceScreen(
                     onIncrementSelect = viewModel::setStepIncrement,
                     onOpenControllerSettings = { showControllerSettingsDialog = true },
                     onToggleCollapse = viewModel::toggleControllerCollapse,
+                    onSetCollapsed = { collapsed ->
+                        viewModel.setControllerDockState(
+                            if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+                        )
+                    },
                     onOpenCoordinateDialog = { showCoordinateDialog = true }
                 )
             }
         } else {
-            // --- LANDSCAPE ADAPTIVE LAYOUT (Section 6.2) ---
+            // --- LANDSCAPE ADAPTIVE FULL-SCREEN WORKSPACE ---
             Column(modifier = Modifier.fillMaxSize()) {
                 TopEngineeringHeaderBar(
                     projectName = uiState.currentProjectName,
@@ -277,6 +378,7 @@ fun CadWorkspaceScreen(
                     unitChangeMode = uiState.unitChangeMode,
                     isQuickDimensionEnabled = uiState.isQuickDimensionEnabled,
                     workspaceSpace = uiState.workspaceSpace,
+                    fitDrawingPolicy = uiState.fitDrawingPolicy,
                     canUndo = uiState.canUndo,
                     canRedo = uiState.canRedo,
                     onOpenProjectHub = { showProjectHubDialog = true },
@@ -285,9 +387,18 @@ fun CadWorkspaceScreen(
                     onOpenSheetSetup = { showSheetDialog = true },
                     onOpenQDim = { showQDimDialog = true },
                     onOpenMatrix = { showMatrixDialog = true },
+                    onOpenLayers = { showLayerBlockDialog = true },
+                    onOpenProperties = { showPropertiesDialog = true },
+                    onOpenActionLauncher = { showActionLauncherDialog = true },
                     onUndo = viewModel::undo,
                     onRedo = viewModel::redo,
-                    onZoomExtents = viewModel::zoomExtents
+                    onFitDrawing = { viewModel.fitDrawing() },
+                    onSelectFitPolicy = viewModel::setFitDrawingPolicy
+                )
+
+                TransientNotificationBanner(
+                    notification = uiState.activeNotification,
+                    onDismiss = viewModel::dismissNotification
                 )
 
                 Row(
@@ -295,14 +406,7 @@ fun CadWorkspaceScreen(
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    // Left-Side Drawing & Modification Command Dock
-                    LandscapeLeftToolDock(
-                        uiState = uiState,
-                        onSelectCategory = viewModel::selectCategory,
-                        onSelectCommand = handleCommandSelection
-                    )
-
-                    // Central 2D Technical CAD Viewport + Bottom Command Line
+                    // Central 2D Technical CAD Viewport + Contextual Bottom Command Dock
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -312,6 +416,22 @@ fun CadWorkspaceScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
+                                .onSizeChanged { size ->
+                                    val topHudPx = with(density) { 42.dp.toPx() }
+                                    val leftDrawerPx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
+                                        with(density) { 188.dp.toPx() }
+                                    } else {
+                                        with(density) { 28.dp.toPx() }
+                                    }
+                                    viewModel.updateUsableViewportRect(
+                                        UsableViewportRect(
+                                            leftPx = leftDrawerPx.coerceAtMost(size.width * 0.4f),
+                                            topPx = topHudPx.coerceAtMost(size.height * 0.25f),
+                                            rightPx = size.width.toFloat(),
+                                            bottomPx = size.height.toFloat()
+                                        )
+                                    )
+                                }
                         ) {
                             CadViewportCanvas(
                                 workspaceSpace = uiState.workspaceSpace,
@@ -334,10 +454,7 @@ fun CadWorkspaceScreen(
                                 viewport = uiState.viewport,
                                 onViewportChanged = viewModel::updateViewport,
                                 onViewportSizeChanged = viewModel::updateViewportDimensions,
-                                onDirectTapModelPoint = viewModel::handleDirectTapModelPoint,
-                                onSelectionDragStart = viewModel::onSelectionDragStart,
-                                onSelectionDragUpdate = viewModel::onSelectionDragUpdate,
-                                onSelectionDragEnd = viewModel::onSelectionDragEnd
+                                onGestureStateChanged = viewModel::onViewportGestureStateChanged
                             )
 
                             ViewportFloatingStatusHud(
@@ -351,18 +468,45 @@ fun CadWorkspaceScreen(
                                 onSelectAll = viewModel::selectAllEntities,
                                 modifier = Modifier
                                     .align(Alignment.TopStart)
-                                    .padding(8.dp)
+                                    .padding(start = 34.dp, top = 6.dp, end = 6.dp)
+                            )
+
+                            RetractableSideToolDrawer(
+                                uiState = uiState,
+                                onToggleDrawer = viewModel::toggleToolDrawer,
+                                onSelectCategory = viewModel::selectCategory,
+                                onSelectCommand = { cmd ->
+                                    handleCommandSelection(cmd)
+                                    viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
+                                },
+                                onSelectAll = viewModel::selectAllEntities,
+                                onSelectPrevious = viewModel::selectPreviousEntities,
+                                onClearSelection = viewModel::clearSelection,
+                                modifier = Modifier.align(Alignment.CenterStart)
                             )
                         }
 
-                        // Bottom Command Line & Sub-options Bar
-                        CompactCommandLineBar(
+                        ContextualCommandAndOptionsDock(
                             uiState = uiState,
                             commandLineInput = commandLineInput,
-                            onCommandLineInputChange = { commandLineInput = it },
+                            onCommandLineInputChange = { query ->
+                                commandLineInput = query
+                                viewModel.updateCommandInputQuery(query)
+                            },
+                            onOpenCommandEditing = {
+                                viewModel.openCommandLineEditing(commandLineInput)
+                            },
+                            onCloseCommandEditing = {
+                                commandLineInput = ""
+                                viewModel.closeCommandLineEditing()
+                            },
                             onSubmitCommandLine = {
                                 viewModel.submitCommandOrCoordinateInput(commandLineInput)
                                 commandLineInput = ""
+                            },
+                            onSelectCommand = { cmd ->
+                                commandLineInput = ""
+                                handleCommandSelection(cmd)
                             },
                             onSelectSubOption = viewModel::setCommandSubOption,
                             onParameterChange = viewModel::setCommandParameterValue,
@@ -370,20 +514,28 @@ fun CadWorkspaceScreen(
                             onRefreshQDim = viewModel::refreshQuickDimensions,
                             onSelectQDimDensity = viewModel::setQDimDensity,
                             onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                            onOpenQDimDialog = { showQDimDialog = true }
+                            onOpenQDimDialog = { showQDimDialog = true },
+                            onOpenActionLauncher = { showActionLauncherDialog = true },
+                            onToggleToolDrawer = viewModel::toggleToolDrawer,
+                            onOpenProperties = { showPropertiesDialog = true },
+                            onDeleteSelected = viewModel::deleteSelectedEntities,
+                            onClearSelection = viewModel::clearSelection,
+                            onSelectByLayer = viewModel::selectEntitiesByLayer,
+                            onSelectByType = viewModel::selectEntitiesByType,
+                            onFinishCommand = { viewModel.finishCurrentCommand() },
+                            onCancelCommand = viewModel::cancelCurrentCommand
                         )
                     }
 
-                    // Right-Side Properties Summary + Dedicated Lower Virtual Cursor Controller Panel
+                    // Right-Side Opaque Inspector + Collapsible Virtual Cursor Controller
                     Column(
                         modifier = Modifier
-                            .width(310.dp)
+                            .width(308.dp)
                             .fillMaxHeight()
                             .background(CadPanelSurface)
                             .border(1.dp, CadBorderHairline),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Upper Right Quick Inspector
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -393,48 +545,59 @@ fun CadWorkspaceScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "INSPECTOR & LAYERS",
+                                text = "INSPECTOR & SELECTION",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = CadCyanPrimary
                             )
                             Text(
-                                text = "Active Layer: ${uiState.activeLayerName} • Entities: ${uiState.entities.size} • Selected: ${uiState.selectedEntityIds.size}",
-                                style = MaterialTheme.typography.bodyMedium,
+                                text = "Layer: ${uiState.activeLayerName} • Entities: ${uiState.entities.size} • Selected: ${uiState.selectedEntityIds.size}",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = CadTextSecondary
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Button(
                                     onClick = { showLayerBlockDialog = true },
                                     modifier = Modifier.weight(1f),
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
+                                    contentPadding = PaddingValues(4.dp)
                                 ) {
                                     Text("Layers/Blocks", style = MaterialTheme.typography.labelSmall)
                                 }
                                 Button(
                                     onClick = { showPropertiesDialog = true },
                                     modifier = Modifier.weight(1f),
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
+                                    contentPadding = PaddingValues(4.dp)
                                 ) {
                                     Text("Props/Constrain", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                            Text(
-                                text = "Recent Command Log:",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CadTextMuted
-                            )
-                            uiState.commandHistoryLog.takeLast(3).forEach { logLine ->
-                                Text(
-                                    text = "• $logLine",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = CadTextSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                OpaqueChipButton(
+                                    label = "Select All",
+                                    active = false,
+                                    activeBg = OpaqueCyanBadgeBg,
+                                    activeBorder = CadCyanPrimary,
+                                    textColor = CadTextPrimary,
+                                    onClick = viewModel::selectAllEntities
+                                )
+                                OpaqueChipButton(
+                                    label = "Prev Sel",
+                                    active = false,
+                                    activeBg = OpaqueCyanBadgeBg,
+                                    activeBorder = CadCyanPrimary,
+                                    textColor = CadTextPrimary,
+                                    onClick = viewModel::selectPreviousEntities
+                                )
+                                OpaqueChipButton(
+                                    label = "Clear",
+                                    active = false,
+                                    activeBg = OpaqueCyanBadgeBg,
+                                    activeBorder = CadCyanPrimary,
+                                    textColor = CadTextSecondary,
+                                    onClick = viewModel::clearSelection
                                 )
                             }
                         }
 
-                        // Lower Right Dedicated Virtual Cursor Controller
                         VirtualCursorControllerDeck(
                             config = uiState.controllerConfig,
                             cursorModelPos = uiState.snappedCursorModelPos,
@@ -452,6 +615,11 @@ fun CadWorkspaceScreen(
                             onIncrementSelect = viewModel::setStepIncrement,
                             onOpenControllerSettings = { showControllerSettingsDialog = true },
                             onToggleCollapse = viewModel::toggleControllerCollapse,
+                            onSetCollapsed = { collapsed ->
+                                viewModel.setControllerDockState(
+                                    if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+                                )
+                            },
                             onOpenCoordinateDialog = { showCoordinateDialog = true }
                         )
                     }
@@ -461,6 +629,45 @@ fun CadWorkspaceScreen(
     }
 
     // --- Modal Dialogs ---
+    if (showActionLauncherDialog) {
+        ActionLauncherDialog(
+            uiState = uiState,
+            onSelectCommand = { cmd ->
+                showActionLauncherDialog = false
+                handleCommandSelection(cmd)
+            },
+            onSelectAll = {
+                showActionLauncherDialog = false
+                viewModel.selectAllEntities()
+            },
+            onSelectWindowMode = {
+                showActionLauncherDialog = false
+                viewModel.activateCommand(CadCommandId.SELECT, "Window")
+            },
+            onSelectCrossingMode = {
+                showActionLauncherDialog = false
+                viewModel.activateCommand(CadCommandId.SELECT, "Crossing")
+            },
+            onSelectPrevious = {
+                showActionLauncherDialog = false
+                viewModel.selectPreviousEntities()
+            },
+            onClearSelection = {
+                showActionLauncherDialog = false
+                viewModel.clearSelection()
+            },
+            onFitDrawing = {
+                showActionLauncherDialog = false
+                viewModel.fitDrawing()
+            },
+            onOpenMatrix = {
+                showActionLauncherDialog = false
+                showMatrixDialog = true
+            },
+            onDismiss = { showActionLauncherDialog = false }
+        )
+    }
+
     if (showUnitsDialog) {
         UnitsAndPrecisionDialog(
             currentStorageUnit = uiState.storageUnit,
@@ -579,14 +786,88 @@ fun CadWorkspaceScreen(
 
 private object Point2DDisplayAdapter {
     fun toDisplay(
-        pt: com.example.cad.model.Point2D,
+        pt: Point2D,
         storageUnit: com.example.cad.model.CadUnit,
         displayUnit: com.example.cad.model.CadUnit
-    ): com.example.cad.model.Point2D {
+    ): Point2D {
         val ratio = storageUnit.toMillimetersFactor / displayUnit.toMillimetersFactor
-        return com.example.cad.model.Point2D(pt.x * ratio, pt.y * ratio)
+        return Point2D(pt.x * ratio, pt.y * ratio)
     }
 }
+
+// --- Section 4: Animated Transient Notification Banner ---
+
+@Composable
+private fun TransientNotificationBanner(
+    notification: TransientNotification?,
+    onDismiss: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = notification != null,
+        enter = slideInVertically(animationSpec = tween(200)) { -it } + fadeIn(animationSpec = tween(200)),
+        exit = slideOutVertically(animationSpec = tween(180)) { -it } + fadeOut(animationSpec = tween(180))
+    ) {
+        val item = notification ?: return@AnimatedVisibility
+        val accentColor = when (item.category) {
+            NotificationCategory.SUCCESS -> CadEmeraldCrossing
+            NotificationCategory.WARNING -> CadAmberSnap
+            NotificationCategory.ERROR -> CadRedAlert
+            NotificationCategory.INFO -> CadCyanPrimary
+        }
+        val bgTint = when (item.category) {
+            NotificationCategory.SUCCESS -> OpaqueEmeraldBadgeBg
+            NotificationCategory.WARNING -> OpaqueAmberBadgeBg
+            NotificationCategory.ERROR -> OpaqueRedBadgeBg
+            NotificationCategory.INFO -> OpaqueCyanBadgeBg
+        }
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, accentColor, RoundedCornerShape(0.dp))
+                .testTag("transient_notification_banner"),
+            color = bgTint
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = item.message,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = accentColor,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(CadSurfaceCard)
+                        .border(1.dp, CadBorderHairline, RoundedCornerShape(4.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("notification_dismiss_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Dismiss notification",
+                        tint = CadTextPrimary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// --- Section 2.1 & Section 6: Top Engineering Header Bar with Fit Drawing & + Launcher ---
 
 @Composable
 private fun TopEngineeringHeaderBar(
@@ -595,6 +876,7 @@ private fun TopEngineeringHeaderBar(
     unitChangeMode: UnitChangeMode,
     isQuickDimensionEnabled: Boolean,
     workspaceSpace: WorkspaceSpace,
+    fitDrawingPolicy: FitDrawingPolicy,
     canUndo: Boolean,
     canRedo: Boolean,
     onOpenProjectHub: () -> Unit,
@@ -603,10 +885,16 @@ private fun TopEngineeringHeaderBar(
     onOpenSheetSetup: () -> Unit,
     onOpenQDim: () -> Unit,
     onOpenMatrix: () -> Unit,
+    onOpenLayers: () -> Unit,
+    onOpenProperties: () -> Unit,
+    onOpenActionLauncher: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
-    onZoomExtents: () -> Unit
+    onFitDrawing: () -> Unit,
+    onSelectFitPolicy: (FitDrawingPolicy) -> Unit
 ) {
+    var showOverflowMenu by remember { mutableStateOf(false) }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -617,45 +905,46 @@ private fun TopEngineeringHeaderBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             // Project Hub Button
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(7.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .background(CadPanelElevated)
-                    .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
+                    .border(1.dp, CadBorderHairline, RoundedCornerShape(6.dp))
                     .clickable(onClick = onOpenProjectHub)
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
                     .testTag("top_project_hub_button"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.FolderOpen, contentDescription = "Projects & DXF/PDF", tint = CadCyanPrimary, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(5.dp))
+                Icon(Icons.Default.FolderOpen, contentDescription = "Projects & DXF/PDF", tint = CadCyanPrimary, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     text = projectName,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.labelMedium,
                     color = CadTextPrimary,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1
                 )
             }
 
-            // Active Unit Pill -> Opens Units & Precision Dialog (shows active unit + saved mode)
+            // Active Unit Pill -> Opens Units & Precision Dialog
             val modeBadge = if (unitChangeMode == UnitChangeMode.CONVERT_DISPLAY_UNITS) "Opt A" else "Opt B"
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
-                    .background(CadCyanPrimary.copy(alpha = 0.16f))
+                    .background(OpaqueCyanBadgeBg)
                     .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
                     .clickable(onClick = onOpenUnits)
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
                     .testTag("top_units_button")
             ) {
                 Text(
                     text = "UNIT: $displayUnitSymbol ($modeBadge)",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = CadCyanPrimary,
                     fontWeight = FontWeight.Bold
                 )
@@ -666,7 +955,7 @@ private fun TopEngineeringHeaderBar(
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .background(
-                        if (workspaceSpace == WorkspaceSpace.PAPER_SPACE) CadAmberSnap.copy(alpha = 0.22f)
+                        if (workspaceSpace == WorkspaceSpace.PAPER_SPACE) OpaqueAmberBadgeBg
                         else CadPanelElevated
                     )
                     .border(
@@ -675,13 +964,117 @@ private fun TopEngineeringHeaderBar(
                         RoundedCornerShape(6.dp)
                     )
                     .clickable(onClick = onToggleWorkspaceSpace)
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
                     .testTag("top_space_toggle_button")
             ) {
                 Text(
                     text = if (workspaceSpace == WorkspaceSpace.MODEL_SPACE) "MODEL" else "PAPER",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = if (workspaceSpace == WorkspaceSpace.PAPER_SPACE) CadAmberSnap else CadTextSecondary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Undo & Redo
+            IconButton(
+                onClick = onUndo,
+                enabled = canUndo,
+                modifier = Modifier
+                    .size(30.dp)
+                    .testTag("top_undo_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Undo,
+                    contentDescription = "Undo",
+                    tint = if (canUndo) CadTextPrimary else CadTextMuted,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+            IconButton(
+                onClick = onRedo,
+                enabled = canRedo,
+                modifier = Modifier
+                    .size(30.dp)
+                    .testTag("top_redo_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Redo,
+                    contentDescription = "Redo",
+                    tint = if (canRedo) CadTextPrimary else CadTextMuted,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+
+            // Primary Fit Drawing Action (Section 6.1)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(OpaqueCyanBadgeBg)
+                    .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
+                    .clickable(onClick = onFitDrawing)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("top_zoom_extents_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CenterFocusStrong,
+                    contentDescription = "Fit Drawing to Viewport",
+                    tint = CadCyanPrimary,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "FIT",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadCyanPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // + Action Launcher Button (Section 14.7)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(OpaqueAmberBadgeBg)
+                    .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
+                    .clickable(onClick = onOpenActionLauncher)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("top_action_launcher_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "Open CAD Action Launcher",
+                    tint = CadAmberSnap,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "ACTIONS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadAmberSnap,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Quick Dimension (QDIM) Status + Popup Button
+            Button(
+                onClick = onOpenQDim,
+                modifier = Modifier
+                    .height(28.dp)
+                    .testTag("top_qdim_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isQuickDimensionEnabled) CadEmeraldCrossing else CadPanelElevated,
+                    contentColor = if (isQuickDimensionEnabled) Color(0xFF002418) else CadCyanPrimary
+                ),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                    text = if (isQuickDimensionEnabled) "QDIM: ON" else "QDIM: OFF",
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -690,32 +1083,10 @@ private fun TopEngineeringHeaderBar(
             IconButton(
                 onClick = onOpenSheetSetup,
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(30.dp)
                     .testTag("top_sheet_setup_button")
             ) {
-                Icon(Icons.Default.Description, contentDescription = "Sheet & Page Setup", tint = CadTextSecondary, modifier = Modifier.size(18.dp))
-            }
-
-            // Quick Dimension (QDIM) Status + Popup Button (Refresh is exclusively inside the QDIM command & popup)
-            Button(
-                onClick = onOpenQDim,
-                modifier = Modifier
-                    .height(30.dp)
-                    .testTag("top_qdim_button"),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isQuickDimensionEnabled) CadEmeraldCrossing else CadPanelElevated,
-                    contentColor = if (isQuickDimensionEnabled) Color(0xFF002418) else CadCyanPrimary
-                ),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                shape = RoundedCornerShape(7.dp)
-            ) {
-                Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = if (isQuickDimensionEnabled) "QDIM: ON" else "QDIM: OFF",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Icon(Icons.Default.Description, contentDescription = "Sheet & Page Setup", tint = CadTextSecondary, modifier = Modifier.size(17.dp))
             }
 
             // CAD Command Compatibility Matrix Button
@@ -723,14 +1094,14 @@ private fun TopEngineeringHeaderBar(
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .background(CadPanelElevated)
-                    .border(1.dp, CadEmeraldCrossing.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+                    .border(1.dp, CadEmeraldCrossing, RoundedCornerShape(6.dp))
                     .clickable(onClick = onOpenMatrix)
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
                     .testTag("top_command_matrix_button"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.ListAlt, contentDescription = "Command Compatibility Matrix", tint = CadEmeraldCrossing, modifier = Modifier.size(15.dp))
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.Default.ListAlt, contentDescription = "Command Compatibility Matrix", tint = CadEmeraldCrossing, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = "MATRIX",
                     style = MaterialTheme.typography.labelSmall,
@@ -739,51 +1110,64 @@ private fun TopEngineeringHeaderBar(
                 )
             }
 
-            // Undo / Redo / Zoom Extents
-            IconButton(
-                onClick = onUndo,
-                enabled = canUndo,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("top_undo_button")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Undo,
-                    contentDescription = "Undo",
-                    tint = if (canUndo) CadTextPrimary else CadTextMuted,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            IconButton(
-                onClick = onRedo,
-                enabled = canRedo,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("top_redo_button")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Redo,
-                    contentDescription = "Redo",
-                    tint = if (canRedo) CadTextPrimary else CadTextMuted,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            IconButton(
-                onClick = onZoomExtents,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("top_zoom_extents_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.CenterFocusStrong,
-                    contentDescription = "Zoom Extents / Fit Drawing",
-                    tint = CadCyanPrimary,
-                    modifier = Modifier.size(18.dp)
-                )
+            // Overflow Menu for Fit Policy & Secondary Tools
+            Box {
+                IconButton(
+                    onClick = { showOverflowMenu = true },
+                    modifier = Modifier
+                        .size(30.dp)
+                        .testTag("top_overflow_menu_button")
+                ) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More CAD Tools", tint = CadTextPrimary, modifier = Modifier.size(17.dp))
+                }
+                DropdownMenu(
+                    expanded = showOverflowMenu,
+                    onDismissRequest = { showOverflowMenu = false },
+                    modifier = Modifier.background(CadSurfaceCard)
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Fit All Visible (${if (fitDrawingPolicy == FitDrawingPolicy.ALL_VISIBLE) "✓" else ""})", color = CadTextPrimary) },
+                        onClick = {
+                            showOverflowMenu = false
+                            onSelectFitPolicy(FitDrawingPolicy.ALL_VISIBLE)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Fit Selected Only (${if (fitDrawingPolicy == FitDrawingPolicy.SELECTED_ONLY) "✓" else ""})", color = CadTextPrimary) },
+                        onClick = {
+                            showOverflowMenu = false
+                            onSelectFitPolicy(FitDrawingPolicy.SELECTED_ONLY)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Fit Geometry Only (${if (fitDrawingPolicy == FitDrawingPolicy.GEOMETRY_ONLY) "✓" else ""})", color = CadTextPrimary) },
+                        onClick = {
+                            showOverflowMenu = false
+                            onSelectFitPolicy(FitDrawingPolicy.GEOMETRY_ONLY)
+                        }
+                    )
+                    HorizontalDivider(color = CadBorderHairline)
+                    DropdownMenuItem(
+                        text = { Text("Layers & Blocks Manager", color = CadTextPrimary) },
+                        onClick = {
+                            showOverflowMenu = false
+                            onOpenLayers()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Properties & Constraints", color = CadTextPrimary) },
+                        onClick = {
+                            showOverflowMenu = false
+                            onOpenProperties()
+                        }
+                    )
+                }
             }
         }
     }
 }
+
+// --- Section 3 & Section 14: Opaque Floating Snap & Layer Status Strip ---
 
 @Composable
 private fun ViewportFloatingStatusHud(
@@ -797,84 +1181,70 @@ private fun ViewportFloatingStatusHud(
     onSelectAll: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(5.dp)
+    Row(
+        modifier = modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        // Active Command Prompt Banner
-        Surface(
-            color = CadHudSurface,
-            shape = RoundedCornerShape(7.dp),
-            modifier = Modifier
-                .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
-                .testTag("active_command_prompt_banner")
-        ) {
-            Text(
-                text = uiState.commandPromptBanner,
-                style = MaterialTheme.typography.labelMedium,
-                color = CadCyanPrimary,
-                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-            )
-        }
-
-        // Precision Snap & Layer Status Pill Bar
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
+        HudToggleBadge(
+            label = "GRID",
+            active = uiState.gridSnapConfig.showGrid,
+            activeBg = OpaqueCyanBadgeBg,
+            activeColor = CadCyanPrimary,
+            tag = "hud_toggle_grid",
+            onClick = onToggleGrid
+        )
+        HudToggleBadge(
+            label = "GSNAP (${uiState.gridSnapConfig.gridSnapInterval})",
+            active = uiState.gridSnapConfig.gridSnapEnabled,
+            activeBg = OpaqueCyanBadgeBg,
+            activeColor = CadCyanPrimary,
+            tag = "hud_toggle_gsnap",
+            onClick = onToggleGridSnap
+        )
+        HudToggleBadge(
+            label = if (uiState.activeSnapCandidate != null)
+                "OSNAP [${uiState.activeSnapCandidate.mode.badgeCode}]"
+            else "OSNAP",
+            active = uiState.gridSnapConfig.osnapEnabled,
+            activeBg = OpaqueAmberBadgeBg,
+            activeColor = CadAmberSnap,
+            tag = "hud_toggle_osnap",
+            onClick = onToggleOsnap
+        )
+        HudToggleBadge(
+            label = "ORTHO",
+            active = uiState.gridSnapConfig.orthoEnabled,
+            activeBg = OpaqueEmeraldBadgeBg,
+            activeColor = CadEmeraldCrossing,
+            tag = "hud_toggle_ortho",
+            onClick = onToggleOrtho
+        )
+        HudToggleBadge(
+            label = "LYR: ${uiState.activeLayerName}",
+            active = true,
+            activeBg = CadHudSurface,
+            activeColor = CadTextPrimary,
+            tag = "hud_open_layers",
+            onClick = onOpenLayers
+        )
+        HudToggleBadge(
+            label = "SEL ALL",
+            active = uiState.selectedEntityIds.isNotEmpty(),
+            activeBg = OpaqueCyanBadgeBg,
+            activeColor = CadCyanPrimary,
+            tag = "hud_select_all",
+            onClick = onSelectAll
+        )
+        if (uiState.selectedEntityIds.isNotEmpty()) {
             HudToggleBadge(
-                label = "GRID",
-                active = uiState.gridSnapConfig.showGrid,
-                activeColor = CadCyanPrimary,
-                tag = "hud_toggle_grid",
-                onClick = onToggleGrid
-            )
-            HudToggleBadge(
-                label = "GSNAP (${uiState.gridSnapConfig.gridSnapInterval})",
-                active = uiState.gridSnapConfig.gridSnapEnabled,
-                activeColor = CadCyanPrimary,
-                tag = "hud_toggle_gsnap",
-                onClick = onToggleGridSnap
-            )
-            HudToggleBadge(
-                label = if (uiState.activeSnapCandidate != null)
-                    "OSNAP [${uiState.activeSnapCandidate.mode.badgeCode}]"
-                else "OSNAP",
-                active = uiState.gridSnapConfig.osnapEnabled,
-                activeColor = CadAmberSnap,
-                tag = "hud_toggle_osnap",
-                onClick = onToggleOsnap
-            )
-            HudToggleBadge(
-                label = "ORTHO",
-                active = uiState.gridSnapConfig.orthoEnabled,
-                activeColor = CadEmeraldCrossing,
-                tag = "hud_toggle_ortho",
-                onClick = onToggleOrtho
-            )
-            HudToggleBadge(
-                label = "LYR: ${uiState.activeLayerName}",
+                label = "PROPS (${uiState.selectedEntityIds.size})",
                 active = true,
-                activeColor = CadTextPrimary,
-                tag = "hud_open_layers",
-                onClick = onOpenLayers
+                activeBg = OpaqueAmberBadgeBg,
+                activeColor = CadAmberSnap,
+                tag = "hud_open_properties",
+                onClick = onOpenProperties
             )
-            HudToggleBadge(
-                label = "SEL ALL",
-                active = uiState.selectedEntityIds.isNotEmpty(),
-                activeColor = CadCyanPrimary,
-                tag = "hud_select_all",
-                onClick = onSelectAll
-            )
-            if (uiState.selectedEntityIds.isNotEmpty()) {
-                HudToggleBadge(
-                    label = "PROPS (${uiState.selectedEntityIds.size})",
-                    active = true,
-                    activeColor = CadAmberSnap,
-                    tag = "hud_open_properties",
-                    onClick = onOpenProperties
-                )
-            }
         }
     }
 }
@@ -883,14 +1253,16 @@ private fun ViewportFloatingStatusHud(
 private fun HudToggleBadge(
     label: String,
     active: Boolean,
+    activeBg: Color,
     activeColor: Color,
     tag: String,
     onClick: () -> Unit
 ) {
+    // 100% opaque surface fill (Section 3)
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(5.dp))
-            .background(if (active) activeColor.copy(alpha = 0.20f) else CadHudSurface)
+            .background(if (active) activeBg else CadHudSurface)
             .border(1.dp, if (active) activeColor else CadBorderHairline, RoundedCornerShape(5.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 7.dp, vertical = 3.dp)
@@ -906,13 +1278,190 @@ private fun HudToggleBadge(
     }
 }
 
+// --- Section 14.5: Retractable Side Tool-Category Drawer ---
+
 @Composable
-private fun CommandRibbonAndInputBar(
+private fun RetractableSideToolDrawer(
+    uiState: CadWorkspaceUiState,
+    onToggleDrawer: () -> Unit,
+    onSelectCategory: (CadCommandCategory) -> Unit,
+    onSelectCommand: (CadCommandId) -> Unit,
+    onSelectAll: () -> Unit,
+    onSelectPrevious: () -> Unit,
+    onClearSelection: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isExpanded = uiState.toolDrawerState == ToolDrawerState.EXPANDED
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        AnimatedVisibility(
+            visible = isExpanded,
+            enter = expandHorizontally(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+            exit = shrinkHorizontally(animationSpec = tween(180)) + fadeOut(animationSpec = tween(180))
+        ) {
+            Surface(
+                modifier = Modifier
+                    .width(184.dp)
+                    .heightIn(max = 380.dp)
+                    .border(1.dp, CadCyanPrimary, RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp))
+                    .testTag("tool_drawer_panel"),
+                shape = RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp),
+                color = CadPanelSurface
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(8.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = "CAD TOOL CATEGORIES",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CadCyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    CadCommandCategory.entries.forEach { cat ->
+                        val isCat = uiState.activeCategory == cat
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isCat) OpaqueCyanBadgeBg else CadPanelElevated)
+                                .border(
+                                    1.dp,
+                                    if (isCat) CadCyanPrimary else CadBorderHairline,
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .clickable { onSelectCategory(cat) }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                .testTag("category_tab_${cat.name}")
+                        ) {
+                            Text(
+                                text = cat.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isCat) CadCyanPrimary else CadTextSecondary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        if (isCat) {
+                            Column(
+                                modifier = Modifier.padding(start = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                CadCommandId.entries.filter { it.category == cat }.forEach { cmd ->
+                                    val isCmd = uiState.activeCommand == cmd
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(if (isCmd) OpaqueAmberBadgeBg else CadHudSurface)
+                                            .border(
+                                                1.dp,
+                                                if (isCmd) CadAmberSnap else CadBorderHairline,
+                                                RoundedCornerShape(5.dp)
+                                            )
+                                            .clickable { onSelectCommand(cmd) }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            .testTag("cmd_button_${cmd.commandName}")
+                                    ) {
+                                        Text(
+                                            text = "${cmd.shortLabel} (${cmd.primaryAlias})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isCmd) CadAmberSnap else CadTextPrimary,
+                                            fontWeight = if (isCmd) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = CadBorderHairline)
+                    Text(
+                        text = "QUICK SELECTION",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CadTextMuted
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        OpaqueChipButton(
+                            label = "All",
+                            active = false,
+                            activeBg = OpaqueCyanBadgeBg,
+                            activeBorder = CadCyanPrimary,
+                            textColor = CadTextPrimary,
+                            onClick = onSelectAll
+                        )
+                        OpaqueChipButton(
+                            label = "Prev",
+                            active = false,
+                            activeBg = OpaqueCyanBadgeBg,
+                            activeBorder = CadCyanPrimary,
+                            textColor = CadTextPrimary,
+                            onClick = onSelectPrevious
+                        )
+                        OpaqueChipButton(
+                            label = "Clear",
+                            active = false,
+                            activeBg = OpaqueCyanBadgeBg,
+                            activeBorder = CadCyanPrimary,
+                            textColor = CadTextSecondary,
+                            onClick = onClearSelection
+                        )
+                    }
+                }
+            }
+        }
+
+        // Retractable Handle Rail (100% Opaque, >= 48dp touch height)
+        Surface(
+            modifier = Modifier
+                .width(26.dp)
+                .height(74.dp)
+                .border(
+                    1.dp,
+                    if (isExpanded) CadCyanPrimary else CadBorderHairline,
+                    RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp)
+                )
+                .clickable(onClick = onToggleDrawer)
+                .testTag("tool_drawer_handle"),
+            shape = RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp),
+            color = CadHudSurface
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = if (isExpanded) {
+                        Icons.AutoMirrored.Filled.KeyboardArrowLeft
+                    } else {
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight
+                    },
+                    contentDescription = if (isExpanded) "Collapse tools" else "Expand tools",
+                    tint = CadCyanPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+// --- Section 14.4: Contextual Command Line, Ranked Prefix Autocomplete & Active Command Bar ---
+
+@Composable
+private fun ContextualCommandAndOptionsDock(
     uiState: CadWorkspaceUiState,
     commandLineInput: String,
     onCommandLineInputChange: (String) -> Unit,
+    onOpenCommandEditing: () -> Unit,
+    onCloseCommandEditing: () -> Unit,
     onSubmitCommandLine: () -> Unit,
-    onSelectCategory: (CadCommandCategory) -> Unit,
     onSelectCommand: (CadCommandId) -> Unit,
     onSelectSubOption: (String) -> Unit,
     onParameterChange: (Double) -> Unit,
@@ -920,110 +1469,288 @@ private fun CommandRibbonAndInputBar(
     onRefreshQDim: () -> Unit,
     onSelectQDimDensity: (QDimDensityPolicy) -> Unit,
     onSelectQDimArrangement: (DimensionArrangementPreference) -> Unit,
-    onOpenQDimDialog: () -> Unit
+    onOpenQDimDialog: () -> Unit,
+    onOpenActionLauncher: () -> Unit,
+    onToggleToolDrawer: () -> Unit,
+    onOpenProperties: () -> Unit,
+    onDeleteSelected: () -> Unit,
+    onClearSelection: () -> Unit,
+    onSelectByLayer: (String) -> Unit,
+    onSelectByType: (String) -> Unit,
+    onFinishCommand: () -> Unit,
+    onCancelCommand: () -> Unit
 ) {
+    val isEditingCommand = uiState.commandPanelState is CommandPanelState.Editing || commandLineInput.isNotBlank()
+    val isRunningActiveCommand = uiState.commandPanelState is CommandPanelState.Running ||
+        uiState.activeCommand != CadCommandId.SELECT ||
+        uiState.commandStepPoints.isNotEmpty() ||
+        uiState.selectionBoxDrag != null
+
+    val rankedSuggestions = remember(commandLineInput) {
+        CadCommandCompatibilityCatalog.rankSuggestionsForPrefix(commandLineInput).take(6)
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .border(1.dp, CadBorderHairline),
         color = CadPanelSurface
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
-            // 1. Category Tabs
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                CadCommandCategory.entries.forEach { cat ->
-                    val isSel = uiState.activeCategory == cat
-                    Box(
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            // 1. IDLE STATE: Compact low-profile trigger strip only (Section 14.4.1)
+            if (!isEditingCommand && !isRunningActiveCommand) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Compact CMD button
+                    Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSel) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
-                            .border(1.dp, if (isSel) CadCyanPrimary else CadBorderHairline, RoundedCornerShape(6.dp))
-                            .clickable { onSelectCategory(cat) }
-                            .padding(horizontal = 9.dp, vertical = 4.dp)
-                            .testTag("category_tab_${cat.name}")
+                            .background(OpaqueCyanBadgeBg)
+                            .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenCommandEditing)
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("cmd_activate_button"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = "Open Command Line",
+                            tint = CadCyanPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
                         Text(
-                            text = cat.label,
+                            text = "CMD / X,Y",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isSel) CadCyanPrimary else CadTextSecondary,
-                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
                         )
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(5.dp))
-
-            // 2. Commands in Active Category
-            val commandsInCategory = remember(uiState.activeCategory) {
-                CadCommandId.entries.filter { it.category == uiState.activeCategory }
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                commandsInCategory.forEach { cmd ->
-                    val isSel = uiState.activeCommand == cmd
-                    Box(
+                    // + Action Launcher button
+                    Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isSel) CadAmberSnap.copy(alpha = 0.24f) else CadPanelElevated)
-                            .border(1.dp, if (isSel) CadAmberSnap else CadBorderHairline, RoundedCornerShape(6.dp))
-                            .clickable { onSelectCommand(cmd) }
-                            .padding(horizontal = 9.dp, vertical = 5.dp)
-                            .testTag("cmd_button_${cmd.commandName}")
+                            .background(OpaqueAmberBadgeBg)
+                            .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenActionLauncher)
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("action_launcher_fab"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Open Action Launcher",
+                            tint = CadAmberSnap,
+                            modifier = Modifier.size(14.dp)
+                        )
                         Text(
-                            text = "${cmd.shortLabel} (${cmd.primaryAlias})",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (isSel) CadAmberSnap else CadTextPrimary,
-                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                            text = "+ LAUNCHER",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadAmberSnap,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Tools Drawer Toggle
+                    OpaqueChipButton(
+                        label = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) "Hide Tools" else "Tools Drawer",
+                        active = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                        activeBg = OpaqueCyanBadgeBg,
+                        activeBorder = CadCyanPrimary,
+                        textColor = CadTextPrimary,
+                        tag = "bottom_tools_toggle_button",
+                        onClick = onToggleToolDrawer
+                    )
+
+                    // Selection quick actions when objects are selected
+                    if (uiState.selectedEntityIds.isNotEmpty()) {
+                        OpaqueChipButton(
+                            label = "Props (${uiState.selectedEntityIds.size})",
+                            active = true,
+                            activeBg = OpaqueAmberBadgeBg,
+                            activeBorder = CadAmberSnap,
+                            textColor = CadAmberSnap,
+                            onClick = onOpenProperties
+                        )
+                        OpaqueChipButton(
+                            label = "Erase",
+                            active = true,
+                            activeBg = OpaqueRedBadgeBg,
+                            activeBorder = CadRedAlert,
+                            textColor = CadRedAlert,
+                            onClick = onDeleteSelected
+                        )
+                        OpaqueChipButton(
+                            label = "Deselect",
+                            active = false,
+                            activeBg = CadPanelElevated,
+                            activeBorder = CadBorderHairline,
+                            textColor = CadTextSecondary,
+                            onClick = onClearSelection
+                        )
+                    } else {
+                        Text(
+                            text = uiState.commandPromptBanner,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
             }
 
-            // 3. Context-Sensitive Sub-Options & Command Line Input Bar
-            CompactCommandLineBar(
-                uiState = uiState,
-                commandLineInput = commandLineInput,
-                onCommandLineInputChange = onCommandLineInputChange,
-                onSubmitCommandLine = onSubmitCommandLine,
-                onSelectSubOption = onSelectSubOption,
-                onParameterChange = onParameterChange,
-                onToggleQDim = onToggleQDim,
-                onRefreshQDim = onRefreshQDim,
-                onSelectQDimDensity = onSelectQDimDensity,
-                onSelectQDimArrangement = onSelectQDimArrangement,
-                onOpenQDimDialog = onOpenQDimDialog
-            )
+            // 2. ACTIVE-COMMAND STATE: Show only active command prompt & valid sub-options (Section 14.4.3)
+            if (isRunningActiveCommand) {
+                ActiveCommandContextBar(
+                    uiState = uiState,
+                    onSelectSubOption = onSelectSubOption,
+                    onParameterChange = onParameterChange,
+                    onToggleQDim = onToggleQDim,
+                    onRefreshQDim = onRefreshQDim,
+                    onSelectQDimDensity = onSelectQDimDensity,
+                    onSelectQDimArrangement = onSelectQDimArrangement,
+                    onOpenQDimDialog = onOpenQDimDialog,
+                    onOpenCommandEditing = onOpenCommandEditing,
+                    onSelectByLayer = onSelectByLayer,
+                    onSelectByType = onSelectByType,
+                    onFinishCommand = onFinishCommand,
+                    onCancelCommand = onCancelCommand
+                )
+            }
+
+            // 3. TYPING / AUTOCOMPLETE STATE: Prefix-ranked suggestion strip + input field (Section 14.4.2)
+            if (isEditingCommand) {
+                if (rankedSuggestions.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(bottom = 4.dp)
+                            .testTag("command_suggestion_strip"),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        rankedSuggestions.forEachIndexed { idx, spec ->
+                            val isTopMatch = idx == 0
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isTopMatch) OpaqueAmberBadgeBg else CadPanelElevated)
+                                    .border(
+                                        1.dp,
+                                        if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable { onSelectCommand(spec.id) }
+                                    .padding(horizontal = 9.dp, vertical = 4.dp)
+                                    .testTag("suggestion_chip_${spec.id.commandName}")
+                            ) {
+                                Text(
+                                    text = "${spec.id.commandName} (${spec.id.primaryAlias})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "CMD:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CadCyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    OutlinedTextField(
+                        value = commandLineInput,
+                        onValueChange = onCommandLineInputChange,
+                        placeholder = {
+                            Text(
+                                text = "Type command prefix (L, PL, C, F, QDIM) or coords (125,85 / @25,-10 / 50<45)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CadTextMuted
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { onSubmitCommandLine() }),
+                        textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                            .testTag("command_line_input_field")
+                    )
+                    IconButton(
+                        onClick = onSubmitCommandLine,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(OpaqueCyanBadgeBg)
+                            .border(1.dp, CadCyanPrimary, RoundedCornerShape(7.dp))
+                            .testTag("command_line_submit_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Execute Command or Coordinate",
+                            tint = CadCyanPrimary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = onCloseCommandEditing,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(CadPanelElevated)
+                            .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
+                            .testTag("cmd_close_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close Command Input",
+                            tint = CadTextSecondary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun CompactCommandLineBar(
+private fun ActiveCommandContextBar(
     uiState: CadWorkspaceUiState,
-    commandLineInput: String,
-    onCommandLineInputChange: (String) -> Unit,
-    onSubmitCommandLine: () -> Unit,
     onSelectSubOption: (String) -> Unit,
     onParameterChange: (Double) -> Unit,
     onToggleQDim: (Boolean) -> Unit,
     onRefreshQDim: () -> Unit,
     onSelectQDimDensity: (QDimDensityPolicy) -> Unit,
     onSelectQDimArrangement: (DimensionArrangementPreference) -> Unit,
-    onOpenQDimDialog: () -> Unit
+    onOpenQDimDialog: () -> Unit,
+    onOpenCommandEditing: () -> Unit,
+    onSelectByLayer: (String) -> Unit,
+    onSelectByType: (String) -> Unit,
+    onFinishCommand: () -> Unit,
+    onCancelCommand: () -> Unit
 ) {
     val subOptions = remember(uiState.activeCommand) {
         when (uiState.activeCommand) {
+            CadCommandId.SELECT -> listOf("Single", "Window", "Crossing", "SelectAll", "Previous", "Clear")
             CadCommandId.CIRCLE -> listOf("Radius", "Diameter", "2P", "3P", "TTR")
             CadCommandId.ARC -> listOf("3P", "SCE")
             CadCommandId.RECTANGLE -> listOf("Sharp", "Fillet", "Chamfer")
@@ -1065,7 +1792,7 @@ private fun CompactCommandLineBar(
 
     LaunchedEffect(uiState.commandParameterValue) {
         val currentParsed = manualParamText.toDoubleOrNull()
-        if (currentParsed == null || kotlin.math.abs(currentParsed - uiState.commandParameterValue) > 1e-4) {
+        if (currentParsed == null || abs(currentParsed - uiState.commandParameterValue) > 1e-4) {
             manualParamText = if (uiState.commandParameterValue % 1.0 == 0.0) {
                 uiState.commandParameterValue.toInt().toString()
             } else {
@@ -1074,9 +1801,90 @@ private fun CompactCommandLineBar(
         }
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    var showLayerFilterMenu by remember { mutableStateOf(false) }
+    var showTypeFilterMenu by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        // Active Command Prompt Header Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("active_command_prompt_banner"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(OpaqueAmberBadgeBg)
+                        .border(1.dp, CadAmberSnap, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = uiState.activeCommand.commandName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CadAmberSnap,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = uiState.commandPromptBanner,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadCyanPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Quick CMD / Coordinate entry trigger while command is active
+                OpaqueChipButton(
+                    label = "CMD / X,Y",
+                    active = false,
+                    activeBg = OpaqueCyanBadgeBg,
+                    activeBorder = CadCyanPrimary,
+                    textColor = CadCyanPrimary,
+                    tag = "cmd_activate_button",
+                    onClick = onOpenCommandEditing
+                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(OpaqueEmeraldBadgeBg)
+                        .border(1.dp, CadEmeraldCrossing, RoundedCornerShape(5.dp))
+                        .clickable(onClick = onFinishCommand)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        .testTag("active_cmd_finish_button")
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = "Finish Command", tint = CadEmeraldCrossing, modifier = Modifier.size(14.dp))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(OpaqueRedBadgeBg)
+                        .border(1.dp, CadRedAlert, RoundedCornerShape(5.dp))
+                        .clickable(onClick = onCancelCommand)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        .testTag("active_cmd_cancel_button")
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Cancel Command", tint = CadRedAlert, modifier = Modifier.size(14.dp))
+                }
+            }
+        }
+
+        // QDIM Contextual Controls
         if (isQDimCommand) {
-            Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1084,21 +1892,17 @@ private fun CompactCommandLineBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Quick Alignment Toggle (ON / OFF) inside the QDIM command bar
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            if (uiState.isQuickDimensionEnabled) CadEmeraldCrossing.copy(alpha = 0.24f)
-                            else CadPanelElevated
-                        )
+                        .background(if (uiState.isQuickDimensionEnabled) OpaqueEmeraldBadgeBg else CadPanelElevated)
                         .border(
                             1.5.dp,
                             if (uiState.isQuickDimensionEnabled) CadEmeraldCrossing else CadBorderHairline,
                             RoundedCornerShape(6.dp)
                         )
                         .clickable { onToggleQDim(!uiState.isQuickDimensionEnabled) }
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
                         .testTag("qdim_bar_toggle")
                 ) {
                     Text(
@@ -1109,14 +1913,13 @@ private fun CompactCommandLineBar(
                     )
                 }
 
-                // Refresh button right beside the toggle inside the Quick Dimension command bar
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(CadCyanPrimary.copy(alpha = 0.20f))
+                        .background(OpaqueCyanBadgeBg)
                         .border(1.5.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
                         .clickable(onClick = onRefreshQDim)
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
                         .testTag("qdim_bar_refresh_button"),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -1135,13 +1938,12 @@ private fun CompactCommandLineBar(
                     )
                 }
 
-                // Density policy chips
                 QDimDensityPolicy.entries.forEach { policy ->
                     val isSel = uiState.qdimDensity == policy
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(5.dp))
-                            .background(if (isSel) CadAmberSnap.copy(alpha = 0.22f) else CadPanelElevated)
+                            .background(if (isSel) OpaqueAmberBadgeBg else CadPanelElevated)
                             .border(1.dp, if (isSel) CadAmberSnap else CadBorderHairline, RoundedCornerShape(5.dp))
                             .clickable { onSelectQDimDensity(policy) }
                             .padding(horizontal = 7.dp, vertical = 4.dp)
@@ -1155,7 +1957,6 @@ private fun CompactCommandLineBar(
                     }
                 }
 
-                // Arrangement preference chips (Chain / Baseline / Ordinate)
                 DimensionArrangementPreference.entries.forEach { pref ->
                     val isSel = uiState.qdimArrangementPreference == pref
                     val shortTag = when (pref) {
@@ -1166,7 +1967,7 @@ private fun CompactCommandLineBar(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(5.dp))
-                            .background(if (isSel) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
+                            .background(if (isSel) OpaqueCyanBadgeBg else CadPanelElevated)
                             .border(1.dp, if (isSel) CadCyanPrimary else CadBorderHairline, RoundedCornerShape(5.dp))
                             .clickable { onSelectQDimArrangement(pref) }
                             .padding(horizontal = 7.dp, vertical = 4.dp)
@@ -1180,7 +1981,6 @@ private fun CompactCommandLineBar(
                     }
                 }
 
-                // Button to open full Quick Dimension Dialog
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(5.dp))
@@ -1199,41 +1999,97 @@ private fun CompactCommandLineBar(
             }
         }
 
+        // Sub-Options & Manual Numeric Parameter Controls
         if (subOptions.isNotEmpty() || needsNumericParam) {
-            Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 subOptions.forEach { opt ->
                     val isSel = uiState.commandSubOption.equals(opt, true)
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(5.dp))
-                            .background(if (isSel) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
+                            .background(if (isSel) OpaqueCyanBadgeBg else CadPanelElevated)
                             .border(1.dp, if (isSel) CadCyanPrimary else CadBorderHairline, RoundedCornerShape(5.dp))
                             .clickable { onSelectSubOption(opt) }
                             .padding(horizontal = 7.dp, vertical = 4.dp)
+                            .testTag("suboption_$opt")
                     ) {
                         Text(
                             text = opt,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isSel) CadCyanPrimary else CadTextSecondary
+                            color = if (isSel) CadCyanPrimary else CadTextSecondary,
+                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                 }
 
+                // Section 14.3: Layer & Entity-Type Selection Filters when SELECT is active
+                if (uiState.activeCommand == CadCommandId.SELECT) {
+                    Box {
+                        OpaqueChipButton(
+                            label = "By Layer…",
+                            active = false,
+                            activeBg = CadPanelElevated,
+                            activeBorder = CadBorderHairline,
+                            textColor = CadTextPrimary,
+                            onClick = { showLayerFilterMenu = true }
+                        )
+                        DropdownMenu(
+                            expanded = showLayerFilterMenu,
+                            onDismissRequest = { showLayerFilterMenu = false },
+                            modifier = Modifier.background(CadSurfaceCard)
+                        ) {
+                            uiState.layers.forEach { layer ->
+                                DropdownMenuItem(
+                                    text = { Text("Layer: ${layer.name}", color = CadTextPrimary) },
+                                    onClick = {
+                                        showLayerFilterMenu = false
+                                        onSelectByLayer(layer.name)
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Box {
+                        OpaqueChipButton(
+                            label = "By Type…",
+                            active = false,
+                            activeBg = CadPanelElevated,
+                            activeBorder = CadBorderHairline,
+                            textColor = CadTextPrimary,
+                            onClick = { showTypeFilterMenu = true }
+                        )
+                        DropdownMenu(
+                            expanded = showTypeFilterMenu,
+                            onDismissRequest = { showTypeFilterMenu = false },
+                            modifier = Modifier.background(CadSurfaceCard)
+                        ) {
+                            listOf("LINE", "LWPOLYLINE", "CIRCLE", "ARC", "DIMENSION", "MTEXT").forEach { tName ->
+                                DropdownMenuItem(
+                                    text = { Text("Type: $tName", color = CadTextPrimary) },
+                                    onClick = {
+                                        showTypeFilterMenu = false
+                                        onSelectByType(tName)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (needsNumericParam) {
-                    // Primary Manual Radius / Parameter Input Box
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .background(CadPanelElevated)
                             .border(1.5.dp, CadAmberSnap, RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -1260,10 +2116,10 @@ private fun CompactCommandLineBar(
                             ),
                             cursorBrush = SolidColor(CadCyanPrimary),
                             modifier = Modifier
-                                .width(72.dp)
+                                .width(68.dp)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(CadModelSpaceBg)
-                                .border(1.dp, CadCyanPrimary.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+                                .border(1.dp, CadCyanPrimary, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 6.dp, vertical = 3.dp)
                                 .testTag("manual_parameter_input_field")
                         )
@@ -1289,18 +2145,17 @@ private fun CompactCommandLineBar(
                         }
                     }
 
-                    // Minimal Quick Presets (Secondary to Manual Input)
                     Text(
                         text = "Quick:",
                         style = MaterialTheme.typography.labelSmall,
                         color = CadTextMuted
                     )
                     listOf(2.0, 5.0, 10.0).forEach { presetVal ->
-                        val isSel = kotlin.math.abs(uiState.commandParameterValue - presetVal) < 1e-4
+                        val isSel = abs(uiState.commandParameterValue - presetVal) < 1e-4
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(5.dp))
-                                .background(if (isSel) CadAmberSnap.copy(alpha = 0.22f) else CadPanelElevated)
+                                .background(if (isSel) OpaqueAmberBadgeBg else CadPanelElevated)
                                 .border(1.dp, if (isSel) CadAmberSnap else CadBorderHairline, RoundedCornerShape(5.dp))
                                 .clickable {
                                     manualParamText = presetVal.toInt().toString()
@@ -1319,117 +2174,223 @@ private fun CompactCommandLineBar(
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // Command Line & Coordinate Input Row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = "CMD:",
-                style = MaterialTheme.typography.labelMedium,
-                color = CadCyanPrimary,
-                fontWeight = FontWeight.Bold
-            )
-            OutlinedTextField(
-                value = commandLineInput,
-                onValueChange = onCommandLineInputChange,
-                placeholder = {
-                    Text(
-                        text = "Enter command (L, PL, C, QDIM, TR) or coords (125,85 / @25,-10 / 50<45)",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadTextMuted
-                    )
-                },
-                singleLine = true,
-                textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(46.dp)
-                    .testTag("command_line_input_field")
-            )
-            IconButton(
-                onClick = onSubmitCommandLine,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(CadCyanPrimary.copy(alpha = 0.2f))
-                    .testTag("command_line_submit_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Send,
-                    contentDescription = "Execute Command or Coordinate",
-                    tint = CadCyanPrimary,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        }
     }
 }
 
 @Composable
-private fun LandscapeLeftToolDock(
-    uiState: CadWorkspaceUiState,
-    onSelectCategory: (CadCommandCategory) -> Unit,
-    onSelectCommand: (CadCommandId) -> Unit
+private fun OpaqueChipButton(
+    label: String,
+    active: Boolean,
+    activeBg: Color,
+    activeBorder: Color,
+    textColor: Color,
+    tag: String? = null,
+    onClick: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .width(164.dp)
-            .fillMaxHeight()
-            .background(CadPanelSurface)
-            .border(1.dp, CadBorderHairline)
-            .padding(6.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
-    ) {
+    val baseMod = Modifier
+        .clip(RoundedCornerShape(5.dp))
+        .background(if (active) activeBg else CadPanelElevated)
+        .border(1.dp, if (active) activeBorder else CadBorderHairline, RoundedCornerShape(5.dp))
+        .clickable(onClick = onClick)
+        .padding(horizontal = 8.dp, vertical = 4.dp)
+    Box(modifier = if (tag != null) baseMod.testTag(tag) else baseMod) {
         Text(
-            text = "CAD TOOLBOX",
-            style = MaterialTheme.typography.labelLarge,
-            color = CadCyanPrimary
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = textColor,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
         )
-        CadCommandCategory.entries.forEach { cat ->
-            val isCat = uiState.activeCategory == cat
-            Box(
+    }
+}
+
+// --- Section 14.7: '+' Action Launcher Dialog ---
+
+@Composable
+private fun ActionLauncherDialog(
+    uiState: CadWorkspaceUiState,
+    onSelectCommand: (CadCommandId) -> Unit,
+    onSelectAll: () -> Unit,
+    onSelectWindowMode: () -> Unit,
+    onSelectCrossingMode: () -> Unit,
+    onSelectPrevious: () -> Unit,
+    onClearSelection: () -> Unit,
+    onFitDrawing: () -> Unit,
+    onOpenMatrix: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val filteredCommands = remember(searchQuery) {
+        if (searchQuery.isBlank()) {
+            CadCommandId.entries
+        } else {
+            val ranked = CadCommandCompatibilityCatalog.rankSuggestionsForPrefix(searchQuery).map { it.id }
+            if (ranked.isNotEmpty()) {
+                ranked
+            } else {
+                val q = searchQuery.trim().uppercase()
+                CadCommandId.entries.filter {
+                    it.commandName.contains(q) || it.shortLabel.uppercase().contains(q) || it.primaryAlias.contains(q)
+                }
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .widthIn(max = 620.dp)
+                .heightIn(max = 640.dp)
+                .border(1.dp, CadCyanPrimary, RoundedCornerShape(12.dp))
+                .testTag("action_launcher_dialog"),
+            shape = RoundedCornerShape(12.dp),
+            color = CadSurfaceCard
+        ) {
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (isCat) CadCyanPrimary.copy(alpha = 0.2f) else CadPanelElevated)
-                    .clickable { onSelectCategory(cat) }
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = cat.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isCat) CadCyanPrimary else CadTextSecondary,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            if (isCat) {
-                CadCommandId.entries.filter { it.category == cat }.forEach { cmd ->
-                    val isCmd = uiState.activeCommand == cmd
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 8.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(if (isCmd) CadAmberSnap.copy(alpha = 0.22f) else Color.Transparent)
-                            .border(
-                                1.dp,
-                                if (isCmd) CadAmberSnap else CadBorderHairline,
-                                RoundedCornerShape(5.dp)
-                            )
-                            .clickable { onSelectCommand(cmd) }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
                         Text(
-                            text = "${cmd.shortLabel} (${cmd.primaryAlias})",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isCmd) CadAmberSnap else CadTextPrimary
+                            text = "CAD COMMAND & ACTION LAUNCHER",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
                         )
+                        Text(
+                            text = "Launch any Draw, Modify, Selection, Dimension, or Sheet action",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextSecondary
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close Launcher", tint = CadTextPrimary)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = {
+                        Text("Filter by command name or alias (e.g., L, PL, FILLET, QDIM)…", style = MaterialTheme.typography.labelSmall, color = CadTextMuted)
+                    },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("action_launcher_search_field")
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Quick Selection & Viewport Actions
+                    if (searchQuery.isBlank()) {
+                        Text(
+                            text = "QUICK SELECTION & VIEWPORT",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = CadAmberSnap,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OpaqueChipButton("Fit Drawing", true, OpaqueCyanBadgeBg, CadCyanPrimary, CadCyanPrimary, onClick = onFitDrawing)
+                            OpaqueChipButton("Select All", false, CadPanelElevated, CadBorderHairline, CadTextPrimary, onClick = onSelectAll)
+                            OpaqueChipButton("Window Select", false, CadPanelElevated, CadBorderHairline, CadTextPrimary, onClick = onSelectWindowMode)
+                            OpaqueChipButton("Crossing Select", false, CadPanelElevated, CadBorderHairline, CadTextPrimary, onClick = onSelectCrossingMode)
+                            OpaqueChipButton("Select Previous", false, CadPanelElevated, CadBorderHairline, CadTextPrimary, onClick = onSelectPrevious)
+                            OpaqueChipButton("Clear Selection", false, CadPanelElevated, CadBorderHairline, CadTextSecondary, onClick = onClearSelection)
+                            OpaqueChipButton("Command Matrix", false, OpaqueEmeraldBadgeBg, CadEmeraldCrossing, CadEmeraldCrossing, onClick = onOpenMatrix)
+                        }
+
+                        // Recent Commands
+                        if (uiState.recentCommands.isNotEmpty()) {
+                            Text(
+                                text = "RECENT COMMANDS",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CadCyanPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                uiState.recentCommands.forEach { cmd ->
+                                    OpaqueChipButton(
+                                        label = "${cmd.shortLabel} (${cmd.primaryAlias})",
+                                        active = uiState.activeCommand == cmd,
+                                        activeBg = OpaqueAmberBadgeBg,
+                                        activeBorder = CadAmberSnap,
+                                        textColor = if (uiState.activeCommand == cmd) CadAmberSnap else CadTextPrimary,
+                                        onClick = { onSelectCommand(cmd) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Categorized Commands
+                    CadCommandCategory.entries.forEach { category ->
+                        val catCmds = filteredCommands.filter { it.category == category }
+                        if (catCmds.isNotEmpty()) {
+                            Text(
+                                text = category.label.uppercase(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CadCyanPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                catCmds.forEach { cmd ->
+                                    val isCurrent = uiState.activeCommand == cmd
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(if (isCurrent) OpaqueAmberBadgeBg else CadPanelElevated)
+                                            .border(
+                                                1.dp,
+                                                if (isCurrent) CadAmberSnap else CadBorderHairline,
+                                                RoundedCornerShape(6.dp)
+                                            )
+                                            .clickable { onSelectCommand(cmd) }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                            .testTag("launcher_cmd_${cmd.commandName}")
+                                    ) {
+                                        Text(
+                                            text = "${cmd.shortLabel} (${cmd.primaryAlias})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isCurrent) CadAmberSnap else CadTextPrimary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

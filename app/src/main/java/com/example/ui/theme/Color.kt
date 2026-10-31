@@ -8,7 +8,8 @@ val CadPaperSpaceBg = Color(0xFF111722)
 val CadSheetPaperFill = Color(0xFF0E141E)
 val CadPanelSurface = Color(0xFF131A26)
 val CadPanelElevated = Color(0xFF1A2434)
-val CadHudSurface = Color(0xE816202E)
+val CadHudSurface = Color(0xFF16202E)
+val CadSurfaceCard = Color(0xFF1E293B)
 val CadBorderHairline = Color(0xFF28364A)
 
 // Grid & Origin Axes
@@ -26,6 +27,7 @@ val CadBlueWindow = Color(0xFF3B82F6)
 val CadDimensionBlue = Color(0xFF38BDF8)
 val CadConstructionSlate = Color(0xFF64748B)
 val CadCrimsonAlert = Color(0xFFF43F5E)
+val CadRedAlert = CadCrimsonAlert
 
 // Typography & Icon Colors
 val CadTextPrimary = Color(0xFFF1F5F9)

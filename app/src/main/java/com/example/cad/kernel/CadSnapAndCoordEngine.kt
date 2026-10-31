@@ -13,6 +13,37 @@ import kotlin.math.roundToLong
 import kotlin.math.sin
 
 /**
+ * Screen-space rectangle representing the unobstructed usable CAD viewport area
+ * (excluding top header bar, floating HUD badges, expanded tool drawers, and controller dock).
+ */
+data class UsableViewportRect(
+    val leftPx: Float = 0f,
+    val topPx: Float = 0f,
+    val rightPx: Float = 800f,
+    val bottomPx: Float = 600f
+) {
+    val widthPx: Float get() = (rightPx - leftPx).coerceAtLeast(1f)
+    val heightPx: Float get() = (bottomPx - topPx).coerceAtLeast(1f)
+    val centerX: Float get() = (leftPx + rightPx) * 0.5f
+    val centerY: Float get() = (topPx + bottomPx) * 0.5f
+}
+
+enum class FitDrawingPolicy(val label: String) {
+    ALL_VISIBLE("Fit All Visible (Geometry + Annotations)"),
+    SELECTED_ONLY("Fit Selected Entities"),
+    GEOMETRY_ONLY("Fit Geometry Only (Ignore Dimensions)")
+}
+
+data class FitDrawingResult(
+    val fittedViewport: ViewportTransform,
+    val fittedBounds: BoundingBox2D,
+    val includedEntityCount: Int,
+    val policy: FitDrawingPolicy,
+    val isEmptyFallback: Boolean,
+    val summaryMessage: String
+)
+
+/**
  * Separates model-space geometry from screen-space viewport presentation.
  * Model-space Y points UP (+Y is North); Screen-space Y points DOWN.
  */
@@ -21,6 +52,11 @@ data class ViewportTransform(
     val panScreenY: Float = 520f,
     val pixelsPerModelUnit: Float = 3.2f
 ) {
+    companion object {
+        const val MIN_PIXELS_PER_UNIT = 0.05f
+        const val MAX_PIXELS_PER_UNIT = 500f
+    }
+
     fun modelToScreen(pt: Point2D): Offset = Offset(
         x = panScreenX + (pt.x * pixelsPerModelUnit).toFloat(),
         y = panScreenY - (pt.y * pixelsPerModelUnit).toFloat()
@@ -35,11 +71,66 @@ data class ViewportTransform(
     }
 
     fun zoomAroundScreenPoint(pivotScreen: Offset, zoomMultiplier: Float): ViewportTransform {
+        if (!zoomMultiplier.isFinite() || zoomMultiplier <= 0f) return this
         val modelAtPivot = screenToModel(pivotScreen)
-        val newScale = (pixelsPerModelUnit * zoomMultiplier).coerceIn(0.05f, 500f)
+        val newScale = (pixelsPerModelUnit * zoomMultiplier).coerceIn(MIN_PIXELS_PER_UNIT, MAX_PIXELS_PER_UNIT)
         val newPanX = pivotScreen.x - (modelAtPivot.x * newScale).toFloat()
         val newPanY = pivotScreen.y + (modelAtPivot.y * newScale).toFloat()
+        if (!newPanX.isFinite() || !newPanY.isFinite()) return this
         return copy(
+            panScreenX = newPanX,
+            panScreenY = newPanY,
+            pixelsPerModelUnit = newScale
+        )
+    }
+
+    /**
+     * Computes the model-space axis-aligned bounding box currently visible in [canvasWidthPx] x [canvasHeightPx],
+     * expanded by [overscanPx] in screen space for smooth viewport culling.
+     */
+    fun visibleModelBounds(
+        canvasWidthPx: Float,
+        canvasHeightPx: Float,
+        overscanPx: Float = 48f
+    ): BoundingBox2D {
+        val pTopLeft = screenToModel(Offset(-overscanPx, -overscanPx))
+        val pBottomRight = screenToModel(Offset(canvasWidthPx + overscanPx, canvasHeightPx + overscanPx))
+        return BoundingBox2D(
+            minX = minOf(pTopLeft.x, pBottomRight.x),
+            minY = minOf(pTopLeft.y, pBottomRight.y),
+            maxX = maxOf(pTopLeft.x, pBottomRight.x),
+            maxY = maxOf(pTopLeft.y, pBottomRight.y)
+        )
+    }
+
+    /**
+     * Fits [bounds] into the unobstructed [usableRect] with [marginPx] screen-space padding on each side.
+     * Handles single points and zero-width / zero-height lines without distorting aspect ratio.
+     */
+    fun fitToUsableViewport(
+        bounds: BoundingBox2D,
+        usableRect: UsableViewportRect,
+        marginPx: Float = 24f
+    ): ViewportTransform {
+        val availW = (usableRect.widthPx - 2f * marginPx).coerceAtLeast(64f)
+        val availH = (usableRect.heightPx - 2f * marginPx).coerceAtLeast(64f)
+
+        val rawW = bounds.width
+        val rawH = bounds.height
+
+        // Handle degenerate single-point or strictly horizontal/vertical line bounds gracefully
+        val minSpan = maxOf(rawW, rawH, 1.0) * 0.12
+        val effectiveW = if (rawW < 1e-4) minSpan.coerceAtLeast(4.0) else rawW
+        val effectiveH = if (rawH < 1e-4) minSpan.coerceAtLeast(4.0) else rawH
+
+        val scaleX = availW / effectiveW.toFloat()
+        val scaleY = availH / effectiveH.toFloat()
+        val newScale = minOf(scaleX, scaleY).coerceIn(MIN_PIXELS_PER_UNIT, MAX_PIXELS_PER_UNIT)
+
+        val center = bounds.center
+        val newPanX = usableRect.centerX - (center.x * newScale).toFloat()
+        val newPanY = usableRect.centerY + (center.y * newScale).toFloat()
+        return ViewportTransform(
             panScreenX = newPanX,
             panScreenY = newPanY,
             pixelsPerModelUnit = newScale
@@ -50,22 +141,103 @@ data class ViewportTransform(
         bounds: BoundingBox2D,
         viewportWidthPx: Float,
         viewportHeightPx: Float,
-        paddingFactor: Float = 0.80f
+        paddingFactor: Float = 0.84f
     ): ViewportTransform {
-        val w = bounds.width.coerceAtLeast(10.0)
-        val h = bounds.height.coerceAtLeast(10.0)
-        val safeViewW = viewportWidthPx.coerceAtLeast(200f)
-        val safeViewH = viewportHeightPx.coerceAtLeast(200f)
-        val scaleX = (safeViewW * paddingFactor) / w.toFloat()
-        val scaleY = (safeViewH * paddingFactor) / h.toFloat()
-        val newScale = minOf(scaleX, scaleY).coerceIn(0.05f, 500f)
-        val center = bounds.center
-        val newPanX = safeViewW * 0.5f - (center.x * newScale).toFloat()
-        val newPanY = safeViewH * 0.5f + (center.y * newScale).toFloat()
-        return ViewportTransform(
-            panScreenX = newPanX,
-            panScreenY = newPanY,
-            pixelsPerModelUnit = newScale
+        val safeW = viewportWidthPx.coerceAtLeast(200f)
+        val safeH = viewportHeightPx.coerceAtLeast(200f)
+        val marginX = safeW * (1f - paddingFactor.coerceIn(0.5f, 0.96f)) * 0.5f
+        val marginY = safeH * (1f - paddingFactor.coerceIn(0.5f, 0.96f)) * 0.5f
+        val margin = minOf(marginX, marginY).coerceAtLeast(16f)
+        return fitToUsableViewport(
+            bounds = bounds,
+            usableRect = UsableViewportRect(0f, 0f, safeW, safeH),
+            marginPx = margin
+        )
+    }
+
+    /**
+     * Preserves the model-space point at the visual center when usable viewport bounds shift
+     * (e.g., when a transient notification banner, command bar, or controller dock expands/collapses).
+     */
+    fun rebaseForUsableRectChange(
+        oldRect: UsableViewportRect,
+        newRect: UsableViewportRect
+    ): ViewportTransform {
+        val anchorModel = screenToModel(Offset(oldRect.centerX, oldRect.centerY))
+        val newPanX = newRect.centerX - (anchorModel.x * pixelsPerModelUnit).toFloat()
+        val newPanY = newRect.centerY + (anchorModel.y * pixelsPerModelUnit).toFloat()
+        return copy(panScreenX = newPanX, panScreenY = newPanY)
+    }
+
+    /**
+     * Section 17 — Cursor-Boundary Visibility & Automatic Viewport Tracking.
+     * Ensures that when the virtual cursor moves via controller or coordinate entry beyond the safe inner
+     * boundary of [usableRect], the viewport smoothly pans (and gradually zooms out only if required for
+     * extreme coordinate jumps) so the cursor remains clearly visible with margin, without altering
+     * the cursor's model-space coordinates.
+     */
+    fun trackCursorIntoSafeBoundary(
+        cursorModelPos: Point2D,
+        usableRect: UsableViewportRect,
+        referencePoint: Point2D? = null,
+        safeMarginFraction: Float = 0.12f,
+        minSafeMarginPx: Float = 36f
+    ): ViewportTransform {
+        if (!cursorModelPos.x.isFinite() || !cursorModelPos.y.isFinite()) return this
+        val marginX = maxOf(usableRect.widthPx * safeMarginFraction, minSafeMarginPx)
+            .coerceAtMost(usableRect.widthPx * 0.35f)
+        val marginY = maxOf(usableRect.heightPx * safeMarginFraction, minSafeMarginPx)
+            .coerceAtMost(usableRect.heightPx * 0.35f)
+
+        val safeLeft = usableRect.leftPx + marginX
+        val safeRight = (usableRect.rightPx - marginX).coerceAtLeast(safeLeft + 1f)
+        val safeTop = usableRect.topPx + marginY
+        val safeBottom = (usableRect.bottomPx - marginY).coerceAtLeast(safeTop + 1f)
+
+        var working = this
+
+        // If an active command has a reference point and the span from referencePoint to cursorModelPos
+        // is vastly larger than the usable viewport (e.g., > 2.5x usable span via direct coordinate entry),
+        // apply a controlled, bounded zoom-out so both context and cursor remain comprehensible.
+        if (referencePoint != null) {
+            val refScreen = working.modelToScreen(referencePoint)
+            val curScreen = working.modelToScreen(cursorModelPos)
+            val spanX = abs(curScreen.x - refScreen.x)
+            val spanY = abs(curScreen.y - refScreen.y)
+            val maxAllowedSpanX = (safeRight - safeLeft) * 2.2f
+            val maxAllowedSpanY = (safeBottom - safeTop) * 2.2f
+            if (spanX > maxAllowedSpanX || spanY > maxAllowedSpanY) {
+                val factorX = if (spanX > maxAllowedSpanX) maxAllowedSpanX / spanX else 1f
+                val factorY = if (spanY > maxAllowedSpanY) maxAllowedSpanY / spanY else 1f
+                val zoomOutFactor = minOf(factorX, factorY).coerceIn(0.35f, 0.92f)
+                val pivot = Offset(usableRect.centerX, usableRect.centerY)
+                working = working.zoomAroundScreenPoint(pivot, zoomOutFactor)
+            }
+        }
+
+        val screenPos = working.modelToScreen(cursorModelPos)
+        var deltaPanX = 0f
+        var deltaPanY = 0f
+
+        if (screenPos.x < safeLeft) {
+            deltaPanX = safeLeft - screenPos.x
+        } else if (screenPos.x > safeRight) {
+            deltaPanX = safeRight - screenPos.x
+        }
+
+        if (screenPos.y < safeTop) {
+            deltaPanY = safeTop - screenPos.y
+        } else if (screenPos.y > safeBottom) {
+            deltaPanY = safeBottom - screenPos.y
+        }
+
+        if (abs(deltaPanX) < 0.5f && abs(deltaPanY) < 0.5f) {
+            return working
+        }
+
+        return working.copy(
+            panScreenX = working.panScreenX + deltaPanX,
+            panScreenY = working.panScreenY + deltaPanY
         )
     }
 }

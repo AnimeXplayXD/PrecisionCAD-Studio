@@ -1,5 +1,6 @@
 package com.example
 
+import androidx.compose.ui.geometry.Offset
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
 import com.example.cad.dimension.AutoDimensionEngine
 import com.example.cad.dimension.DimensionStyleConfig
@@ -9,7 +10,9 @@ import com.example.cad.io.DxfDocumentPayload
 import com.example.cad.kernel.CadGeometryKernel
 import com.example.cad.kernel.CadModificationEngine
 import com.example.cad.kernel.CadSnapAndCoordEngine
+import com.example.cad.kernel.UsableViewportRect
 import com.example.cad.kernel.ViewportTransform
+import com.example.cad.model.BlockDefinition
 import com.example.cad.model.BoundingBox2D
 import com.example.cad.model.CADCommandMatrix
 import com.example.cad.model.CadCommandCompatibilityCatalog
@@ -21,12 +24,17 @@ import com.example.cad.model.ConstraintType
 import com.example.cad.model.DimensionType
 import com.example.cad.model.GeometricConstraintRecord
 import com.example.cad.model.Point2D
+import com.example.cad.model.PolylineVertex
 import com.example.cad.model.PrecisionFormatConfig
+import com.example.ui.components.ViewportGesturePolicy
+import com.example.ui.components.ViewportGestureState
+import com.example.ui.theme.CadHudSurface
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class ExampleUnitTest {
 
@@ -94,20 +102,17 @@ class ExampleUnitTest {
 
     @Test
     fun `TC-MOD-07 TC-MOD-08 TC-MOD-09 TC-MOD-10 verify Trim, Extend, Fillet R=5 on Lines and Rectangles, and Chamfer`() {
-        // Trim middle segment of (-50,0)-(50,0) between X=-10 and X=10
         val target = CadEntity.LineEntity(start = Point2D(-50.0, 0.0), end = Point2D(50.0, 0.0))
         val c1 = CadEntity.LineEntity(start = Point2D(-10.0, -20.0), end = Point2D(-10.0, 20.0))
         val c2 = CadEntity.LineEntity(start = Point2D(10.0, -20.0), end = Point2D(10.0, 20.0))
         val trimmed = CadModificationEngine.trimEntityAtPick(target, Point2D(0.0, 0.0), listOf(target, c1, c2))
         assertEquals(2, trimmed.size)
 
-        // Extend (0,0)-(30,0) to vertical boundary at X=50
         val shortLine = CadEntity.LineEntity(start = Point2D(0.0, 0.0), end = Point2D(30.0, 0.0))
         val boundary = CadEntity.LineEntity(start = Point2D(50.0, -20.0), end = Point2D(50.0, 20.0))
         val extended = CadModificationEngine.extendEntityAtPick(shortLine, Point2D(29.0, 0.0), listOf(shortLine, boundary)) as CadEntity.LineEntity
         assertEquals(50.0, extended.end.x, 1e-4)
 
-        // Fillet orthogonal lines with R=5
         val l1 = CadEntity.LineEntity(start = Point2D(0.0, 0.0), end = Point2D(50.0, 0.0))
         val l2 = CadEntity.LineEntity(start = Point2D(0.0, 0.0), end = Point2D(0.0, 50.0))
         val filleted = CadModificationEngine.filletTwoLines(l1, l2, radius = 5.0, trimSegments = true)
@@ -118,7 +123,6 @@ class ExampleUnitTest {
         assertEquals(5.0, arc.center.y, 1e-4)
         assertEquals(5.0, arc.radius, 1e-4)
 
-        // AutoCAD-style two-pick Fillet on a Rectangle (PolylineEntity) with R=5.0 and custom manual R=7.35
         val rect = CadGeometryKernel.createRectanglePolyline(Point2D(0.0, 0.0), Point2D(120.0, 80.0), filletRadius = 6.0)
         val filletedRect = CadModificationEngine.filletAtPicks(
             entities = listOf(rect),
@@ -129,12 +133,11 @@ class ExampleUnitTest {
             trimSegments = true
         )
         assertNotNull(filletedRect)
-        val cornerArcR5 = filletedRect!!.filterIsInstance<CadEntity.ArcEntity>().firstOrNull { kotlin.math.abs(it.radius - 5.0) < 1e-4 }
+        val cornerArcR5 = filletedRect!!.filterIsInstance<CadEntity.ArcEntity>().firstOrNull { abs(it.radius - 5.0) < 1e-4 }
         assertNotNull(cornerArcR5)
         assertEquals(115.0, cornerArcR5!!.center.x, 1e-3)
         assertEquals(5.0, cornerArcR5.center.y, 1e-3)
 
-        // Chamfer orthogonal lines with D1=5, D2=5
         val chamfered = CadModificationEngine.chamferTwoLines(l1, l2, distance1 = 5.0, distance2 = 5.0, trimSegments = true)
         assertNotNull(chamfered)
         assertEquals(3, chamfered!!.size)
@@ -168,28 +171,22 @@ class ExampleUnitTest {
             density = QDimDensityPolicy.BALANCED
         )
         val dims = qdimResult.filterIsInstance<CadEntity.DimensionEntity>()
-        // Verify overall 120 and 80 dimensions exist
-        assertTrue(dims.any { it.dimensionType == DimensionType.LINEAR_HORIZONTAL && kotlin.math.abs(it.measuredModelValue() - 120.0) < 1e-3 })
-        assertTrue(dims.any { it.dimensionType == DimensionType.LINEAR_VERTICAL && kotlin.math.abs(it.measuredModelValue() - 80.0) < 1e-3 })
-        // Verify 3x hole pattern diameter callout exists
+        assertTrue(dims.any { it.dimensionType == DimensionType.LINEAR_HORIZONTAL && abs(it.measuredModelValue() - 120.0) < 1e-3 })
+        assertTrue(dims.any { it.dimensionType == DimensionType.LINEAR_VERTICAL && abs(it.measuredModelValue() - 80.0) < 1e-3 })
         val diaDim = dims.firstOrNull { it.dimensionType == DimensionType.DIAMETER }
         assertNotNull(diaDim)
         assertEquals("3× ", diaDim!!.customPrefix)
-        // Verify 4x corner fillet radius callout (R6.00) was detected from polyline bulge segments
         val radDim = dims.firstOrNull { it.dimensionType == DimensionType.RADIUS }
         assertNotNull(radDim)
         assertEquals("4× ", radDim!!.customPrefix)
         assertEquals(6.0, radDim.measuredModelValue(), 1e-3)
-        // Verify manual dimension was preserved
         assertTrue(dims.any { !it.isAutoGenerated && it.id == manualDim.id })
 
-        // Verify toggling Quick Dimension OFF removes auto-dimensions while preserving manual dimensions
         val afterToggleOff = AutoDimensionEngine.removeAutoDimensions(qdimResult)
         val remainingDims = afterToggleOff.filterIsInstance<CadEntity.DimensionEntity>()
         assertEquals(1, remainingDims.size)
         assertEquals(manualDim.id, remainingDims.first().id)
 
-        // Verify ISO/ASME Radial and Diametric Render Plans have center, rim contact, and horizontal landing shelf
         val diaPlan = AdaptiveAnnotationRenderer.computeRenderPlan(
             dim = diaDim,
             precision = PrecisionFormatConfig(linearDecimals = 2),
@@ -218,7 +215,6 @@ class ExampleUnitTest {
         assertNotNull(radPlan.leaderLandingEndModel)
         assertEquals(radPlan.leaderShoulderModel!!.y, radPlan.leaderLandingEndModel!!.y, 1e-4)
 
-        // Verify Angular Dimension Render Plan uses true circular arc geometry
         val angDim = CadEntity.DimensionEntity(
             dimensionType = DimensionType.ANGULAR,
             angularVertex = Point2D(0.0, 0.0),
@@ -235,9 +231,8 @@ class ExampleUnitTest {
             viewport = ViewportTransform(pixelsPerModelUnit = 3.0f)
         )
         assertTrue(angPlan.isAngularArc)
-        assertEquals(90.0, kotlin.math.abs(angPlan.angularSweepDeg), 1e-2)
+        assertEquals(90.0, abs(angPlan.angularSweepDeg), 1e-2)
 
-        // Verify AdaptiveAnnotationRenderer flips arrows & text outside for very short linear dimension
         val shortDim = CadEntity.DimensionEntity(
             dimensionType = DimensionType.LINEAR_HORIZONTAL,
             anchor1 = Point2D(0.0, 0.0),
@@ -257,13 +252,12 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `TC-DOC-02 and TC-DOC-06 verify Unit Display Conversion vs Rescale and DXF Round-Trip`() {
+    fun `TC-DOC-02 and TC-DOC-06 verify Unit Display Conversion vs Rescale and AC1015 DXF Compliance and Round-Trip`() {
         val prec = PrecisionFormatConfig(linearDecimals = 2, showUnitSuffix = true)
-        // 100 mm displayed in cm (Mode A) -> "10.00 cm" without changing stored 100.0
         val formattedCm = prec.formatLinear(100.0, storageUnit = CadUnit.MM, displayUnit = CadUnit.CM)
         assertEquals("10.00 cm", formattedCm)
 
-        // DXF Round-trip test
+        // Comprehensive AC1015 DXF export & round-trip test including DIMENSION, DONUT, CENTERMARK, and LEADER
         val payload = DxfDocumentPayload(
             storageUnit = CadUnit.MM,
             displayUnit = CadUnit.MM,
@@ -271,13 +265,49 @@ class ExampleUnitTest {
             entities = listOf(
                 CadEntity.LineEntity(start = Point2D(0.0, 0.0), end = Point2D(100.0, 50.0)),
                 CadEntity.CircleEntity(center = Point2D(50.0, 25.0), radius = 12.5),
-                CadGeometryKernel.createRectanglePolyline(Point2D(0.0, 0.0), Point2D(100.0, 50.0))
+                CadGeometryKernel.createRectanglePolyline(Point2D(0.0, 0.0), Point2D(100.0, 50.0), filletRadius = 5.0),
+                CadEntity.DonutEntity(center = Point2D(25.0, 25.0), innerDiameter = 6.0, outerDiameter = 12.0),
+                CadEntity.CenterMarkEntity(center = Point2D(50.0, 25.0), radius = 12.5),
+                CadEntity.LeaderEntity(
+                    arrowTip = Point2D(50.0, 37.5),
+                    shoulderPoint = Point2D(65.0, 55.0),
+                    landingEnd = Point2D(80.0, 55.0),
+                    text = "BORE H7"
+                ),
+                CadEntity.DimensionEntity(
+                    dimensionType = DimensionType.LINEAR_HORIZONTAL,
+                    anchor1 = Point2D(0.0, 0.0),
+                    anchor2 = Point2D(100.0, 0.0),
+                    dimensionLinePoint = Point2D(50.0, -15.0)
+                ),
+                CadEntity.DimensionEntity(
+                    dimensionType = DimensionType.DIAMETER,
+                    anchor1 = Point2D(50.0, 25.0),
+                    anchor2 = Point2D(62.5, 25.0),
+                    dimensionLinePoint = Point2D(72.0, 40.0),
+                    customPrefix = "2× "
+                )
             )
         )
         val dxfText = CadDxfInterchange.exportToDxf(payload)
+        // Verify AC1015 required tables and standard entity records exist
+        assertTrue(dxfText.contains("0\nTABLE\n2\nSTYLE"))
+        assertTrue(dxfText.contains("0\nTABLE\n2\nDIMSTYLE"))
+        assertTrue(dxfText.contains("3\nSTANDARD"))
+        assertFalse(dxfText.contains("NaN"))
+        assertFalse(dxfText.contains("Infinity"))
+        // Non-standard entity records must be replaced with standard LWPOLYLINE, LINE, and LEADER+MTEXT
+        assertFalse(dxfText.contains("0\nDONUT\n"))
+        assertFalse(dxfText.contains("0\nCENTERMARK\n"))
+        assertFalse(dxfText.contains("0\nMLEADER\n"))
+        assertTrue(dxfText.contains("0\nLEADER\n"))
+
         val reimported = CadDxfInterchange.importFromDxf(dxfText)
         assertEquals(CadUnit.MM, reimported.displayUnit)
-        assertEquals(3, reimported.entities.size)
+        assertEquals(payload.entities.size, reimported.entities.size)
+        val reimportedDims = reimported.entities.filterIsInstance<CadEntity.DimensionEntity>()
+        assertEquals(2, reimportedDims.size)
+        assertTrue(reimportedDims.any { it.dimensionType == DimensionType.DIAMETER && it.customPrefix == "2× " })
 
         // Verify Geometric Constraint Solver (Perpendicular + Equal)
         val l1 = CadEntity.LineEntity(id = "l1", start = Point2D(0.0, 0.0), end = Point2D(40.0, 0.0))
@@ -310,7 +340,7 @@ class ExampleUnitTest {
         val diaAndRadDims = qdimEntities.filterIsInstance<CadEntity.DimensionEntity>()
             .filter { it.dimensionType == DimensionType.DIAMETER || it.dimensionType == DimensionType.RADIUS }
 
-        assertTrue(diaAndRadDims.size >= 3) // Central bore ⌀28, 6x ⌀10 holes, 4x R6 corner fillets
+        assertTrue(diaAndRadDims.size >= 3)
 
         for (dim in diaAndRadDims) {
             val plan = AdaptiveAnnotationRenderer.computeRenderPlan(
@@ -345,7 +375,6 @@ class ExampleUnitTest {
             filletRadius = 6.0
         )
 
-        // 1. Symmetric hole margins (20 mm left, 20 mm right; equal 40 mm pitches)
         val symHoles = listOf(
             CadEntity.CircleEntity(id = "h1", center = Point2D(20.0, 20.0), radius = 5.0),
             CadEntity.CircleEntity(id = "h2", center = Point2D(60.0, 20.0), radius = 5.0),
@@ -366,11 +395,10 @@ class ExampleUnitTest {
         )
         assertTrue(symMarginFinding.isSymmetricOrEqualVerified)
 
-        // 2. Intentionally unequal hole margins (18 mm left, 22 mm right) -> MUST NOT assert symmetry!
         val asymHoles = listOf(
             CadEntity.CircleEntity(id = "ah1", center = Point2D(18.0, 20.0), radius = 5.0),
             CadEntity.CircleEntity(id = "ah2", center = Point2D(60.0, 20.0), radius = 5.0),
-            CadEntity.CircleEntity(id = "ah3", center = Point2D(98.0, 20.0), radius = 5.0) // 120 - 98 = 22.0 != 18.0
+            CadEntity.CircleEntity(id = "ah3", center = Point2D(98.0, 20.0), radius = 5.0)
         )
         val (asymDims, asymReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
             allEntities = listOf(outerRect) + asymHoles,
@@ -386,15 +414,13 @@ class ExampleUnitTest {
             asymMarginFinding.category
         )
         assertFalse(asymMarginFinding.isSymmetricOrEqualVerified)
-        // Verify right margin (98 -> 120 = 22 mm) is explicitly emitted in DETAILED mode when asymmetric
         val horizDims = asymDims.filterIsInstance<CadEntity.DimensionEntity>()
             .filter { it.dimensionType == DimensionType.LINEAR_HORIZONTAL }
-        assertTrue(horizDims.any { kotlin.math.abs(it.measuredModelValue() - 22.0) < 1e-3 })
+        assertTrue(horizDims.any { abs(it.measuredModelValue() - 22.0) < 1e-3 })
 
-        // 3. Unequal hole diameters (⌀10 vs ⌀12) must never be grouped into a single "2×" callout
         val mixedDiaHoles = listOf(
-            CadEntity.CircleEntity(id = "md1", center = Point2D(30.0, 40.0), radius = 5.0), // ⌀10
-            CadEntity.CircleEntity(id = "md2", center = Point2D(90.0, 40.0), radius = 6.0)  // ⌀12
+            CadEntity.CircleEntity(id = "md1", center = Point2D(30.0, 40.0), radius = 5.0),
+            CadEntity.CircleEntity(id = "md2", center = Point2D(90.0, 40.0), radius = 6.0)
         )
         val (mixedDims, _) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
             allEntities = listOf(outerRect) + mixedDiaHoles,
@@ -406,7 +432,6 @@ class ExampleUnitTest {
         assertEquals(2, diaCallouts.size)
         assertTrue(diaCallouts.none { it.customPrefix.startsWith("2×") })
 
-        // 4. Baseline vs Continuous Chain vs Ordinate arrangement modes
         val (_, baselineReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
             allEntities = listOf(outerRect) + symHoles,
             targetEntities = listOf(outerRect) + symHoles,
@@ -435,7 +460,6 @@ class ExampleUnitTest {
             }
         )
 
-        // 5. Nested overall and feature dimensions: overall envelope dimension strictly outside feature band
         val overallHoriz = symReport.placements.first {
             it.dimension.dimensionType == DimensionType.LINEAR_HORIZONTAL &&
                 it.dimension.hierarchyTier == com.example.cad.model.DimensionHierarchyTier.PRIMARY_OVERALL
@@ -452,15 +476,13 @@ class ExampleUnitTest {
                 "Overall horizontal envelope offset ($overallEnvelopeDistance) must be strictly outside feature band offset ($featureEnvelopeDistance)",
                 overallEnvelopeDistance > featureEnvelopeDistance
             )
-            // Exact numerical preservation for horizontal projected span
             assertEquals(
-                kotlin.math.abs(feat.dimension.anchor2.x - feat.dimension.anchor1.x),
+                abs(feat.dimension.anchor2.x - feat.dimension.anchor1.x),
                 feat.dimension.measuredModelValue(),
                 1e-6
             )
         }
 
-        // 6. Short dimension lines where arrows/text must move outside
         val shortCandidate = CadEntity.DimensionEntity(
             dimensionType = DimensionType.LINEAR_HORIZONTAL,
             anchor1 = Point2D(10.0, 0.0),
@@ -477,6 +499,156 @@ class ExampleUnitTest {
         assertEquals(com.example.cad.dimension.ArrowPlacementMode.OUTSIDE, shortPlacement.arrowPlacementMode)
         assertEquals(com.example.cad.dimension.TextPlacementMode.EXTERNAL_OFFSET, shortPlacement.textPlacementMode)
     }
+
+    @Test
+    fun `TC-NAV-14 verify Navigation-Only Sheet Gesture State Machine and Focal-Point Pinch-Pan Invariant`() {
+        // 1. 0 -> 1 pointer is suppressed (no drawing, no point pick, no pan)
+        assertEquals(
+            ViewportGestureState.ONE_POINTER_SUPPRESSED,
+            ViewportGesturePolicy.transitionState(ViewportGestureState.IDLE, activePointerCount = 1)
+        )
+        // 2. 1 -> 2 pointers enters TWO_POINTER_TRANSFORM
+        assertEquals(
+            ViewportGestureState.TWO_POINTER_TRANSFORM,
+            ViewportGesturePolicy.transitionState(ViewportGestureState.ONE_POINTER_SUPPRESSED, activePointerCount = 2)
+        )
+        // 3. 2 -> 1 pointer returns to ONE_POINTER_SUPPRESSED without jumping
+        assertEquals(
+            ViewportGestureState.ONE_POINTER_SUPPRESSED,
+            ViewportGesturePolicy.transitionState(ViewportGestureState.TWO_POINTER_TRANSFORM, activePointerCount = 1)
+        )
+        // 4. >= 3 pointers cancels until all pointers lift
+        val cancelled = ViewportGesturePolicy.transitionState(ViewportGestureState.TWO_POINTER_TRANSFORM, activePointerCount = 3)
+        assertEquals(ViewportGestureState.CANCELLED, cancelled)
+        assertEquals(ViewportGestureState.CANCELLED, ViewportGesturePolicy.transitionState(cancelled, activePointerCount = 2))
+        assertEquals(ViewportGestureState.IDLE, ViewportGesturePolicy.transitionState(cancelled, activePointerCount = 0))
+
+        // 5. Verify focal-point zoom + pan invariant: model point under previousCentroid lands at currentCentroid
+        val vp0 = ViewportTransform(panScreenX = 240f, panScreenY = 360f, pixelsPerModelUnit = 4.0f)
+        val prevCentroid = Offset(400f, 300f)
+        val panDelta = Offset(30f, -20f)
+        val currCentroid = prevCentroid + panDelta
+        val modelAtPrevCentroid = vp0.screenToModel(prevCentroid)
+        val vp1 = ViewportGesturePolicy.applyTwoFingerTransform(
+            viewport = vp0,
+            centroidScreen = prevCentroid,
+            panDeltaScreen = panDelta,
+            zoomFactor = 2.5f
+        )
+        val screenAfterTransform = vp1.modelToScreen(modelAtPrevCentroid)
+        assertEquals(currCentroid.x, screenAfterTransform.x, 1e-2f)
+        assertEquals(currCentroid.y, screenAfterTransform.y, 1e-2f)
+    }
+
+    @Test
+    fun `TC-BBOX-06 verify Bulge Arc Polyline, Rotated Text, BlockInsert, and FitToUsableViewport`() {
+        // 1. Semicircle bulge (bulge = 1.0) from (0,0) to (20,0) sweeps downward to Y = -10.0
+        val polyWithBulge = CadEntity.PolylineEntity(
+            vertices = listOf(
+                PolylineVertex(Point2D(0.0, 0.0), bulge = 1.0),
+                PolylineVertex(Point2D(20.0, 0.0), bulge = 0.0)
+            ),
+            isClosed = false
+        )
+        val polyBounds = polyWithBulge.boundingBox()
+        assertEquals(0.0, polyBounds.minX, 1e-3)
+        assertEquals(20.0, polyBounds.maxX, 1e-3)
+        assertEquals(-10.0, polyBounds.minY, 1e-3)
+
+        // 2. Rotated TextEntity (90 degrees) expands vertical extent
+        val rotatedText = CadEntity.TextEntity(
+            position = Point2D(10.0, 10.0),
+            text = "MOUNTING PLATE",
+            height = 4.0,
+            rotationDeg = 90.0
+        )
+        val textBounds = rotatedText.boundingBox()
+        assertTrue(textBounds.height > 20.0)
+
+        // 3. BlockInsertEntity boundingBox with scale=2.0
+        val blockDef = BlockDefinition(
+            name = "TEST_BLK",
+            basePoint = Point2D(0.0, 0.0),
+            entities = listOf(CadEntity.CircleEntity(center = Point2D(0.0, 0.0), radius = 10.0))
+        )
+        val insert = CadEntity.BlockInsertEntity(
+            blockName = "TEST_BLK",
+            insertionPoint = Point2D(100.0, 50.0),
+            scaleFactor = 2.0
+        )
+        val insertBounds = insert.boundingBox(mapOf("TEST_BLK" to blockDef))
+        assertEquals(80.0, insertBounds.minX, 1e-3)
+        assertEquals(120.0, insertBounds.maxX, 1e-3)
+        assertEquals(30.0, insertBounds.minY, 1e-3)
+        assertEquals(70.0, insertBounds.maxY, 1e-3)
+
+        // 4. Fit Drawing to UsableViewportRect centers geometry at usableRect center and handles single-point degeneracy
+        val usableRect = UsableViewportRect(leftPx = 30f, topPx = 50f, rightPx = 830f, bottomPx = 650f)
+        val fitted = ViewportTransform().fitToUsableViewport(
+            bounds = BoundingBox2D(0.0, 0.0, 120.0, 80.0),
+            usableRect = usableRect,
+            marginPx = 24f
+        )
+        val centerScreen = fitted.modelToScreen(Point2D(60.0, 40.0))
+        assertEquals(usableRect.centerX, centerScreen.x, 1e-2f)
+        assertEquals(usableRect.centerY, centerScreen.y, 1e-2f)
+
+        // Single-point degenerate bounding box must not produce NaN or Infinity
+        val singlePtFitted = ViewportTransform().fitToUsableViewport(
+            bounds = BoundingBox2D(45.0, 45.0, 45.0, 45.0),
+            usableRect = usableRect
+        )
+        assertTrue(singlePtFitted.pixelsPerModelUnit.isFinite())
+        assertTrue(singlePtFitted.panScreenX.isFinite() && singlePtFitted.panScreenY.isFinite())
+
+        // Rebase usable rect preserves center model point
+        val smallerRect = UsableViewportRect(leftPx = 30f, topPx = 90f, rightPx = 830f, bottomPx = 650f)
+        val modelAtOldCenter = fitted.screenToModel(Offset(usableRect.centerX, usableRect.centerY))
+        val rebased = fitted.rebaseForUsableRectChange(usableRect, smallerRect)
+        val modelAtNewCenter = rebased.screenToModel(Offset(smallerRect.centerX, smallerRect.centerY))
+        assertEquals(modelAtOldCenter.x, modelAtNewCenter.x, 1e-3)
+        assertEquals(modelAtOldCenter.y, modelAtNewCenter.y, 1e-3)
+    }
+
+    @Test
+    fun `TC-CUR-17 verify Automatic Cursor-Boundary Viewport Tracking and Prefix Autocomplete Ranking`() {
+        // 1. Opaque HUD surface color check (Section 3)
+        assertEquals(1.0f, CadHudSurface.alpha, 1e-5f)
+
+        // 2. Prefix Autocomplete Ranking (Section 14.4.2): typing "L" ranks LINE first
+        val lSuggestions = CadCommandCompatibilityCatalog.rankSuggestionsForPrefix("L")
+        assertTrue(lSuggestions.isNotEmpty())
+        assertEquals(CadCommandId.LINE, lSuggestions.first().id)
+        assertTrue(lSuggestions.any { it.id == CadCommandId.LAYER })
+        assertTrue(lSuggestions.any { it.id == CadCommandId.LEADER })
+        assertTrue(lSuggestions.any { it.id == CadCommandId.LENGTHEN })
+        assertFalse(lSuggestions.any { it.id == CadCommandId.CIRCLE })
+
+        val plSuggestions = CadCommandCompatibilityCatalog.rankSuggestionsForPrefix("PL")
+        assertEquals(CadCommandId.POLYLINE, plSuggestions.first().id)
+
+        // Coordinate inputs must return empty command autocomplete list
+        assertTrue(CadCommandCompatibilityCatalog.rankSuggestionsForPrefix("125,85").isEmpty())
+        assertTrue(CadCommandCompatibilityCatalog.rankSuggestionsForPrefix("@25,-10").isEmpty())
+        assertTrue(CadCommandCompatibilityCatalog.rankSuggestionsForPrefix("50<45").isEmpty())
+
+        // 3. Automatic Cursor-Boundary Viewport Tracking (Section 17)
+        val usableRect = UsableViewportRect(leftPx = 28f, topPx = 42f, rightPx = 780f, bottomPx = 560f)
+        val initialVp = ViewportTransform(panScreenX = 200f, panScreenY = 350f, pixelsPerModelUnit = 4.0f)
+        // Move cursor far to the right and top (outside usableRect)
+        val farCursor = Point2D(300.0, 200.0)
+        val trackedVp = initialVp.trackCursorIntoSafeBoundary(
+            cursorModelPos = farCursor,
+            usableRect = usableRect,
+            referencePoint = null,
+            minSafeMarginPx = 32f
+        )
+        val cursorScreenAfter = trackedVp.modelToScreen(farCursor)
+        assertTrue(cursorScreenAfter.x in (usableRect.leftPx + 31f)..(usableRect.rightPx - 31f))
+        assertTrue(cursorScreenAfter.y in (usableRect.topPx + 31f)..(usableRect.bottomPx - 31f))
+        // Model-space coordinate round-trip remains exact
+        val roundTripModel = trackedVp.screenToModel(cursorScreenAfter)
+        assertEquals(farCursor.x, roundTripModel.x, 1e-3)
+        assertEquals(farCursor.y, roundTripModel.y, 1e-3)
+    }
 }
-
-
