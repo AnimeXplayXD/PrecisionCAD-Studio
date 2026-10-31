@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="cad_exports" path="exports/" />
+    <files-path name="cad_projects" path="projects/" />
+</paths>
