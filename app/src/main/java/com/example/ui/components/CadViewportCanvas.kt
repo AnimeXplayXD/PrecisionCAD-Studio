@@ -29,6 +29,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
 import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.kernel.CadGeometryKernel
@@ -70,62 +71,100 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Section 14.1 & 14.7 — Authoritative Viewport Gesture State Machine.
+ * Section 14.1, 18.4 & 22 — Authoritative Viewport Gesture State Machine.
  * The CAD sheet is strictly navigation-only:
- * - 1 pointer (`ONE_POINTER_SUPPRESSED`): suppressed; never picks points, draws, or selects entities.
- * - 2 pointers (`TWO_POINTER_TRANSFORM`): two-finger pinch-to-zoom and two-finger pan around centroid.
- * - If a 2-pointer gesture drops to 1 pointer, it returns to `ONE_POINTER_SUPPRESSED` until all pointers lift.
+ * - `IDLE`: No active pointers.
+ * - `ONE_POINTER_PAN`: Single-finger drag outside the left-edge drawer zone pans the viewport after exceeding touch slop.
+ * - `TWO_POINTER_PINCH_ZOOM`: Two-finger pinch changes zoom scale only around a stable focal anchor (zero centroid-translation pan).
+ * - `POST_PINCH_POINTER_SUPPRESSED`: When a 2-pointer pinch drops to 1 pointer, remaining single-finger movement is suppressed until all pointers lift.
+ * - `LEFT_EDGE_DRAWER_REVEAL`: Single-finger inward swipe starting in the left-edge strip opens the tool drawer without panning the sheet.
+ * - `CANCELLED`: Cancelled or 3+ pointer gesture.
  */
 enum class ViewportGestureState {
     IDLE,
-    ONE_POINTER_SUPPRESSED,
-    TWO_POINTER_TRANSFORM,
+    ONE_POINTER_PAN,
+    TWO_POINTER_PINCH_ZOOM,
+    POST_PINCH_POINTER_SUPPRESSED,
+    LEFT_EDGE_DRAWER_REVEAL,
     CANCELLED
 }
 
 object ViewportGesturePolicy {
+    const val DEFAULT_LEFT_EDGE_STRIP_PX = 36f
+
     fun resolveState(
         pressedPointerCount: Int,
-        isCancelled: Boolean = false
+        isCancelled: Boolean = false,
+        startedInLeftEdgeZone: Boolean = false,
+        previousState: ViewportGestureState = ViewportGestureState.IDLE
     ): ViewportGestureState = when {
-        isCancelled -> ViewportGestureState.CANCELLED
         pressedPointerCount <= 0 -> ViewportGestureState.IDLE
-        pressedPointerCount == 1 -> ViewportGestureState.ONE_POINTER_SUPPRESSED
-        pressedPointerCount == 2 -> ViewportGestureState.TWO_POINTER_TRANSFORM
+        isCancelled -> ViewportGestureState.CANCELLED
+        previousState == ViewportGestureState.CANCELLED -> ViewportGestureState.CANCELLED
+        previousState == ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL && pressedPointerCount == 1 ->
+            ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL
+        pressedPointerCount == 2 -> ViewportGestureState.TWO_POINTER_PINCH_ZOOM
+        pressedPointerCount == 1 && (
+            previousState == ViewportGestureState.TWO_POINTER_PINCH_ZOOM ||
+                previousState == ViewportGestureState.POST_PINCH_POINTER_SUPPRESSED
+            ) -> ViewportGestureState.POST_PINCH_POINTER_SUPPRESSED
+        pressedPointerCount == 1 && startedInLeftEdgeZone -> ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL
+        pressedPointerCount == 1 -> ViewportGestureState.ONE_POINTER_PAN
         else -> ViewportGestureState.CANCELLED
     }
 
     fun transitionState(
         currentState: ViewportGestureState,
-        activePointerCount: Int
-    ): ViewportGestureState {
-        if (activePointerCount <= 0) return ViewportGestureState.IDLE
-        if (currentState == ViewportGestureState.CANCELLED) return ViewportGestureState.CANCELLED
-        return when (activePointerCount) {
-            1 -> ViewportGestureState.ONE_POINTER_SUPPRESSED
-            2 -> ViewportGestureState.TWO_POINTER_TRANSFORM
-            else -> ViewportGestureState.CANCELLED
+        activePointerCount: Int,
+        startedInLeftEdgeZone: Boolean = false
+    ): ViewportGestureState = resolveState(
+        pressedPointerCount = activePointerCount,
+        isCancelled = false,
+        startedInLeftEdgeZone = startedInLeftEdgeZone,
+        previousState = currentState
+    )
+
+    /**
+     * Section 22.1 — Single-finger drag pans the viewport by exact screen delta.
+     */
+    fun applyOneFingerPan(
+        viewport: ViewportTransform,
+        panDeltaScreen: Offset
+    ): ViewportTransform {
+        if (panDeltaScreen == Offset.Zero || !panDeltaScreen.x.isFinite() || !panDeltaScreen.y.isFinite()) {
+            return viewport
         }
+        return viewport.panByScreenDelta(panDeltaScreen.x, panDeltaScreen.y)
     }
 
+    /**
+     * Section 22.2 — Two-finger pinch changes zoom scale ONLY around the locked focal anchor.
+     * Pure two-finger parallel translation without span change does NOT pan the viewport.
+     */
+    fun applyTwoFingerPinchZoomOnly(
+        viewport: ViewportTransform,
+        focalAnchorScreen: Offset,
+        zoomFactor: Float
+    ): ViewportTransform {
+        if (focalAnchorScreen == Offset.Unspecified || !zoomFactor.isFinite() || abs(zoomFactor - 1f) <= 0.001f) {
+            return viewport
+        }
+        return viewport.zoomAroundScreenPoint(focalAnchorScreen, zoomFactor)
+    }
+
+    /**
+     * Backward-compatible entry point that delegates to zoom-only for two-finger pinch per Section 0.0 & 22.2.
+     */
     fun applyTwoFingerTransform(
         viewport: ViewportTransform,
         centroidScreen: Offset,
-        panDeltaScreen: Offset,
+        @Suppress("UNUSED_PARAMETER") panDeltaScreen: Offset,
         zoomFactor: Float
-    ): ViewportTransform {
-        var updated = viewport
-        if (centroidScreen != Offset.Unspecified && zoomFactor.isFinite() && abs(zoomFactor - 1f) > 0.001f) {
-            updated = updated.zoomAroundScreenPoint(centroidScreen, zoomFactor)
-        }
-        if (panDeltaScreen != Offset.Zero && panDeltaScreen.x.isFinite() && panDeltaScreen.y.isFinite()) {
-            updated = updated.copy(
-                panScreenX = updated.panScreenX + panDeltaScreen.x,
-                panScreenY = updated.panScreenY + panDeltaScreen.y
-            )
-        }
-        return updated
-    }
+    ): ViewportTransform = applyTwoFingerPinchZoomOnly(
+        viewport = viewport,
+        focalAnchorScreen = centroidScreen,
+        zoomFactor = zoomFactor
+    )
 }
 
 data class SelectionBoxDragState(
@@ -145,10 +184,12 @@ data class SelectionBoxDragState(
 }
 
 /**
- * Pure 2D Technical CAD Viewport (Sections 5 & 14 of Specification).
- * Accepts ONLY two-finger pinch-to-zoom and two-finger pan gestures on the drawing surface.
- * All single-finger touches on the drawing surface are suppressed so the user never triggers
- * accidental point picks, direct drawing, or selection drags with a palm or single finger.
+ * Pure 2D Technical CAD Viewport (Sections 5, 14, 18.4, 21 & 22 of Specification).
+ * - 1-finger drag outside the left-edge drawer strip pans the viewport (`ONE_POINTER_PAN`).
+ * - 1-finger inward swipe starting in the left-edge strip opens the tool drawer (`LEFT_EDGE_DRAWER_REVEAL`).
+ * - 2-finger pinch changes zoom scale only (`TWO_POINTER_PINCH_ZOOM`) around a stable focal anchor.
+ * - Dropping from 2 pointers to 1 pointer enters `POST_PINCH_POINTER_SUPPRESSED` until all pointers lift.
+ * - Stationary taps, double-taps, and long presses on the sheet perform no selection, OSNAP, or CAD edits.
  */
 @Composable
 fun CadViewportCanvas(
@@ -173,6 +214,8 @@ fun CadViewportCanvas(
     onViewportChanged: (ViewportTransform) -> Unit,
     onViewportSizeChanged: (widthPx: Float, heightPx: Float) -> Unit,
     onGestureStateChanged: (ViewportGestureState) -> Unit = {},
+    isToolDrawerOpen: Boolean = false,
+    onRevealToolDrawer: () -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onDirectTapModelPoint: (Point2D) -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onSelectionDragStart: (Point2D) -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onSelectionDragUpdate: (Point2D) -> Unit = {},
@@ -183,6 +226,8 @@ fun CadViewportCanvas(
     val currentViewport by rememberUpdatedState(viewport)
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnGestureStateChanged by rememberUpdatedState(onGestureStateChanged)
+    val currentIsToolDrawerOpen by rememberUpdatedState(isToolDrawerOpen)
+    val currentOnRevealToolDrawer by rememberUpdatedState(onRevealToolDrawer)
 
     val textPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -198,10 +243,22 @@ fun CadViewportCanvas(
                 onViewportSizeChanged(size.width.toFloat(), size.height.toFloat())
             }
             .pointerInput(Unit) {
+                val touchSlopPx = viewConfiguration.touchSlop
+                val leftEdgeStripPx = 28.dp.toPx()
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    var gestureState = ViewportGestureState.ONE_POINTER_SUPPRESSED
+                    val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    val startedInLeftEdge = !currentIsToolDrawerOpen && firstDown.position.x <= leftEdgeStripPx
+                    var gestureState = if (startedInLeftEdge) {
+                        ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL
+                    } else {
+                        ViewportGestureState.ONE_POINTER_PAN
+                    }
                     currentOnGestureStateChanged(gestureState)
+
+                    var oneFingerDragActivated = false
+                    var accumulatedFromDown = Offset.Zero
+                    var drawerRevealedInGesture = false
+                    var lockedPinchFocalAnchor: Offset = Offset.Unspecified
 
                     do {
                         val event = awaitPointerEvent()
@@ -211,36 +268,78 @@ fun CadViewportCanvas(
 
                         val nextState = ViewportGesturePolicy.resolveState(
                             pressedPointerCount = pointerCount,
-                            isCancelled = canceled
+                            isCancelled = canceled,
+                            startedInLeftEdgeZone = startedInLeftEdge,
+                            previousState = gestureState
                         )
                         if (nextState != gestureState) {
                             gestureState = nextState
                             currentOnGestureStateChanged(gestureState)
+                            if (gestureState == ViewportGestureState.TWO_POINTER_PINCH_ZOOM) {
+                                lockedPinchFocalAnchor = event.calculateCentroid(useCurrent = true)
+                            }
                         }
 
-                        if (gestureState == ViewportGestureState.TWO_POINTER_TRANSFORM) {
-                            val zoomChange = event.calculateZoom()
-                            val panChange = event.calculatePan()
-                            val centroid = event.calculateCentroid(useCurrent = false)
-                            val updated = ViewportGesturePolicy.applyTwoFingerTransform(
-                                viewport = currentViewport,
-                                centroidScreen = centroid,
-                                panDeltaScreen = panChange,
-                                zoomFactor = zoomChange
-                            )
-                            if (updated != currentViewport) {
-                                currentOnViewportChanged(updated)
-                            }
-                            event.changes.forEach { change ->
-                                if (change.positionChanged()) {
-                                    change.consume()
+                        when (gestureState) {
+                            ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL -> {
+                                val panChange = event.calculatePan()
+                                accumulatedFromDown += panChange
+                                if (!drawerRevealedInGesture &&
+                                    accumulatedFromDown.x > touchSlopPx &&
+                                    abs(accumulatedFromDown.x) > abs(accumulatedFromDown.y)
+                                ) {
+                                    drawerRevealedInGesture = true
+                                    currentOnRevealToolDrawer()
+                                }
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) change.consume()
                                 }
                             }
-                        } else {
-                            // Suppress all 1-finger taps, drags, and long-presses on the sheet
-                            event.changes.forEach { change ->
-                                if (change.positionChanged()) {
-                                    change.consume()
+
+                            ViewportGestureState.ONE_POINTER_PAN -> {
+                                val panChange = event.calculatePan()
+                                if (!oneFingerDragActivated) {
+                                    accumulatedFromDown += panChange
+                                    if (hypot(accumulatedFromDown.x, accumulatedFromDown.y) > touchSlopPx) {
+                                        oneFingerDragActivated = true
+                                    }
+                                } else if (panChange != Offset.Zero) {
+                                    val updated = ViewportGesturePolicy.applyOneFingerPan(
+                                        viewport = currentViewport,
+                                        panDeltaScreen = panChange
+                                    )
+                                    if (updated != currentViewport) {
+                                        currentOnViewportChanged(updated)
+                                    }
+                                }
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) change.consume()
+                                }
+                            }
+
+                            ViewportGestureState.TWO_POINTER_PINCH_ZOOM -> {
+                                val zoomChange = event.calculateZoom()
+                                if (lockedPinchFocalAnchor == Offset.Unspecified) {
+                                    lockedPinchFocalAnchor = event.calculateCentroid(useCurrent = false)
+                                }
+                                val updated = ViewportGesturePolicy.applyTwoFingerPinchZoomOnly(
+                                    viewport = currentViewport,
+                                    focalAnchorScreen = lockedPinchFocalAnchor,
+                                    zoomFactor = zoomChange
+                                )
+                                if (updated != currentViewport) {
+                                    currentOnViewportChanged(updated)
+                                }
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) change.consume()
+                                }
+                            }
+
+                            ViewportGestureState.POST_PINCH_POINTER_SUPPRESSED,
+                            ViewportGestureState.CANCELLED,
+                            ViewportGestureState.IDLE -> {
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) change.consume()
                                 }
                             }
                         }
@@ -765,12 +864,6 @@ private fun DrawScope.drawCadEntity(
                 translate(shelfMidX, labelY)
                 textPaint.textSize = fontSizePx
                 textPaint.textAlign = Paint.Align.CENTER
-                val textW = textPaint.measureText(entity.text)
-                val bgPaint = Paint().apply {
-                    this.color = android.graphics.Color.argb(215, 10, 14, 20)
-                    this.style = Paint.Style.FILL
-                }
-                drawRect(-textW * 0.54f, -fontSizePx * 0.95f, textW * 0.54f, fontSizePx * 0.22f, bgPaint)
                 textPaint.color = toAndroidColor(baseColor)
                 drawText(entity.text, 0f, 0f, textPaint)
                 restore()
@@ -1040,12 +1133,6 @@ private fun DrawScope.drawAdaptiveDimension(
             save()
             translate(shelfMidX, labelY)
             textPaint.textSize = fontSizePx
-            val textW = textPaint.measureText(plan.labelText)
-            val bgPaint = Paint().apply {
-                this.color = android.graphics.Color.argb(220, 10, 14, 20)
-                this.style = Paint.Style.FILL
-            }
-            drawRect(-textW * 0.54f, -fontSizePx * 0.96f, textW * 0.54f, fontSizePx * 0.22f, bgPaint)
             textPaint.color = toAndroidColor(color)
             drawText(plan.labelText, 0f, 0f, textPaint)
             restore()
@@ -1083,12 +1170,6 @@ private fun DrawScope.drawAdaptiveDimension(
             save()
             translate(textScreen.x, textScreen.y)
             textPaint.textSize = fontSizePx
-            val textW = textPaint.measureText(plan.labelText)
-            val bgPaint = Paint().apply {
-                this.color = android.graphics.Color.argb(215, 10, 14, 20)
-                this.style = Paint.Style.FILL
-            }
-            drawRect(-textW * 0.55f, -fontSizePx * 0.95f, textW * 0.55f, fontSizePx * 0.25f, bgPaint)
             textPaint.color = toAndroidColor(color)
             drawText(plan.labelText, 0f, 0f, textPaint)
             restore()
@@ -1132,19 +1213,13 @@ private fun DrawScope.drawAdaptiveDimension(
         drawArrowheadScreen(tip = dE, tailRef = outTail2, lengthPx = arrowLenPx, halfWidthPx = arrowWidPx, color = color)
     }
 
-    // Dimension text with subtle background pill for maximum blueprint legibility
+    // Transparent dimension text rendered directly above sheet geometry (Section 21)
     val textScreen = viewport.modelToScreen(plan.textPositionModel)
     drawContext.canvas.nativeCanvas.apply {
         save()
         translate(textScreen.x, textScreen.y)
         rotate(plan.textRotationDeg)
         textPaint.textSize = fontSizePx
-        val textW = textPaint.measureText(plan.labelText)
-        val bgPaint = Paint().apply {
-            this.color = android.graphics.Color.argb(215, 10, 14, 20)
-            this.style = Paint.Style.FILL
-        }
-        drawRect(-textW * 0.55f, -fontSizePx * 0.95f, textW * 0.55f, fontSizePx * 0.25f, bgPaint)
         textPaint.color = toAndroidColor(color)
         drawText(plan.labelText, 0f, 0f, textPaint)
         restore()

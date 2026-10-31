@@ -2,34 +2,36 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Utilitarian Desktop CAD Dark Blueprint Palette
-val CadModelSpaceBg = Color(0xFF0A0E14)
-val CadPaperSpaceBg = Color(0xFF111722)
-val CadSheetPaperFill = Color(0xFF0E141E)
-val CadPanelSurface = Color(0xFF131A26)
-val CadPanelElevated = Color(0xFF1A2434)
-val CadHudSurface = Color(0xFF16202E)
-val CadSurfaceCard = Color(0xFF1E293B)
-val CadBorderHairline = Color(0xFF28364A)
+// Section 33 — Professional Pure-Black CAD Visual Identity
+val CadModelSpaceBg = Color(0xFF000000)
+val CadPaperSpaceBg = Color(0xFF090B0E)
+val CadSheetPaperFill = Color(0xFF06080A)
+val CadPanelSurface = Color(0xFF050608)
+val CadPanelElevated = Color(0xFF090C10)
+val CadHudSurface = Color(0xFF090C10)
+val CadSurfaceCard = Color(0xFF0D1117)
+val CadBorderHairline = Color(0xFF202630)
+val CadBorderStrong = Color(0xFF303946)
 
-// Grid & Origin Axes
-val CadGridMinor = Color(0xFF162030)
-val CadGridMajor = Color(0xFF23334B)
-val CadAxisX = Color(0xFFEF4444)
-val CadAxisY = Color(0xFF22C55E)
+// Grid & Origin Axes (low-contrast reference over pure-black model space)
+val CadGridMinor = Color(0xFF0E1218)
+val CadGridMajor = Color(0xFF181F29)
+val CadAxisX = Color(0xFFBF5A5A)
+val CadAxisY = Color(0xFF5A9E72)
 
-// Primary & Semantic Accents
-val CadCyanPrimary = Color(0xFF00E5FF)
-val CadCyanDim = Color(0xFF0088A3)
-val CadAmberSnap = Color(0xFFFFB300)
-val CadEmeraldCrossing = Color(0xFF10B981)
-val CadBlueWindow = Color(0xFF3B82F6)
-val CadDimensionBlue = Color(0xFF38BDF8)
+// Restrained Semantic UI Accents (Section 33.2)
+val CadCyanPrimary = Color(0xFF7892A8)
+val CadCyanDim = Color(0xFF566B7D)
+val CadAmberSnap = Color(0xFFB39A69)
+val CadEmeraldCrossing = Color(0xFF729783)
+val CadWarningOchre = Color(0xFFB79A63)
+val CadBlueWindow = Color(0xFF6088B0)
+val CadDimensionBlue = Color(0xFF7FA6C9)
 val CadConstructionSlate = Color(0xFF64748B)
-val CadCrimsonAlert = Color(0xFFF43F5E)
+val CadCrimsonAlert = Color(0xFFB87575)
 val CadRedAlert = CadCrimsonAlert
 
 // Typography & Icon Colors
-val CadTextPrimary = Color(0xFFF1F5F9)
-val CadTextSecondary = Color(0xFF94A3B8)
-val CadTextMuted = Color(0xFF64748B)
+val CadTextPrimary = Color(0xFFE6E9ED)
+val CadTextSecondary = Color(0xFFA4ADB8)
+val CadTextMuted = Color(0xFF737E8B)

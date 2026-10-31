@@ -91,6 +91,13 @@ data class TransientNotification(
     val timestampMs: Long = System.currentTimeMillis()
 )
 
+data class OverviewCardEvent(
+    val id: Long,
+    val title: String,
+    val explanation: String,
+    val category: NotificationCategory = NotificationCategory.INFO
+)
+
 data class DocumentSnapshot(
     val entities: List<CadEntity>,
     val layers: List<CadLayer>,
@@ -114,6 +121,7 @@ data class CadWorkspaceUiState(
     val gridSnapConfig: GridAndSnapConfig = GridAndSnapConfig(),
     val controllerConfig: CursorControllerConfig = CursorControllerConfig(),
     val toolDrawerState: ToolDrawerState = ToolDrawerState.COLLAPSED,
+    val expandedToolSections: Set<CadCommandCategory> = setOf(CadCommandCategory.DRAW),
     val commandPanelState: CommandPanelState = CommandPanelState.Hidden,
     val controllerDockState: ControllerDockState = ControllerDockState.EXPANDED_CONTROLLER,
     val viewportGestureState: ViewportGestureState = ViewportGestureState.IDLE,
@@ -125,9 +133,10 @@ data class CadWorkspaceUiState(
     val commandPromptBanner: String = "READY • Use controller PICK PT, CMD, or + Launcher",
     val activeNotification: TransientNotification? = null,
     val notificationQueue: List<TransientNotification> = emptyList(),
+    val activeOverview: OverviewCardEvent? = null,
     val commandHistoryLog: List<String> = listOf(
         "PrecisionCAD Studio initialized (2D Technical Viewport).",
-        "Loaded template: CNC 6-Hole Mounting Plate (120 × 80 mm)."
+        "Loaded template: CNC 6-Hole Mounting Plate (136 × 96 mm)."
     ),
     val recentCommands: List<CadCommandId> = listOf(
         CadCommandId.LINE,
@@ -146,8 +155,8 @@ data class CadWorkspaceUiState(
     val selectedEntityIds: Set<String> = emptySet(),
     val previousSelectedEntityIds: Set<String> = emptySet(),
     val isolatedEntityIds: Set<String>? = null,
-    val rawCursorModelPos: Point2D = Point2D(60.0, 40.0),
-    val snappedCursorModelPos: Point2D = Point2D(60.0, 40.0),
+    val rawCursorModelPos: Point2D = Point2D(100.0, 150.0),
+    val snappedCursorModelPos: Point2D = Point2D(100.0, 150.0),
     val activeSnapCandidate: SnapCandidate? = null,
     val selectionBoxDrag: SelectionBoxDragState? = null,
     val viewport: ViewportTransform = ViewportTransform(),
@@ -183,6 +192,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val undoStack = ArrayDeque<DocumentSnapshot>()
     private val redoStack = ArrayDeque<DocumentSnapshot>()
     private var notificationDismissJob: Job? = null
+    private var overviewDismissJob: Job? = null
+    private var overviewSeq: Long = 1L
 
     init {
         viewModelScope.launch {
@@ -222,13 +233,44 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
     }
 
-    // --- Transient Notification System (Section 4) ---
+    // --- Transient Notification & Floating Overview System (Sections 4 & 30) ---
+
+    fun emitOverview(
+        title: String,
+        explanation: String,
+        category: NotificationCategory = NotificationCategory.INFO
+    ) {
+        val event = OverviewCardEvent(
+            id = overviewSeq++,
+            title = title.trim(),
+            explanation = explanation.trim(),
+            category = category
+        )
+        _uiState.update { it.copy(activeOverview = event) }
+        overviewDismissJob?.cancel()
+        overviewDismissJob = viewModelScope.launch {
+            delay(2500L)
+            _uiState.update { st ->
+                if (st.activeOverview?.id == event.id) st.copy(activeOverview = null) else st
+            }
+        }
+    }
+
+    fun dismissOverview() {
+        overviewDismissJob?.cancel()
+        _uiState.update { it.copy(activeOverview = null) }
+    }
 
     fun emitTransientNotification(
         message: String,
         category: NotificationCategory = NotificationCategory.INFO,
         isPersistentError: Boolean = false
     ) {
+        val parts = message.split(" • ", limit = 2)
+        val overviewTitle = if (parts.size == 2) parts[0] else "CAD OPERATION"
+        val overviewBody = if (parts.size == 2) parts[1] else message
+        emitOverview(overviewTitle, overviewBody, category)
+
         val current = _uiState.value
         val active = current.activeNotification
         // Coalesce identical consecutive messages
@@ -491,6 +533,37 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /**
+     * Section 18.3: Multi-section independent accordion toggle.
+     * Expanding or collapsing one category section never closes other open sections.
+     */
+    fun toggleToolSection(category: CadCommandCategory) {
+        _uiState.update { st ->
+            val nextExpanded = if (category in st.expandedToolSections) {
+                st.expandedToolSections - category
+            } else {
+                st.expandedToolSections + category
+            }
+            st.copy(
+                activeCategory = category,
+                expandedToolSections = nextExpanded
+            )
+        }
+    }
+
+    /**
+     * Section 18.2: Vertical category side tile selection.
+     * Focuses the category and ensures its accordion section is expanded without closing others.
+     */
+    fun selectCategoryTile(category: CadCommandCategory) {
+        _uiState.update { st ->
+            st.copy(
+                activeCategory = category,
+                expandedToolSections = st.expandedToolSections + category
+            )
+        }
+    }
+
     fun onViewportGestureStateChanged(state: ViewportGestureState) {
         _uiState.update { it.copy(viewportGestureState = state) }
     }
@@ -619,12 +692,11 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 fitDrawing(notify = false)
             }
         } else {
-            val rebased = prev.viewport.rebaseForUsableRectChange(prev.usableViewportRect, newRect)
+            // Section 14.7, 18.5 & 20: Viewport Invariance Contract.
+            // Updating InteractionSafeRect (usableViewportRect) when overlays open/close MUST NEVER
+            // rebase, pan, or zoom the viewport transform.
             _uiState.update {
-                it.copy(
-                    usableViewportRect = newRect,
-                    viewport = rebased
-                )
+                it.copy(usableViewportRect = newRect)
             }
         }
     }
@@ -778,10 +850,12 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
-    // --- Quick Dimension (QDIM) Toggle, Refresh & Execution ---
+    // --- Quick Dimension (QDIM) Toggle, Refresh, Clear All & Execution (Sections 35 & 37) ---
 
     fun setQuickDimensionEnabled(enabled: Boolean) {
         val st = _uiState.value
+        // Section 35.2: Idempotent enabling/disabling — no-op if already in target state
+        if (enabled == st.isQuickDimensionEnabled) return
         if (enabled) {
             val defaultMode = if (st.selectedEntityIds.isNotEmpty()) {
                 QDimOperatingMode.QDIM_SELECT
@@ -807,6 +881,48 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             }
             emitTransientNotification(msg, NotificationCategory.INFO)
         }
+    }
+
+    /**
+     * Section 37: Destructive Clear All Dimensions master action.
+     * Atomically removes all DimensionEntity objects (both manual and auto-generated) and
+     * QDIM-generated CenterMarkEntity instances in one undoable transaction, preserving
+     * all ordinary drawing geometry, text notes, leaders, and independent center marks.
+     */
+    fun clearAllDimensionsConfirmed() {
+        val st = _uiState.value
+        val removedDimCount = st.entities.count { it is CadEntity.DimensionEntity }
+        val hasAutoCenterMarks = st.entities.any { it is CadEntity.CenterMarkEntity && it.sourceEntityId != null }
+        if (removedDimCount == 0 && !hasAutoCenterMarks) {
+            val msg = "CLEAR DIMENSIONS • No dimensions found"
+            _uiState.update {
+                it.copy(
+                    isQuickDimensionEnabled = false,
+                    lastAlignmentReport = null,
+                    commandPromptBanner = msg
+                )
+            }
+            emitTransientNotification(msg, NotificationCategory.INFO)
+            return
+        }
+
+        recordUndoSnapshot()
+        val remainingEntities = st.entities.filterNot { entity ->
+            entity is CadEntity.DimensionEntity ||
+                (entity is CadEntity.CenterMarkEntity && entity.sourceEntityId != null)
+        }
+        val remainingIds = remainingEntities.map { it.id }.toSet()
+        val msg = "CLEAR DIMENSIONS • $removedDimCount dimensions cleared"
+        _uiState.update {
+            it.copy(
+                entities = remainingEntities,
+                selectedEntityIds = it.selectedEntityIds.intersect(remainingIds),
+                isQuickDimensionEnabled = false,
+                lastAlignmentReport = null,
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
     fun refreshQuickDimensions() {
@@ -903,7 +1019,12 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     // --- Command Selection & Execution State Machine (Section 14) ---
 
     fun selectCategory(category: CadCommandCategory) {
-        _uiState.update { it.copy(activeCategory = category) }
+        _uiState.update {
+            it.copy(
+                activeCategory = category,
+                expandedToolSections = it.expandedToolSections + category
+            )
+        }
     }
 
     fun activateCommand(command: CadCommandId, subOption: String = "Default") {

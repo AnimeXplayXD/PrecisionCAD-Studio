@@ -92,7 +92,7 @@ class CadProjectRepository(
 
     suspend fun ensureDefaultProjectsSeeded() = withContext(Dispatchers.IO) {
         val existing = dao.getAllProjectsOnce()
-        if (existing.isEmpty() || existing.any { it.schemaVersion < 3 }) {
+        if (existing.isEmpty() || existing.any { it.schemaVersion < 4 }) {
             val templates = CadTemplateFactory.createIndustrialTemplates()
             for ((meta, payload) in templates) {
                 saveProjectDocument(meta.projectId, meta.name, meta.description, payload)
@@ -119,7 +119,7 @@ class CadProjectRepository(
             sheetPresetName = payload.sheetSetup.preset.name,
             entityCount = payload.entities.size,
             dimensionCount = dimCount,
-            schemaVersion = 3,
+            schemaVersion = 4,
             updatedAtEpochMs = System.currentTimeMillis()
         )
         dao.upsertProject(meta)
@@ -153,7 +153,7 @@ object CadTemplateFactory {
             CadProjectMetadataEntity(
                 projectId = "proj_mounting_plate",
                 name = "CNC 6-Hole Mounting Plate",
-                description = "120 × 80 mm rectangular plate with 6 equally spaced ⌀10 mm mounting holes and ⌀28 mm central bore (Section 8.4 QDIM Showcase)."
+                description = "136 × 96 mm rectangular plate with 6 equally spaced ⌀10 mm mounting holes and ⌀28 mm central bore (Section 23 & 28 QDIM Showcase)."
             ) to platePayload,
             CadProjectMetadataEntity(
                 projectId = "proj_flanged_housing",
@@ -168,32 +168,39 @@ object CadTemplateFactory {
         )
     }
 
+    /**
+     * Section 23.2 & 28.4 — Authoritative 136 × 96 mm CNC 6-Hole Mounting Plate:
+     * - Outer profile: 136 × 96 mm (`X = 32..168`, `Y = 102..198`) with R6 filleted corners (`bulge = 0.41421356`).
+     * - Central precision bore: ⌀28 mm (`R14`) at `(100.0, 150.0)`.
+     * - Six ⌀10 mm (`R5`) mounting holes at `X = 60, 100, 140` and `Y = 126, 174`.
+     * - Symmetry centerlines passing through `(100.0, 150.0)`.
+     */
     fun createSixHoleMountingPlate(): DxfDocumentPayload {
         val layers = CadLayer.defaultLayers()
         val rawEntities = mutableListOf<CadEntity>()
 
-        // Outer 120 x 80 mm plate with R6 filleted corners
+        // Outer 136 x 96 mm plate (X: 32..168, Y: 102..198) with R6 filleted corners
         rawEntities.add(
             CadGeometryKernel.createRectanglePolyline(
-                corner1 = Point2D(0.0, 0.0),
-                corner2 = Point2D(120.0, 80.0),
+                corner1 = Point2D(32.0, 102.0),
+                corner2 = Point2D(168.0, 198.0),
                 filletRadius = 6.0,
                 layerName = "0"
             )
         )
 
-        // Central ⌀28 mm precision bore
+        // Central ⌀28 mm precision bore at (100, 150)
         rawEntities.add(
             CadEntity.CircleEntity(
                 layerName = "0",
-                center = Point2D(60.0, 40.0),
+                center = Point2D(100.0, 150.0),
                 radius = 14.0
             )
         )
 
-        // 6 equally spaced ⌀10 mm mounting holes (2 rows x 3 cols: X = 20, 60, 100; Y = 16, 64)
-        for (y in listOf(16.0, 64.0)) {
-            for (x in listOf(20.0, 60.0, 100.0)) {
+        // 6 equally spaced ⌀10 mm mounting holes (2 rows x 3 cols: X = 60, 100, 140; Y = 126, 174)
+        for (y in listOf(126.0, 174.0)) {
+            for (x in listOf(60.0, 100.0, 140.0)) {
                 rawEntities.add(
                     CadEntity.CircleEntity(
                         layerName = "0",
@@ -204,21 +211,21 @@ object CadTemplateFactory {
             }
         }
 
-        // Symmetry centerlines
+        // Symmetry centerlines through (100, 150)
         rawEntities.add(
             CadEntity.LineEntity(
                 layerName = "CENTERLINES",
                 lineTypeOverride = CadLineType.CENTER,
-                start = Point2D(-8.0, 40.0),
-                end = Point2D(128.0, 40.0)
+                start = Point2D(24.0, 150.0),
+                end = Point2D(176.0, 150.0)
             )
         )
         rawEntities.add(
             CadEntity.LineEntity(
                 layerName = "CENTERLINES",
                 lineTypeOverride = CadLineType.CENTER,
-                start = Point2D(60.0, -8.0),
-                end = Point2D(60.0, 88.0)
+                start = Point2D(100.0, 94.0),
+                end = Point2D(100.0, 206.0)
             )
         )
 

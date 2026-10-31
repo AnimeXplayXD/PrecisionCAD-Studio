@@ -74,16 +74,20 @@ object CadDxfInterchange {
     }
 
     fun exportToDxf(payload: DxfDocumentPayload): String {
-        val sb = StringBuilder(24576)
+        val sb = StringBuilder(32768)
         val unitRatio = (payload.storageUnit.toMillimetersFactor / payload.displayUnit.toMillimetersFactor)
             .let { if (it.isFinite() && it > 0.0) it else 1.0 }
         fun u(v: Double): String = fmt(v * unitRatio)
+
+        var nextHandleId = 0x10
+        fun nextHandle(): String = (nextHandleId++).toString(16).uppercase(Locale.US)
 
         val (_, bounds) = visibleEntitiesAndBounds(payload)
 
         // 1. HEADER SECTION
         sb.appendLine("0\nSECTION\n2\nHEADER")
         sb.appendLine("9\n\$ACADVER\n1\nAC1015")
+        sb.appendLine("9\n\$HANDSEED\n5\nFFFF")
         sb.appendLine("9\n\$INSUNITS\n70\n${payload.displayUnit.dxfInsUnitsCode}")
         sb.appendLine("9\n\$LUNITS\n70\n2")
         sb.appendLine("9\n\$LUPREC\n70\n${payload.precision.linearDecimals}")
@@ -91,34 +95,39 @@ object CadDxfInterchange {
         sb.appendLine("9\n\$EXTMAX\n10\n${u(bounds.maxX)}\n20\n${u(bounds.maxY)}\n30\n0.0")
         sb.appendLine("0\nENDSEC")
 
-        // 2. TABLES SECTION (LTYPE, LAYER, STYLE, DIMSTYLE)
+        // 2. TABLES SECTION (LTYPE, LAYER, STYLE, DIMSTYLE) with AC1015 handles & subclass markers
         sb.appendLine("0\nSECTION\n2\nTABLES")
         val exportedLineTypes = CadLineType.entries.filter { it != CadLineType.BY_LAYER }
-        sb.appendLine("0\nTABLE\n2\nLTYPE\n70\n${exportedLineTypes.size}")
+        sb.appendLine("0\nTABLE\n2\nLTYPE\n5\n${nextHandle()}\n100\nAcDbSymbolTable\n70\n${exportedLineTypes.size}")
         for (lt in exportedLineTypes) {
-            sb.appendLine("0\nLTYPE\n2\n${lt.dxfName}\n70\n0\n3\n${lt.label}\n72\n65\n73\n0\n40\n0.0")
+            sb.appendLine("0\nLTYPE\n5\n${nextHandle()}\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord")
+            sb.appendLine("2\n${lt.dxfName}\n70\n0\n3\n${lt.label}\n72\n65")
+            appendLinetypePatternDxf(sb, lt)
         }
         sb.appendLine("0\nENDTAB")
 
-        sb.appendLine("0\nTABLE\n2\nLAYER\n70\n${payload.layers.size}")
+        sb.appendLine("0\nTABLE\n2\nLAYER\n5\n${nextHandle()}\n100\nAcDbSymbolTable\n70\n${payload.layers.size}")
         for (layer in payload.layers) {
             val flags = (if (layer.isFrozen) 1 else 0) or (if (layer.isLocked) 4 else 0)
             val aci = colorHexToAci(layer.colorHex).let { if (!layer.isVisible) -it else it }
-            sb.appendLine("0\nLAYER\n2\n${layer.name}\n70\n$flags\n62\n$aci\n6\n${layer.lineType.dxfName}")
+            sb.appendLine("0\nLAYER\n5\n${nextHandle()}\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord")
+            sb.appendLine("2\n${layer.name}\n70\n$flags\n62\n$aci\n6\n${layer.lineType.dxfName}")
             sb.appendLine("370\n${(layer.lineWeightMm * 100).toInt()}")
             sb.appendLine("420\n${(layer.colorHex and 0xFFFFFF)}")
         }
         sb.appendLine("0\nENDTAB")
 
         // Standard STYLE table for TEXT, MTEXT, and DIMENSION entities
-        sb.appendLine("0\nTABLE\n2\nSTYLE\n70\n1")
-        sb.appendLine("0\nSTYLE\n2\nSTANDARD\n70\n0\n40\n0.0\n41\n1.0\n50\n0.0\n71\n0\n42\n2.5\n3\ntxt\n4\n")
+        sb.appendLine("0\nTABLE\n2\nSTYLE\n5\n${nextHandle()}\n100\nAcDbSymbolTable\n70\n1")
+        sb.appendLine("0\nSTYLE\n5\n${nextHandle()}\n100\nAcDbSymbolTableRecord\n100\nAcDbTextStyleTableRecord")
+        sb.appendLine("2\nSTANDARD\n70\n0\n40\n0.0\n41\n1.0\n50\n0.0\n71\n0\n42\n2.5\n3\ntxt\n4\n")
         sb.appendLine("0\nENDTAB")
 
-        // Standard DIMSTYLE table so AutoCAD Mobile / desktop viewers resolve STANDARD dimstyle
-        sb.appendLine("0\nTABLE\n2\nDIMSTYLE\n70\n1")
+        // Standard DIMSTYLE table (uses group 105 for handle in AC1015)
+        sb.appendLine("0\nTABLE\n2\nDIMSTYLE\n5\n${nextHandle()}\n100\nAcDbSymbolTable\n70\n1\n100\nAcDbDimStyleTable")
         sb.appendLine(
-            "0\nDIMSTYLE\n2\nSTANDARD\n70\n0\n" +
+            "0\nDIMSTYLE\n105\n${nextHandle()}\n100\nAcDbSymbolTableRecord\n100\nAcDbDimStyleTableRecord\n" +
+                "2\nSTANDARD\n70\n0\n" +
                 "40\n1.0\n" +
                 "41\n${u(2.5)}\n" +
                 "42\n${u(1.2)}\n" +
@@ -132,12 +141,12 @@ object CadDxfInterchange {
         // 3. BLOCKS SECTION
         sb.appendLine("0\nSECTION\n2\nBLOCKS")
         for (block in payload.blocks) {
-            sb.appendLine("0\nBLOCK\n8\n0\n2\n${block.name}\n70\n0")
-            sb.appendLine("10\n${u(block.basePoint.x)}\n20\n${u(block.basePoint.y)}\n30\n0.0")
+            sb.appendLine("0\nBLOCK\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockBegin\n2\n${block.name}\n70\n0")
+            sb.appendLine("10\n${u(block.basePoint.x)}\n20\n${u(block.basePoint.y)}\n30\n0.0\n3\n${block.name}")
             for (ent in block.entities) {
-                appendEntityDxf(sb, ent, payload)
+                appendEntityDxf(sb, ent, payload, ::nextHandle)
             }
-            sb.appendLine("0\nENDBLK\n8\n0")
+            sb.appendLine("0\nENDBLK\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockEnd")
         }
         sb.appendLine("0\nENDSEC")
 
@@ -147,14 +156,49 @@ object CadDxfInterchange {
         for (ent in payload.entities) {
             val layer = layerMap[ent.layerName]
             if (layer != null && (!layer.isVisible || layer.isFrozen)) continue
-            appendEntityDxf(sb, ent, payload)
+            appendEntityDxf(sb, ent, payload, ::nextHandle)
         }
         sb.appendLine("0\nENDSEC")
         sb.appendLine("0\nEOF")
         return sb.toString()
     }
 
-    private fun appendEntityDxf(sb: StringBuilder, ent: CadEntity, payload: DxfDocumentPayload) {
+    /**
+     * Section 28.2 — Populates non-continuous LTYPE records with valid dash counts (73),
+     * total pattern lengths (40), and dash/gap segments (49, 74).
+     */
+    private fun appendLinetypePatternDxf(sb: StringBuilder, lt: CadLineType) {
+        when (lt) {
+            CadLineType.CONTINUOUS, CadLineType.BY_LAYER -> {
+                sb.appendLine("73\n0\n40\n0.0")
+            }
+            CadLineType.DASHED -> {
+                sb.appendLine("73\n2\n40\n9.0\n49\n6.0\n74\n0\n49\n-3.0\n74\n0")
+            }
+            CadLineType.HIDDEN -> {
+                sb.appendLine("73\n2\n40\n6.0\n49\n4.0\n74\n0\n49\n-2.0\n74\n0")
+            }
+            CadLineType.CENTER -> {
+                sb.appendLine("73\n4\n40\n20.0\n49\n12.0\n74\n0\n49\n-3.0\n74\n0\n49\n2.0\n74\n0\n49\n-3.0\n74\n0")
+            }
+            CadLineType.PHANTOM -> {
+                sb.appendLine(
+                    "73\n6\n40\n25.0\n49\n12.0\n74\n0\n49\n-3.0\n74\n0\n" +
+                        "49\n2.0\n74\n0\n49\n-3.0\n74\n0\n49\n2.0\n74\n0\n49\n-3.0\n74\n0"
+                )
+            }
+            CadLineType.DOTTED -> {
+                sb.appendLine("73\n2\n40\n3.0\n49\n0.0\n74\n0\n49\n-3.0\n74\n0")
+            }
+        }
+    }
+
+    private fun appendEntityDxf(
+        sb: StringBuilder,
+        ent: CadEntity,
+        payload: DxfDocumentPayload,
+        nextHandle: () -> String
+    ) {
         val unitRatio = (payload.storageUnit.toMillimetersFactor / payload.displayUnit.toMillimetersFactor)
             .let { if (it.isFinite() && it > 0.0) it else 1.0 }
         fun u(v: Double): String = fmt(v * unitRatio)
@@ -162,15 +206,17 @@ object CadDxfInterchange {
         when (ent) {
             is CadEntity.LineEntity -> {
                 if (!ent.start.x.isFinite() || !ent.start.y.isFinite() || !ent.end.x.isFinite() || !ent.end.y.isFinite()) return
-                sb.appendLine("0\nLINE\n8\n${ent.layerName}")
+                sb.appendLine("0\nLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbLine")
                 sb.appendLine("10\n${u(ent.start.x)}\n20\n${u(ent.start.y)}\n30\n0.0")
                 sb.appendLine("11\n${u(ent.end.x)}\n21\n${u(ent.end.y)}\n31\n0.0")
             }
             is CadEntity.PolylineEntity -> {
                 if (ent.vertices.size < 2) return
-                sb.appendLine("0\nLWPOLYLINE\n8\n${ent.layerName}")
+                sb.appendLine("0\nLWPOLYLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbPolyline")
                 sb.appendLine("90\n${ent.vertices.size}")
                 sb.appendLine("70\n${if (ent.isClosed) 1 else 0}")
                 sb.appendLine("43\n${u(ent.globalWidth)}")
@@ -180,24 +226,28 @@ object CadDxfInterchange {
             }
             is CadEntity.CircleEntity -> {
                 if (ent.radius <= 0.0 || !ent.radius.isFinite()) return
-                sb.appendLine("0\nCIRCLE\n8\n${ent.layerName}")
+                sb.appendLine("0\nCIRCLE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbCircle")
                 sb.appendLine("10\n${u(ent.center.x)}\n20\n${u(ent.center.y)}\n30\n0.0")
                 sb.appendLine("40\n${u(ent.radius)}")
             }
             is CadEntity.ArcEntity -> {
                 if (ent.radius <= 0.0 || !ent.radius.isFinite()) return
-                sb.appendLine("0\nARC\n8\n${ent.layerName}")
+                sb.appendLine("0\nARC\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
                 val startAng = if (ent.sweepAngleDeg >= 0) ent.startAngleDeg else ent.endAngleDeg
                 val endAng = if (ent.sweepAngleDeg >= 0) ent.endAngleDeg else ent.startAngleDeg
+                sb.appendLine("100\nAcDbCircle")
                 sb.appendLine("10\n${u(ent.center.x)}\n20\n${u(ent.center.y)}\n30\n0.0")
                 sb.appendLine("40\n${u(ent.radius)}")
+                sb.appendLine("100\nAcDbArc")
                 sb.appendLine("50\n${fmt(startAng)}\n51\n${fmt(endAng)}")
             }
             is CadEntity.EllipseEntity -> {
-                sb.appendLine("0\nELLIPSE\n8\n${ent.layerName}")
+                sb.appendLine("0\nELLIPSE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbEllipse")
                 val rad = Math.toRadians(ent.rotationAngleDeg)
                 val majX = ent.majorRadius * cos(rad)
                 val majY = ent.majorRadius * sin(rad)
@@ -208,42 +258,45 @@ object CadDxfInterchange {
             }
             is CadEntity.SplineEntity -> {
                 if (ent.controlPoints.size < 2) return
-                sb.appendLine("0\nSPLINE\n8\n${ent.layerName}")
+                sb.appendLine("0\nSPLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbSpline")
                 sb.appendLine("70\n${if (ent.isClosed) 1 else 8}\n71\n3\n73\n${ent.controlPoints.size}")
                 for (pt in ent.controlPoints) {
                     sb.appendLine("10\n${u(pt.x)}\n20\n${u(pt.y)}\n30\n0.0")
                 }
             }
             is CadEntity.PointEntity -> {
-                sb.appendLine("0\nPOINT\n8\n${ent.layerName}")
+                sb.appendLine("0\nPOINT\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbPoint")
                 sb.appendLine("10\n${u(ent.position.x)}\n20\n${u(ent.position.y)}\n30\n0.0")
             }
             is CadEntity.RayEntity -> {
-                sb.appendLine("0\nRAY\n8\n${ent.layerName}")
+                sb.appendLine("0\nRAY\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbRay")
                 val rad = Math.toRadians(ent.angleDeg)
                 sb.appendLine("10\n${u(ent.basePoint.x)}\n20\n${u(ent.basePoint.y)}\n30\n0.0")
                 sb.appendLine("11\n${fmt(cos(rad))}\n21\n${fmt(sin(rad))}\n31\n0.0")
             }
             is CadEntity.XLineEntity -> {
-                sb.appendLine("0\nXLINE\n8\n${ent.layerName}")
+                sb.appendLine("0\nXLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbXline")
                 val rad = Math.toRadians(ent.angleDeg)
                 sb.appendLine("10\n${u(ent.rootPoint.x)}\n20\n${u(ent.rootPoint.y)}\n30\n0.0")
                 sb.appendLine("11\n${fmt(cos(rad))}\n21\n${fmt(sin(rad))}\n31\n0.0")
             }
             is CadEntity.DonutEntity -> {
-                // Standard AutoCAD DXF representation of DONUT: a closed 2-vertex LWPOLYLINE
-                // consisting of two 180-degree bulge=1.0 semicircles with constant width.
                 val rMid = ((ent.innerRadius + ent.outerRadius) * 0.5).coerceAtLeast(0.05)
                 val ringWidth = (ent.outerRadius - ent.innerRadius).coerceAtLeast(0.0)
                 sb.appendLine(
                     "999\nPRECISIONCAD_DONUT:${ent.layerName}|${u(ent.center.x)}|${u(ent.center.y)}|${u(ent.innerDiameter)}|${u(ent.outerDiameter)}"
                 )
-                sb.appendLine("0\nLWPOLYLINE\n8\n${ent.layerName}")
+                sb.appendLine("0\nLWPOLYLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbPolyline")
                 sb.appendLine("90\n2")
                 sb.appendLine("70\n1")
                 sb.appendLine("43\n${u(ringWidth)}")
@@ -252,8 +305,9 @@ object CadDxfInterchange {
             }
             is CadEntity.HatchEntity -> {
                 if (ent.boundaryPoints.size < 3) return
-                sb.appendLine("0\nHATCH\n8\n${ent.layerName}")
+                sb.appendLine("0\nHATCH\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbHatch")
                 sb.appendLine("2\n${ent.pattern.dxfName}\n70\n${if (ent.pattern == HatchPattern.SOLID) 1 else 0}")
                 sb.appendLine("41\n${fmt(ent.patternScale)}\n52\n${fmt(ent.patternAngleDeg)}")
                 sb.appendLine("93\n${ent.boundaryPoints.size}")
@@ -262,31 +316,33 @@ object CadDxfInterchange {
                 }
             }
             is CadEntity.TextEntity -> {
-                sb.appendLine("0\nMTEXT\n8\n${ent.layerName}")
+                sb.appendLine("0\nMTEXT\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbMText")
                 sb.appendLine("7\nSTANDARD")
                 sb.appendLine("10\n${u(ent.position.x)}\n20\n${u(ent.position.y)}\n30\n0.0")
                 sb.appendLine("40\n${u(ent.height)}\n50\n${fmt(ent.rotationDeg)}")
                 sb.appendLine("1\n${ent.text.replace("\n", "\\P")}")
             }
             is CadEntity.LeaderEntity -> {
-                // Export as standard AC1015 LEADER + MTEXT so AutoCAD Mobile renders both leader and callout text
                 val safeText = ent.text.replace("\n", "\\P")
                 sb.appendLine(
                     "999\nPRECISIONCAD_LEADER:${ent.layerName}|${u(ent.arrowTip.x)}|${u(ent.arrowTip.y)}|" +
                         "${u(ent.shoulderPoint.x)}|${u(ent.shoulderPoint.y)}|" +
                         "${u(ent.landingEnd.x)}|${u(ent.landingEnd.y)}|${u(ent.textHeight)}|$safeText"
                 )
-                sb.appendLine("0\nLEADER\n8\n${ent.layerName}")
+                sb.appendLine("0\nLEADER\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbLeader")
                 sb.appendLine("3\nSTANDARD")
                 sb.appendLine("71\n1\n72\n0\n73\n3\n74\n1\n75\n0\n76\n3")
                 sb.appendLine("10\n${u(ent.arrowTip.x)}\n20\n${u(ent.arrowTip.y)}\n30\n0.0")
                 sb.appendLine("10\n${u(ent.shoulderPoint.x)}\n20\n${u(ent.shoulderPoint.y)}\n30\n0.0")
                 sb.appendLine("10\n${u(ent.landingEnd.x)}\n20\n${u(ent.landingEnd.y)}\n30\n0.0")
                 if (safeText.isNotBlank()) {
-                    sb.appendLine("0\nMTEXT\n8\n${ent.layerName}")
+                    sb.appendLine("0\nMTEXT\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                     appendCommonEntityProps(sb, ent)
+                    sb.appendLine("100\nAcDbMText")
                     sb.appendLine("7\nSTANDARD")
                     sb.appendLine("10\n${u(ent.landingEnd.x)}\n20\n${u(ent.landingEnd.y + ent.textHeight * 0.35)}\n30\n0.0")
                     sb.appendLine("40\n${u(ent.textHeight)}\n50\n0.0")
@@ -294,24 +350,26 @@ object CadDxfInterchange {
                 }
             }
             is CadEntity.CenterMarkEntity -> {
-                // Export as two standard orthogonal centerline LINE entities for universal DXF viewer compatibility
                 val ext = (ent.radius * 1.25).coerceAtLeast(1.0)
                 sb.appendLine(
                     "999\nPRECISIONCAD_CENTERMARK:${ent.layerName}|${u(ent.center.x)}|${u(ent.center.y)}|${u(ent.radius)}"
                 )
-                sb.appendLine("0\nLINE\n8\n${ent.layerName}\n6\nCENTER")
+                sb.appendLine("0\nLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}\n6\nCENTER")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbLine")
                 sb.appendLine("10\n${u(ent.center.x - ext)}\n20\n${u(ent.center.y)}\n30\n0.0")
                 sb.appendLine("11\n${u(ent.center.x + ext)}\n21\n${u(ent.center.y)}\n31\n0.0")
 
-                sb.appendLine("0\nLINE\n8\n${ent.layerName}\n6\nCENTER")
+                sb.appendLine("0\nLINE\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}\n6\nCENTER")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbLine")
                 sb.appendLine("10\n${u(ent.center.x)}\n20\n${u(ent.center.y - ext)}\n30\n0.0")
                 sb.appendLine("11\n${u(ent.center.x)}\n21\n${u(ent.center.y + ext)}\n31\n0.0")
             }
             is CadEntity.BlockInsertEntity -> {
-                sb.appendLine("0\nINSERT\n8\n${ent.layerName}\n2\n${ent.blockName}")
+                sb.appendLine("0\nINSERT\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
+                sb.appendLine("100\nAcDbBlockReference\n2\n${ent.blockName}")
                 sb.appendLine("10\n${u(ent.insertionPoint.x)}\n20\n${u(ent.insertionPoint.y)}\n30\n0.0")
                 sb.appendLine("41\n${fmt(ent.scaleFactor)}\n42\n${fmt(ent.scaleFactor)}\n50\n${fmt(ent.rotationDeg)}")
             }
@@ -325,57 +383,78 @@ object CadDxfInterchange {
                     viewport = ViewportTransform(pixelsPerModelUnit = 3.0f)
                 )
                 sb.appendLine("999\nPRECISIONCAD_DIM_META:${ent.dimensionType.name}|${ent.customPrefix}")
-                sb.appendLine("0\nDIMENSION\n8\n${ent.layerName}")
+                sb.appendLine("0\nDIMENSION\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
-                // Group 3: Dimension style name (mandatory in AutoCAD DXF)
-                sb.appendLine("3\nSTANDARD")
-
-                // Standard DXF group 70 flags:
-                // 0 = Rotated, horizontal, or vertical; 1 = Aligned; 2 = Angular;
-                // 3 = Diameter; 4 = Radius; 6 = Ordinate (+32 block reference bit; +64 X-ordinate bit)
-                val dimTypeFlag = when (ent.dimensionType) {
-                    DimensionType.LINEAR_HORIZONTAL -> 32 // 0 + 32 (angle 50 = 0.0)
-                    DimensionType.LINEAR_VERTICAL -> 32   // 0 + 32 (angle 50 = 90.0)
-                    DimensionType.ALIGNED -> 33           // 1 + 32
-                    DimensionType.ANGULAR -> 34           // 2 + 32
-                    DimensionType.DIAMETER -> 35          // 3 + 32
-                    DimensionType.RADIUS -> 36            // 4 + 32
-                    DimensionType.ORDINATE_X -> 102       // 6 + 32 + 64
-                    DimensionType.ORDINATE_Y -> 38        // 6 + 32
-                }
-                sb.appendLine("70\n$dimTypeFlag")
-
+                sb.appendLine("100\nAcDbDimension")
                 // Group 10/20/30: Dimension line definition point
                 sb.appendLine("10\n${u(ent.dimensionLinePoint.x)}\n20\n${u(ent.dimensionLinePoint.y)}\n30\n0.0")
                 // Group 11/21/31: Middle point of dimension text
                 sb.appendLine("11\n${u(plan.textPositionModel.x)}\n21\n${u(plan.textPositionModel.y)}\n31\n0.0")
 
-                // Extension / Rim definition points
+                // Section 28.3: Clear bit 32 when no anonymous dimension block (*D) is referenced
+                // 0 = Rotated, horizontal, or vertical; 1 = Aligned; 2 = Angular;
+                // 3 = Diameter; 4 = Radius; 6 = Ordinate (+64 X-ordinate bit)
+                val dimTypeFlag = when (ent.dimensionType) {
+                    DimensionType.LINEAR_HORIZONTAL -> 0
+                    DimensionType.LINEAR_VERTICAL -> 0
+                    DimensionType.ALIGNED -> 1
+                    DimensionType.ANGULAR -> 2
+                    DimensionType.DIAMETER -> 3
+                    DimensionType.RADIUS -> 4
+                    DimensionType.ORDINATE_X -> 70 // 6 + 64
+                    DimensionType.ORDINATE_Y -> 6
+                }
+                sb.appendLine("70\n$dimTypeFlag")
+                val label = ent.formattedLabel(payload.precision, payload.storageUnit, payload.displayUnit)
+                sb.appendLine("1\n$label")
+                sb.appendLine("3\nSTANDARD")
+
+                // Type-specific AC1015 dimension subclass marker and definition points
                 when (ent.dimensionType) {
-                    DimensionType.RADIUS, DimensionType.DIAMETER -> {
-                        // Group 15/25/35: Point on circle/arc for diameter & radius dimensions
+                    DimensionType.RADIUS -> {
+                        sb.appendLine("100\nAcDbRadialDimension")
                         sb.appendLine("15\n${u(ent.anchor2.x)}\n25\n${u(ent.anchor2.y)}\n35\n0.0")
-                        // Also include 13/23 and 14/24 for generic DXF readers
+                        sb.appendLine("40\n0.0")
+                        sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
+                        sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
+                    }
+                    DimensionType.DIAMETER -> {
+                        sb.appendLine("100\nAcDbDiametricDimension")
+                        sb.appendLine("15\n${u(ent.anchor2.x)}\n25\n${u(ent.anchor2.y)}\n35\n0.0")
+                        sb.appendLine("40\n0.0")
                         sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
                         sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
                     }
                     DimensionType.LINEAR_VERTICAL -> {
+                        sb.appendLine("100\nAcDbAlignedDimension")
                         sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
                         sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
                         sb.appendLine("50\n90.0000")
+                        sb.appendLine("100\nAcDbRotatedDimension")
                     }
                     DimensionType.LINEAR_HORIZONTAL -> {
+                        sb.appendLine("100\nAcDbAlignedDimension")
                         sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
                         sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
                         sb.appendLine("50\n0.0000")
+                        sb.appendLine("100\nAcDbRotatedDimension")
                     }
-                    else -> {
+                    DimensionType.ANGULAR -> {
+                        sb.appendLine("100\nAcDb3PointAngularDimension")
+                        sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
+                        sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
+                    }
+                    DimensionType.ORDINATE_X, DimensionType.ORDINATE_Y -> {
+                        sb.appendLine("100\nAcDbOrdinateDimension")
+                        sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
+                        sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
+                    }
+                    DimensionType.ALIGNED -> {
+                        sb.appendLine("100\nAcDbAlignedDimension")
                         sb.appendLine("13\n${u(ent.anchor1.x)}\n23\n${u(ent.anchor1.y)}\n33\n0.0")
                         sb.appendLine("14\n${u(ent.anchor2.x)}\n24\n${u(ent.anchor2.y)}\n34\n0.0")
                     }
                 }
-                val label = ent.formattedLabel(payload.precision, payload.storageUnit, payload.displayUnit)
-                sb.appendLine("1\n$label")
             }
         }
     }

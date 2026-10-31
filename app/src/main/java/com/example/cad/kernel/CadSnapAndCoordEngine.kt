@@ -13,8 +13,23 @@ import kotlin.math.roundToLong
 import kotlin.math.sin
 
 /**
- * Screen-space rectangle representing the unobstructed usable CAD viewport area
+ * Stable screen-space dimensions of the underlying CAD viewport surface.
+ * Used for model-to-screen mapping and culling; never changes when floating overlays open or close.
+ */
+data class ViewportSurfaceRect(
+    val widthPx: Float = 800f,
+    val heightPx: Float = 600f
+) {
+    val safeWidthPx: Float get() = widthPx.coerceAtLeast(1f)
+    val safeHeightPx: Float get() = heightPx.coerceAtLeast(1f)
+    val centerX: Float get() = safeWidthPx * 0.5f
+    val centerY: Float get() = safeHeightPx * 0.5f
+}
+
+/**
+ * Screen-space rectangle representing the unobstructed interaction-safe CAD viewport area
  * (excluding top header bar, floating HUD badges, expanded tool drawers, and controller dock).
+ * Used for automatic cursor-boundary tracking and explicit Fit Drawing commands.
  */
 data class UsableViewportRect(
     val leftPx: Float = 0f,
@@ -67,6 +82,15 @@ data class ViewportTransform(
         return Point2D(
             x = ((screenOffset.x - panScreenX) / safeScale).toDouble(),
             y = ((panScreenY - screenOffset.y) / safeScale).toDouble()
+        )
+    }
+
+    fun panByScreenDelta(dxPx: Float, dyPx: Float): ViewportTransform {
+        if (!dxPx.isFinite() || !dyPx.isFinite()) return this
+        if (dxPx == 0f && dyPx == 0f) return this
+        return copy(
+            panScreenX = panScreenX + dxPx,
+            panScreenY = panScreenY + dyPx
         )
     }
 

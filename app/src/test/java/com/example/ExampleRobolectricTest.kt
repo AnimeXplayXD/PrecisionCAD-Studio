@@ -3,9 +3,13 @@ package com.example
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.test.core.app.ApplicationProvider
 import com.example.cad.data.CadTemplateFactory
 import com.example.cad.dimension.AutoDimensionEngine
@@ -27,7 +31,7 @@ class ExampleRobolectricTest {
     val composeTestRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun `verify redesigned workspace, contextual command line, retractable drawer, controller dock, fit drawing, and PDF export`() {
+    fun `verify v10 overlay-invariant workspace, persistent command input, no-handle tool browser with multi-accordions, mode-specific controller, Clear All Dimensions, and PDF export`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         assertEquals("PrecisionCAD", context.getString(R.string.app_name))
 
@@ -36,23 +40,52 @@ class ExampleRobolectricTest {
         // 1. Verify 2D Technical Viewport, Virtual Cursor Controller Deck, and live X/Y readouts are displayed
         composeTestRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
         composeTestRule.onNodeWithTag("virtual_cursor_controller_deck").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cursor_pick_point_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("cursor_coord_x_text").assertIsDisplayed()
         composeTestRule.onNodeWithTag("cursor_coord_y_text").assertIsDisplayed()
 
-        // 2. Verify Retractable Tool Drawer is collapsed by default and expands on tap
-        composeTestRule.onNodeWithTag("tool_drawer_handle").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("tool_drawer_handle").performClick()
+        // 2. Verify Persistent Command Entry Bar is continuously visible even in idle state (no CMD click required)
+        composeTestRule.onNodeWithTag("persistent_command_entry_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("command_line_input_field").assertIsDisplayed()
+
+        // 3. Verify Tool Browser has NO arrow/chevron handle in closed or open state, and supports multi-open accordions
+        assertTrue(composeTestRule.onAllNodesWithTag("tool_drawer_handle").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("bottom_tools_toggle_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("tool_drawer_panel").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("tool_drawer_handle").performClick()
+        assertTrue(composeTestRule.onAllNodesWithTag("tool_drawer_handle").fetchSemanticsNodes().isEmpty())
+        // Verify 5 vertical category side tiles exist
+        composeTestRule.onNodeWithTag("category_tile_DRAW").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("category_tile_MODIFY").assertIsDisplayed()
+        // Verify DRAW has LINE and POLYGON visible by default
+        composeTestRule.onNodeWithTag("cmd_button_LINE").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cmd_button_POLYGON").assertIsDisplayed()
+        // Expand MODIFY accordion and verify BOTH DRAW and MODIFY remain open simultaneously in semantics tree
+        composeTestRule.onNodeWithTag("category_tab_MODIFY").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(composeTestRule.onAllNodesWithTag("cmd_button_LINE").fetchSemanticsNodes().isNotEmpty())
+        assertTrue(composeTestRule.onAllNodesWithTag("cmd_button_POLYGON").fetchSemanticsNodes().isNotEmpty())
+        composeTestRule.onNodeWithTag("cmd_button_FILLET").performScrollTo().assertIsDisplayed()
+        // Close tool browser via leftward swipe on the open drawer
+        composeTestRule.onNodeWithTag("tool_drawer_panel").performTouchInput { swipeLeft() }
         composeTestRule.waitForIdle()
 
-        // 3. Verify Contextual Command Line & Prefix Autocomplete ("L" -> LINE ranked first)
-        composeTestRule.onNodeWithTag("cmd_activate_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cmd_activate_button").performClick()
+        // 4. Verify Controller Mode-Specific Layouts:
+        // Initial mode is VELOCITY_JOYSTICK (shows full joystick + PICK PT + step nudge layout)
+        composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cursor_pick_point_button").assertIsDisplayed()
+        // Switch to RELATIVE_TOUCHPAD (shows only touchpad surface; hides controller PICK PT & step nudge, exposes Function Bar PICK PT)
+        composeTestRule.onNodeWithTag("controller_mode_touchpad").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("command_line_input_field").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("controller_touchpad_surface").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("cursor_pick_point_button").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("function_bar_pick_point_button").assertIsDisplayed()
+        // Switch back to VELOCITY_JOYSTICK and verify full joystick + PICK PT layout
+        composeTestRule.onNodeWithTag("controller_mode_joystick").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cursor_pick_point_button").assertIsDisplayed()
+
+        // 5. Verify Prefix Autocomplete ("L" -> LINE ranked first) and Overview card
         composeTestRule.onNodeWithTag("command_line_input_field").performTextInput("L")
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_suggestion_strip").assertIsDisplayed()
@@ -60,28 +93,26 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("suggestion_chip_LINE").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("active_command_prompt_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("overview_overlay_card").assertIsDisplayed()
         composeTestRule.onNodeWithTag("active_cmd_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 4. Verify Collapsible Virtual Cursor Controller Dock keeps mode selectors and X/Y visible when collapsed
-        composeTestRule.onNodeWithTag("controller_collapse_button").performClick()
+        // 6. Verify QDIM generation + Clear All Dimensions confirmation flow + Undo restoration
+        composeTestRule.onNodeWithTag("top_qdim_button").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("controller_mode_touchpad").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("controller_mode_joystick").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cursor_coord_x_text").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cursor_coord_y_text").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("controller_collapse_button").performClick()
+        composeTestRule.onNodeWithTag("execute_qdim_confirm_button").performClick()
         composeTestRule.waitForIdle()
-
-        // 5. Verify Fit Drawing button triggers transient notification banner
-        composeTestRule.onNodeWithTag("top_zoom_extents_button").performClick()
+        // Re-open QDIM dialog and trigger Clear All Dimensions
+        composeTestRule.onNodeWithTag("top_qdim_button").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("transient_notification_banner").assertIsDisplayed()
-
-        // 6. Verify + Action Launcher opens and displays
-        composeTestRule.onNodeWithTag("top_action_launcher_button").performClick()
+        composeTestRule.onNodeWithTag("clear_all_dimensions_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("action_launcher_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("clear_all_dimensions_confirm_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("clear_all_dimensions_confirm_button").performClick()
+        composeTestRule.waitForIdle()
+        // Undo restores the cleared dimensions in one step
+        composeTestRule.onNodeWithTag("top_undo_button").performClick()
+        composeTestRule.waitForIdle()
 
         // 7. Verify Plotted PDF Export with QDIM dimensions and polyline bulge arcs produces a valid PDF file
         val basePayload = CadTemplateFactory.createSixHoleMountingPlate()

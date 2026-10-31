@@ -7,15 +7,15 @@ import androidx.compose.ui.graphics.Color
 
 private val CadDarkColorScheme = darkColorScheme(
     primary = CadCyanPrimary,
-    onPrimary = Color(0xFF00262C),
-    primaryContainer = Color(0xFF004550),
-    onPrimaryContainer = Color(0xFFB8F6FF),
+    onPrimary = Color(0xFF050608),
+    primaryContainer = Color(0xFF151D26),
+    onPrimaryContainer = CadTextPrimary,
     secondary = CadAmberSnap,
-    onSecondary = Color(0xFF2B1C00),
-    secondaryContainer = Color(0xFF4C3300),
-    onSecondaryContainer = Color(0xFFFFDEA1),
+    onSecondary = Color(0xFF050608),
+    secondaryContainer = Color(0xFF211C13),
+    onSecondaryContainer = CadTextPrimary,
     tertiary = CadEmeraldCrossing,
-    onTertiary = Color(0xFF002C1E),
+    onTertiary = Color(0xFF050608),
     background = CadModelSpaceBg,
     onBackground = CadTextPrimary,
     surface = CadPanelSurface,
@@ -23,6 +23,7 @@ private val CadDarkColorScheme = darkColorScheme(
     surfaceVariant = CadPanelElevated,
     onSurfaceVariant = CadTextSecondary,
     outline = CadBorderHairline,
+    outlineVariant = CadBorderStrong,
     error = CadCrimsonAlert
 )
 

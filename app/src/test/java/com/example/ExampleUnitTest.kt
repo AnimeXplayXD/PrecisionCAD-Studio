@@ -290,10 +290,15 @@ class ExampleUnitTest {
             )
         )
         val dxfText = CadDxfInterchange.exportToDxf(payload)
-        // Verify AC1015 required tables and standard entity records exist
+        // Verify AC1015 required tables, unique hex handles (code 5), subclass markers (code 100), and dash patterns
         assertTrue(dxfText.contains("0\nTABLE\n2\nSTYLE"))
         assertTrue(dxfText.contains("0\nTABLE\n2\nDIMSTYLE"))
         assertTrue(dxfText.contains("3\nSTANDARD"))
+        assertTrue(dxfText.contains("100\nAcDbEntity"))
+        assertTrue(dxfText.contains("100\nAcDbDimension"))
+        assertTrue(dxfText.contains("100\nAcDbAlignedDimension"))
+        assertTrue(dxfText.contains("100\nAcDbDiametricDimension"))
+        assertTrue(dxfText.contains("\n73\n2\n40\n6.0\n49\n4.0\n74\n0\n49\n-2.0\n74\n0"))
         assertFalse(dxfText.contains("NaN"))
         assertFalse(dxfText.contains("Infinity"))
         // Non-standard entity records must be replaced with standard LWPOLYLINE, LINE, and LEADER+MTEXT
@@ -326,10 +331,19 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `TC-DIM-06 verify initial 6-hole mounting plate has zero pre-baked callouts and collision-free QDIM leaders`() {
+    fun `TC-DIM-06 verify initial 136x96mm 6-hole mounting plate geometry and collision-free QDIM leaders`() {
         val template = com.example.cad.data.CadTemplateFactory.createSixHoleMountingPlate()
         assertTrue(template.entities.none { it is CadEntity.DimensionEntity })
         assertTrue(template.entities.none { it is CadEntity.LeaderEntity })
+
+        val outerPlate = template.entities.filterIsInstance<CadEntity.PolylineEntity>().single()
+        val plateBounds = outerPlate.boundingBox()
+        assertEquals(32.0, plateBounds.minX, 1e-3)
+        assertEquals(168.0, plateBounds.maxX, 1e-3)
+        assertEquals(102.0, plateBounds.minY, 1e-3)
+        assertEquals(198.0, plateBounds.maxY, 1e-3)
+        assertEquals(136.0, plateBounds.width, 1e-3)
+        assertEquals(96.0, plateBounds.height, 1e-3)
 
         val qdimEntities = AutoDimensionEngine.generateQuickDimensions(
             allEntities = template.entities,
@@ -337,6 +351,11 @@ class ExampleUnitTest {
             density = QDimDensityPolicy.BALANCED
         )
         val circles = template.entities.filterIsInstance<CadEntity.CircleEntity>()
+        assertEquals(7, circles.size)
+        val centerBore = circles.first { abs(it.radius - 14.0) < 1e-3 }
+        assertEquals(100.0, centerBore.center.x, 1e-3)
+        assertEquals(150.0, centerBore.center.y, 1e-3)
+
         val diaAndRadDims = qdimEntities.filterIsInstance<CadEntity.DimensionEntity>()
             .filter { it.dimensionType == DimensionType.DIAMETER || it.dimensionType == DimensionType.RADIUS }
 
@@ -501,43 +520,141 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `TC-NAV-14 verify Navigation-Only Sheet Gesture State Machine and Focal-Point Pinch-Pan Invariant`() {
-        // 1. 0 -> 1 pointer is suppressed (no drawing, no point pick, no pan)
+    fun `TC-NAV-14 verify v10 Sheet Gesture State Machine (1-Finger Pan, 2-Finger Pinch Zoom-Only, Left-Edge Drawer Reveal)`() {
+        // 1. 0 -> 1 pointer outside left-edge zone enters ONE_POINTER_PAN
         assertEquals(
-            ViewportGestureState.ONE_POINTER_SUPPRESSED,
-            ViewportGesturePolicy.transitionState(ViewportGestureState.IDLE, activePointerCount = 1)
+            ViewportGestureState.ONE_POINTER_PAN,
+            ViewportGesturePolicy.transitionState(
+                ViewportGestureState.IDLE,
+                activePointerCount = 1,
+                startedInLeftEdgeZone = false
+            )
         )
-        // 2. 1 -> 2 pointers enters TWO_POINTER_TRANSFORM
+        // 2. 0 -> 1 pointer inside left-edge zone enters LEFT_EDGE_DRAWER_REVEAL
         assertEquals(
-            ViewportGestureState.TWO_POINTER_TRANSFORM,
-            ViewportGesturePolicy.transitionState(ViewportGestureState.ONE_POINTER_SUPPRESSED, activePointerCount = 2)
+            ViewportGestureState.LEFT_EDGE_DRAWER_REVEAL,
+            ViewportGesturePolicy.transitionState(
+                ViewportGestureState.IDLE,
+                activePointerCount = 1,
+                startedInLeftEdgeZone = true
+            )
         )
-        // 3. 2 -> 1 pointer returns to ONE_POINTER_SUPPRESSED without jumping
+        // 3. 1 -> 2 pointers enters TWO_POINTER_PINCH_ZOOM
         assertEquals(
-            ViewportGestureState.ONE_POINTER_SUPPRESSED,
-            ViewportGesturePolicy.transitionState(ViewportGestureState.TWO_POINTER_TRANSFORM, activePointerCount = 1)
+            ViewportGestureState.TWO_POINTER_PINCH_ZOOM,
+            ViewportGesturePolicy.transitionState(
+                ViewportGestureState.ONE_POINTER_PAN,
+                activePointerCount = 2
+            )
         )
-        // 4. >= 3 pointers cancels until all pointers lift
-        val cancelled = ViewportGesturePolicy.transitionState(ViewportGestureState.TWO_POINTER_TRANSFORM, activePointerCount = 3)
+        // 4. 2 -> 1 pointer enters POST_PINCH_POINTER_SUPPRESSED so trailing finger does not pan
+        assertEquals(
+            ViewportGestureState.POST_PINCH_POINTER_SUPPRESSED,
+            ViewportGesturePolicy.transitionState(
+                ViewportGestureState.TWO_POINTER_PINCH_ZOOM,
+                activePointerCount = 1
+            )
+        )
+        // 5. >= 3 pointers cancels until all pointers lift
+        val cancelled = ViewportGesturePolicy.transitionState(ViewportGestureState.TWO_POINTER_PINCH_ZOOM, activePointerCount = 3)
         assertEquals(ViewportGestureState.CANCELLED, cancelled)
         assertEquals(ViewportGestureState.CANCELLED, ViewportGesturePolicy.transitionState(cancelled, activePointerCount = 2))
         assertEquals(ViewportGestureState.IDLE, ViewportGesturePolicy.transitionState(cancelled, activePointerCount = 0))
 
-        // 5. Verify focal-point zoom + pan invariant: model point under previousCentroid lands at currentCentroid
+        // 6. One-finger pan translates panScreenX / panScreenY without changing zoom scale
         val vp0 = ViewportTransform(panScreenX = 240f, panScreenY = 360f, pixelsPerModelUnit = 4.0f)
-        val prevCentroid = Offset(400f, 300f)
-        val panDelta = Offset(30f, -20f)
-        val currCentroid = prevCentroid + panDelta
-        val modelAtPrevCentroid = vp0.screenToModel(prevCentroid)
-        val vp1 = ViewportGesturePolicy.applyTwoFingerTransform(
+        val panned = ViewportGesturePolicy.applyOneFingerPan(vp0, Offset(35f, -20f))
+        assertEquals(275f, panned.panScreenX, 1e-4f)
+        assertEquals(340f, panned.panScreenY, 1e-4f)
+        assertEquals(vp0.pixelsPerModelUnit, panned.pixelsPerModelUnit, 1e-5f)
+
+        // 7. Two-finger pinch zoom-only keeps locked focal anchor stationary on screen
+        val anchorScreen = Offset(400f, 300f)
+        val modelAtAnchor = vp0.screenToModel(anchorScreen)
+        val zoomed = ViewportGesturePolicy.applyTwoFingerPinchZoomOnly(
             viewport = vp0,
-            centroidScreen = prevCentroid,
-            panDeltaScreen = panDelta,
+            focalAnchorScreen = anchorScreen,
             zoomFactor = 2.5f
         )
-        val screenAfterTransform = vp1.modelToScreen(modelAtPrevCentroid)
-        assertEquals(currCentroid.x, screenAfterTransform.x, 1e-2f)
-        assertEquals(currCentroid.y, screenAfterTransform.y, 1e-2f)
+        val screenAfterZoom = zoomed.modelToScreen(modelAtAnchor)
+        assertEquals(anchorScreen.x, screenAfterZoom.x, 1e-2f)
+        assertEquals(anchorScreen.y, screenAfterZoom.y, 1e-2f)
+    }
+
+    @Test
+    fun `TC-TPAD-24 verify v10 TouchpadMotionEngine tap-hold zero displacement and velocity curve`() {
+        val engine = com.example.ui.components.TouchpadMotionEngine(touchSlopPx = 10f)
+        engine.onDown(Offset(100f, 100f))
+        assertEquals(com.example.ui.components.TouchpadGestureState.PRESSED_UNDECIDED, engine.state)
+
+        // Sub-slop micro-jitter produces exact 0.0 movement
+        val jitterDelta = engine.onMoveSample(Offset(104f, 103f), activePointerCount = 1, velocityPxPerSec = 50f)
+        assertEquals(0f, jitterDelta.x, 1e-5f)
+        assertEquals(0f, jitterDelta.y, 1e-5f)
+
+        // Crossing touchSlop transitions to DRAG_ACTIVE and discards threshold-crossing jump
+        val activationDelta = engine.onMoveSample(Offset(115f, 100f), activePointerCount = 1, velocityPxPerSec = 200f)
+        assertEquals(com.example.ui.components.TouchpadGestureState.DRAG_ACTIVE, engine.state)
+        assertEquals(0f, activationDelta.x, 1e-5f)
+        assertEquals(0f, activationDelta.y, 1e-5f)
+
+        // Subsequent drag sample emits velocity-scaled delta
+        val activeDelta = engine.onMoveSample(Offset(125f, 100f), activePointerCount = 1, velocityPxPerSec = 400f)
+        assertTrue(activeDelta.x > 10f)
+
+        // Multi-pointer touch cancels touchpad motion and freezes cursor
+        val multiDelta = engine.onMoveSample(Offset(140f, 100f), activePointerCount = 2, velocityPxPerSec = 500f)
+        assertEquals(com.example.ui.components.TouchpadGestureState.MULTI_POINTER_CANCELLED, engine.state)
+        assertEquals(0f, multiDelta.x, 1e-5f)
+
+        // Velocity gain curve is bounded and monotonically increasing
+        val gLow = com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(0f)
+        val gHigh = com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(1200f)
+        assertEquals(0.72f, gLow, 1e-3f)
+        assertTrue(gHigh > gLow)
+        assertTrue(gHigh <= com.example.ui.components.TouchpadMotionEngine.MAX_FAST_GAIN)
+    }
+
+    @Test
+    fun `TC-QDIM-31 verify v10 QDIM Local Profile Feature Classification on Concave U-Notch and Coherent Collision Relocation`() {
+        // Concave U-notch polygon from Section 31.1:
+        // (40,60)->(196,60)->(196,198)->(158,198)->(158,102)->(82,102)->(82,198)->(40,198)->close
+        val uNotch = CadEntity.PolylineEntity(
+            id = "u_notch_poly",
+            vertices = listOf(
+                PolylineVertex(Point2D(40.0, 60.0)),
+                PolylineVertex(Point2D(196.0, 60.0)),
+                PolylineVertex(Point2D(196.0, 198.0)),
+                PolylineVertex(Point2D(158.0, 198.0)),
+                PolylineVertex(Point2D(158.0, 102.0)),
+                PolylineVertex(Point2D(82.0, 102.0)),
+                PolylineVertex(Point2D(82.0, 198.0)),
+                PolylineVertex(Point2D(40.0, 198.0))
+            ),
+            isClosed = true
+        )
+        val (qdimEntities, report) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+            allEntities = listOf(uNotch),
+            targetEntities = listOf(uNotch),
+            density = QDimDensityPolicy.BALANCED
+        )
+        val dims = qdimEntities.filterIsInstance<CadEntity.DimensionEntity>()
+        val horizValues = dims.filter { it.dimensionType == DimensionType.LINEAR_HORIZONTAL }
+            .map { it.measuredModelValue() }
+        val vertValues = dims.filter { it.dimensionType == DimensionType.LINEAR_VERTICAL }
+            .map { it.measuredModelValue() }
+
+        // Overall 156 x 138
+        assertTrue(horizValues.any { abs(it - 156.0) < 1e-3 })
+        assertTrue(vertValues.any { abs(it - 138.0) < 1e-3 })
+        // Local horizontal shoulders (42, 38) and inner recess shelf (76)
+        assertTrue(horizValues.any { abs(it - 42.0) < 1e-3 })
+        assertTrue(horizValues.any { abs(it - 76.0) < 1e-3 })
+        assertTrue(horizValues.any { abs(it - 38.0) < 1e-3 })
+        // Local vertical notch depth (96)
+        assertTrue(vertValues.any { abs(it - 96.0) < 1e-3 })
+        assertTrue(report.edgeDiagnostics.isNotEmpty())
+        assertTrue(report.generationCompletenessScore >= 90f)
     }
 
     @Test

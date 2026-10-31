@@ -484,24 +484,276 @@ object AutoDimensionEngine {
             }
         }
 
-        if (density == QDimDensityPolicy.DETAILED) {
-            // --- TIER 3: Detailed subordinate segments, inclined lines & chamfers ---
-            for ((srcId, line) in allLines) {
-                val ang = ((line.angleDeg % 180.0) + 180.0) % 180.0
-                val isHorizontal = abs(ang) < 1e-2 || abs(ang - 180.0) < 1e-2
-                val isVertical = abs(ang - 90.0) < 1e-2
-                if (!isHorizontal && !isVertical && line.length > 4.0) {
-                    val normalRad = Math.toRadians(line.angleDeg + 90.0)
-                    val mid = line.midpoint
-                    candidateDims.add(
-                        CadEntity.DimensionEntity(
-                            dimensionType = DimensionType.ALIGNED,
-                            anchor1 = line.start,
-                            anchor2 = line.end,
-                            dimensionLinePoint = Point2D(mid.x + 9.0 * cos(normalRad), mid.y + 9.0 * sin(normalRad)),
+        // --- TIER 3: Local Profile Feature Classification (Section 31) ---
+        // Classifies every straight segment from standalone lines and polyline decomposition into:
+        // - HORIZONTAL local features (e.g., stepped shoulders, recessed shelves, unequal top/bottom spans)
+        // - VERTICAL local features (e.g., internal notch walls, stepped shoulders, asymmetric outer walls)
+        // - INCLINED local features (chamfers, angled edges)
+        val edgeDiagnostics = mutableListOf<EdgeDimensionDiagnostic>()
+        val arcEndpoints = detectedArcs.flatMap { feat ->
+            val a = feat.arc
+            val pStart = a.center.polarOffset(a.radius, a.startAngleDeg)
+            val pEnd = a.center.polarOffset(a.radius, a.startAngleDeg + a.sweepAngleDeg)
+            listOf(pStart to a.radius, pEnd to a.radius)
+        }
+
+        fun findAdjacentFilletRadius(pt: Point2D): Double {
+            return arcEndpoints.firstOrNull { (arcPt, _) -> arcPt.distanceTo(pt) <= 0.15 }?.second ?: 0.0
+        }
+
+        for ((srcId, line) in allLines) {
+            val len = line.length
+            if (len <= 1.0) continue
+            val ang = ((line.angleDeg % 180.0) + 180.0) % 180.0
+            val isHorizontal = abs(ang) < 1e-2 || abs(ang - 180.0) < 1e-2
+            val isVertical = abs(ang - 90.0) < 1e-2
+            val orientation = when {
+                isHorizontal -> "HORIZONTAL"
+                isVertical -> "VERTICAL"
+                else -> "INCLINED"
+            }
+
+            if (isHorizontal) {
+                val minX = min(line.start.x, line.end.x)
+                val maxX = max(line.start.x, line.end.x)
+                val segY = (line.start.y + line.end.y) * 0.5
+                val rStart = findAdjacentFilletRadius(line.start)
+                val rEnd = findAdjacentFilletRadius(line.end)
+                val isFullWidth = abs(len - overallBounds.width) <= 0.05
+                val isFilletTrimmedOuterWidth = (abs(segY - overallBounds.minY) <= 0.05 || abs(segY - overallBounds.maxY) <= 0.05) &&
+                    (rStart > 0.0 || rEnd > 0.0) &&
+                    abs((len + rStart + rEnd) - overallBounds.width) <= 0.15
+
+                val coveredByManual = hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_HORIZONTAL, len)
+                val alreadyInCandidates = candidateDims.any {
+                    it.dimensionType == DimensionType.LINEAR_HORIZONTAL &&
+                        abs(min(it.anchor1.x, it.anchor2.x) - minX) <= 0.05 &&
+                        abs(max(it.anchor1.x, it.anchor2.x) - maxX) <= 0.05 &&
+                        abs(((it.anchor1.y + it.anchor2.y) * 0.5) - segY) <= 0.5
+                }
+
+                when {
+                    coveredByManual -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.COVERED_BY_MANUAL_DIMENSION,
+                                reason = "Horizontal span ${"%.2f".format(len)} already covered by manual dimension."
+                            )
+                        )
+                    }
+                    isFullWidth -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.COVERED_BY_PRIMARY_OVERALL,
+                                reason = "Horizontal span equals primary overall width ${"%.2f".format(overallBounds.width)}."
+                            )
+                        )
+                    }
+                    isFilletTrimmedOuterWidth && density != QDimDensityPolicy.DETAILED -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.DERIVABLE_FROM_OVERALL_AND_FILLETS,
+                                reason = "Outer tangent straight segment derivable from overall width and corner fillets."
+                            )
+                        )
+                    }
+                    density == QDimDensityPolicy.SPARSE -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.SUPPRESSED_BY_SPARSE_POLICY,
+                                reason = "Local horizontal feature suppressed under Sparse density policy."
+                            )
+                        )
+                    }
+                    !alreadyInCandidates && len > 2.0 -> {
+                        val trackY = if (segY >= overallBounds.maxY - 1.0) {
+                            overallBounds.maxY + innerTrackOffset
+                        } else {
+                            overallBounds.minY - innerTrackOffset
+                        }
+                        val localDim = CadEntity.DimensionEntity(
+                            dimensionType = DimensionType.LINEAR_HORIZONTAL,
+                            anchor1 = Point2D(minX, segY),
+                            anchor2 = Point2D(maxX, segY),
+                            dimensionLinePoint = Point2D((minX + maxX) * 0.5, trackY),
                             sourceEntityIds = listOf(srcId),
                             isAutoGenerated = true,
                             hierarchyTier = DimensionHierarchyTier.TERTIARY_LOCAL
+                        )
+                        candidateDims.add(localDim)
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.EMITTED_EXPLICIT,
+                                emittedDimensionId = localDim.id,
+                                reason = "Local horizontal feature (${"%.2f".format(len)}) explicitly dimensioned."
+                            )
+                        )
+                    }
+                }
+            } else if (isVertical) {
+                val minY = min(line.start.y, line.end.y)
+                val maxY = max(line.start.y, line.end.y)
+                val segX = (line.start.x + line.end.x) * 0.5
+                val rStart = findAdjacentFilletRadius(line.start)
+                val rEnd = findAdjacentFilletRadius(line.end)
+                val isFullHeight = abs(len - overallBounds.height) <= 0.05
+                val isFilletTrimmedOuterHeight = (abs(segX - overallBounds.minX) <= 0.05 || abs(segX - overallBounds.maxX) <= 0.05) &&
+                    (rStart > 0.0 || rEnd > 0.0) &&
+                    abs((len + rStart + rEnd) - overallBounds.height) <= 0.15
+
+                val coveredByManual = hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_VERTICAL, len)
+                val alreadyInCandidates = candidateDims.any {
+                    it.dimensionType == DimensionType.LINEAR_VERTICAL &&
+                        abs(min(it.anchor1.y, it.anchor2.y) - minY) <= 0.05 &&
+                        abs(max(it.anchor1.y, it.anchor2.y) - maxY) <= 0.05 &&
+                        abs(((it.anchor1.x + it.anchor2.x) * 0.5) - segX) <= 0.5
+                }
+
+                when {
+                    coveredByManual -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.COVERED_BY_MANUAL_DIMENSION,
+                                reason = "Vertical span ${"%.2f".format(len)} already covered by manual dimension."
+                            )
+                        )
+                    }
+                    isFullHeight -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.COVERED_BY_PRIMARY_OVERALL,
+                                reason = "Vertical span equals primary overall height ${"%.2f".format(overallBounds.height)}."
+                            )
+                        )
+                    }
+                    isFilletTrimmedOuterHeight && density != QDimDensityPolicy.DETAILED -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.DERIVABLE_FROM_OVERALL_AND_FILLETS,
+                                reason = "Outer tangent straight segment derivable from overall height and corner fillets."
+                            )
+                        )
+                    }
+                    density == QDimDensityPolicy.SPARSE -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.SUPPRESSED_BY_SPARSE_POLICY,
+                                reason = "Local vertical feature suppressed under Sparse density policy."
+                            )
+                        )
+                    }
+                    !alreadyInCandidates && len > 2.0 -> {
+                        val trackX = if (segX <= overallBounds.center.x) {
+                            overallBounds.minX - innerTrackOffset
+                        } else {
+                            overallBounds.maxX + innerTrackOffset
+                        }
+                        val localDim = CadEntity.DimensionEntity(
+                            dimensionType = DimensionType.LINEAR_VERTICAL,
+                            anchor1 = Point2D(segX, minY),
+                            anchor2 = Point2D(segX, maxY),
+                            dimensionLinePoint = Point2D(trackX, (minY + maxY) * 0.5),
+                            sourceEntityIds = listOf(srcId),
+                            isAutoGenerated = true,
+                            hierarchyTier = DimensionHierarchyTier.TERTIARY_LOCAL
+                        )
+                        candidateDims.add(localDim)
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.EMITTED_EXPLICIT,
+                                emittedDimensionId = localDim.id,
+                                reason = "Local vertical feature (${"%.2f".format(len)}) explicitly dimensioned."
+                            )
+                        )
+                    }
+                }
+            } else {
+                // Inclined / chamfered edge
+                if (density == QDimDensityPolicy.SPARSE) {
+                    edgeDiagnostics.add(
+                        EdgeDimensionDiagnostic(
+                            sourceEntityId = srcId,
+                            start = line.start,
+                            end = line.end,
+                            length = len,
+                            orientation = orientation,
+                            status = EdgeDimensionStatus.SUPPRESSED_BY_SPARSE_POLICY,
+                            reason = "Inclined edge suppressed under Sparse density policy."
+                        )
+                    )
+                } else if (len > 3.0) {
+                    val normalRad = Math.toRadians(line.angleDeg + 90.0)
+                    val mid = line.midpoint
+                    val alignedDim = CadEntity.DimensionEntity(
+                        dimensionType = DimensionType.ALIGNED,
+                        anchor1 = line.start,
+                        anchor2 = line.end,
+                        dimensionLinePoint = Point2D(mid.x + 9.0 * cos(normalRad), mid.y + 9.0 * sin(normalRad)),
+                        sourceEntityIds = listOf(srcId),
+                        isAutoGenerated = true,
+                        hierarchyTier = DimensionHierarchyTier.TERTIARY_LOCAL
+                    )
+                    candidateDims.add(alignedDim)
+                    edgeDiagnostics.add(
+                        EdgeDimensionDiagnostic(
+                            sourceEntityId = srcId,
+                            start = line.start,
+                            end = line.end,
+                            length = len,
+                            orientation = orientation,
+                            status = EdgeDimensionStatus.EMITTED_EXPLICIT,
+                            emittedDimensionId = alignedDim.id,
+                            reason = "Inclined edge (${"%.2f".format(len)}) dimensioned as ALIGNED."
                         )
                     )
                 }
@@ -516,6 +768,7 @@ object AutoDimensionEngine {
             obstacleArcs = detectedArcs.map { it.arc },
             obstacleLines = allLines.map { it.second },
             completenessFindings = completenessFindings,
+            edgeDiagnostics = edgeDiagnostics,
             arrangementPreference = arrangementPreference,
             densityPolicy = density,
             style = style,

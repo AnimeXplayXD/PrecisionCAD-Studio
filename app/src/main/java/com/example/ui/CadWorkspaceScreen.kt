@@ -1,16 +1,24 @@
 package com.example.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,8 +46,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
@@ -70,6 +76,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -79,6 +86,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -98,17 +106,19 @@ import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.io.CadDxfInterchange
 import com.example.cad.kernel.FitDrawingPolicy
 import com.example.cad.kernel.UsableViewportRect
-import com.example.ui.components.ControllerDockState
 import com.example.cad.model.CadCommandCategory
 import com.example.cad.model.CadCommandCompatibilityCatalog
 import com.example.cad.model.CadCommandId
+import com.example.cad.model.CadEntity
 import com.example.cad.model.HatchPattern
 import com.example.cad.model.Point2D
 import com.example.cad.model.UnitChangeMode
+import com.example.cad.model.VirtualControllerMode
 import com.example.cad.model.WorkspaceSpace
 import com.example.ui.components.CadViewportCanvas
 import com.example.ui.components.CommandCompatibilityMatrixDialog
 import com.example.ui.components.ControllerAndSnapSettingsDialog
+import com.example.ui.components.ControllerDockState
 import com.example.ui.components.DirectCoordinateInputDialog
 import com.example.ui.components.DxfAndProjectHubDialog
 import com.example.ui.components.LayerAndBlockManagerDialog
@@ -119,6 +129,7 @@ import com.example.ui.components.UnitsAndPrecisionDialog
 import com.example.ui.components.VirtualCursorControllerDeck
 import com.example.ui.theme.CadAmberSnap
 import com.example.ui.theme.CadBorderHairline
+import com.example.ui.theme.CadBorderStrong
 import com.example.ui.theme.CadCyanPrimary
 import com.example.ui.theme.CadEmeraldCrossing
 import com.example.ui.theme.CadHudSurface
@@ -132,11 +143,11 @@ import com.example.ui.theme.CadTextPrimary
 import com.example.ui.theme.CadTextSecondary
 import kotlin.math.abs
 
-// Solid 100% opaque active surface tints (Section 3 — No alpha bleed-through)
-private val OpaqueCyanBadgeBg = Color(0xFF0E2A38)
-private val OpaqueAmberBadgeBg = Color(0xFF2D220E)
-private val OpaqueEmeraldBadgeBg = Color(0xFF0C2920)
-private val OpaqueRedBadgeBg = Color(0xFF331418)
+// Solid 100% opaque active surface tints (Section 3 & Section 33 — Pure-black neutral palette)
+private val OpaqueCyanBadgeBg = Color(0xFF101923)
+private val OpaqueAmberBadgeBg = Color(0xFF1F1A11)
+private val OpaqueEmeraldBadgeBg = Color(0xFF0F1E18)
+private val OpaqueRedBadgeBg = Color(0xFF241214)
 
 @Composable
 fun CadWorkspaceScreen(
@@ -191,87 +202,104 @@ fun CadWorkspaceScreen(
     ) {
         val isLandscape = maxWidth >= 660.dp
 
+        if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
+            BackHandler {
+                viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
+            }
+        }
+
         if (!isLandscape) {
-            // --- PORTRAIT ADAPTIVE FULL-SCREEN WORKSPACE ---
-            Column(modifier = Modifier.fillMaxSize()) {
-                // 1. Top Compact Engineering Header Bar
-                TopEngineeringHeaderBar(
-                    projectName = uiState.currentProjectName,
-                    displayUnitSymbol = uiState.displayUnit.symbol,
-                    unitChangeMode = uiState.unitChangeMode,
-                    isQuickDimensionEnabled = uiState.isQuickDimensionEnabled,
-                    workspaceSpace = uiState.workspaceSpace,
-                    fitDrawingPolicy = uiState.fitDrawingPolicy,
-                    canUndo = uiState.canUndo,
-                    canRedo = uiState.canRedo,
-                    onOpenProjectHub = { showProjectHubDialog = true },
-                    onOpenUnits = { showUnitsDialog = true },
-                    onToggleWorkspaceSpace = viewModel::toggleWorkspaceSpace,
-                    onOpenSheetSetup = { showSheetDialog = true },
-                    onOpenQDim = { showQDimDialog = true },
-                    onOpenMatrix = { showMatrixDialog = true },
-                    onOpenLayers = { showLayerBlockDialog = true },
-                    onOpenProperties = { showPropertiesDialog = true },
-                    onOpenActionLauncher = { showActionLauncherDialog = true },
-                    onUndo = viewModel::undo,
-                    onRedo = viewModel::redo,
-                    onFitDrawing = { viewModel.fitDrawing() },
-                    onSelectFitPolicy = viewModel::setFitDrawingPolicy
-                )
+            // --- PORTRAIT OVERLAY-ONLY FULL-SCREEN WORKSPACE (Sections 14.7, 18.5, 19, 20) ---
+            // CadViewportCanvas is rendered ONCE in a stable full-size root Box so opening/closing
+            // any overlay (controller dock, tool browser, accordions, autocomplete, Overview) NEVER
+            // alters the canvas size or rebases the viewport camera.
+            var topChromeHeightPx by remember { mutableFloatStateOf(with(density) { 78.dp.toPx() }) }
+            var bottomStackHeightPx by remember { mutableFloatStateOf(with(density) { 280.dp.toPx() }) }
 
-                // 2. Transient Operation Notification Banner (Section 4)
-                TransientNotificationBanner(
-                    notification = uiState.activeNotification,
-                    onDismiss = viewModel::dismissNotification
-                )
-
-                // 3. Main 2D Technical CAD Viewport (Navigation-Only Sheet + Retractable Side Tool Drawer)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .onSizeChanged { size ->
-                            val topHudPx = with(density) { 42.dp.toPx() }
-                            val leftDrawerPx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
-                                with(density) { 188.dp.toPx() }
-                            } else {
-                                with(density) { 28.dp.toPx() }
-                            }
-                            viewModel.updateUsableViewportRect(
-                                UsableViewportRect(
-                                    leftPx = leftDrawerPx.coerceAtMost(size.width * 0.45f),
-                                    topPx = topHudPx.coerceAtMost(size.height * 0.25f),
-                                    rightPx = size.width.toFloat(),
-                                    bottomPx = size.height.toFloat()
-                                )
-                            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { size ->
+                        val leftSafePx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
+                            with(density) { 244.dp.toPx() }.coerceAtMost(size.width * 0.48f)
+                        } else {
+                            with(density) { 12.dp.toPx() }
                         }
+                        val topSafePx = topChromeHeightPx.coerceAtMost(size.height * 0.25f)
+                        val bottomSafePx = (size.height - bottomStackHeightPx).coerceAtLeast(topSafePx + 120f)
+                        viewModel.updateUsableViewportRect(
+                            UsableViewportRect(
+                                leftPx = leftSafePx,
+                                topPx = topSafePx,
+                                rightPx = size.width.toFloat(),
+                                bottomPx = bottomSafePx
+                            )
+                        )
+                    }
+            ) {
+                // 1. Stable Full-Screen 2D Technical CAD Viewport Canvas
+                CadViewportCanvas(
+                    workspaceSpace = uiState.workspaceSpace,
+                    sheetSetup = uiState.sheetSetup,
+                    gridSnapConfig = uiState.gridSnapConfig,
+                    storageUnit = uiState.storageUnit,
+                    displayUnit = uiState.displayUnit,
+                    precision = uiState.precision,
+                    dimensionStyle = uiState.dimensionStyle,
+                    layers = uiState.layers,
+                    entities = uiState.entities,
+                    blocks = uiState.blocks,
+                    selectedEntityIds = uiState.selectedEntityIds,
+                    isolatedEntityIds = uiState.isolatedEntityIds,
+                    previewEntities = previewEntities,
+                    cursorModelPos = uiState.snappedCursorModelPos,
+                    activeSnapCandidate = uiState.activeSnapCandidate,
+                    referencePoint = uiState.commandStepPoints.lastOrNull(),
+                    selectionBoxDrag = uiState.selectionBoxDrag,
+                    viewport = uiState.viewport,
+                    isToolDrawerOpen = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                    onViewportChanged = viewModel::updateViewport,
+                    onViewportSizeChanged = viewModel::updateViewportDimensions,
+                    onGestureStateChanged = viewModel::onViewportGestureStateChanged,
+                    onRevealToolDrawer = { viewModel.setToolDrawerState(ToolDrawerState.EXPANDED) }
+                )
+
+                // 2. Top Overlay Stack: Engineering Header Bar + Transient Notification + Floating Status HUD
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .fillMaxWidth()
+                        .onSizeChanged { topChromeHeightPx = it.height.toFloat() }
                 ) {
-                    CadViewportCanvas(
+                    TopEngineeringHeaderBar(
+                        projectName = uiState.currentProjectName,
+                        displayUnitSymbol = uiState.displayUnit.symbol,
+                        unitChangeMode = uiState.unitChangeMode,
+                        isQuickDimensionEnabled = uiState.isQuickDimensionEnabled,
                         workspaceSpace = uiState.workspaceSpace,
-                        sheetSetup = uiState.sheetSetup,
-                        gridSnapConfig = uiState.gridSnapConfig,
-                        storageUnit = uiState.storageUnit,
-                        displayUnit = uiState.displayUnit,
-                        precision = uiState.precision,
-                        dimensionStyle = uiState.dimensionStyle,
-                        layers = uiState.layers,
-                        entities = uiState.entities,
-                        blocks = uiState.blocks,
-                        selectedEntityIds = uiState.selectedEntityIds,
-                        isolatedEntityIds = uiState.isolatedEntityIds,
-                        previewEntities = previewEntities,
-                        cursorModelPos = uiState.snappedCursorModelPos,
-                        activeSnapCandidate = uiState.activeSnapCandidate,
-                        referencePoint = uiState.commandStepPoints.lastOrNull(),
-                        selectionBoxDrag = uiState.selectionBoxDrag,
-                        viewport = uiState.viewport,
-                        onViewportChanged = viewModel::updateViewport,
-                        onViewportSizeChanged = viewModel::updateViewportDimensions,
-                        onGestureStateChanged = viewModel::onViewportGestureStateChanged
+                        fitDrawingPolicy = uiState.fitDrawingPolicy,
+                        canUndo = uiState.canUndo,
+                        canRedo = uiState.canRedo,
+                        onOpenProjectHub = { showProjectHubDialog = true },
+                        onOpenUnits = { showUnitsDialog = true },
+                        onToggleWorkspaceSpace = viewModel::toggleWorkspaceSpace,
+                        onOpenSheetSetup = { showSheetDialog = true },
+                        onOpenQDim = { showQDimDialog = true },
+                        onOpenMatrix = { showMatrixDialog = true },
+                        onOpenLayers = { showLayerBlockDialog = true },
+                        onOpenProperties = { showPropertiesDialog = true },
+                        onOpenActionLauncher = { showActionLauncherDialog = true },
+                        onUndo = viewModel::undo,
+                        onRedo = viewModel::redo,
+                        onFitDrawing = { viewModel.fitDrawing() },
+                        onSelectFitPolicy = viewModel::setFitDrawingPolicy
                     )
 
-                    // Top-Left Opaque Status & Snap Toggle Strip
+                    TransientNotificationBanner(
+                        notification = uiState.activeNotification,
+                        onDismiss = viewModel::dismissNotification
+                    )
+
                     ViewportFloatingStatusHud(
                         uiState = uiState,
                         onToggleGrid = viewModel::toggleGridVisibility,
@@ -281,96 +309,116 @@ fun CadWorkspaceScreen(
                         onOpenLayers = { showLayerBlockDialog = true },
                         onOpenProperties = { showPropertiesDialog = true },
                         onSelectAll = viewModel::selectAllEntities,
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(start = 34.dp, top = 6.dp, end = 6.dp)
-                    )
-
-                    // Section 14.5: Retractable Left-Edge Command-Category Drawer (Collapsed by default)
-                    RetractableSideToolDrawer(
-                        uiState = uiState,
-                        onToggleDrawer = viewModel::toggleToolDrawer,
-                        onSelectCategory = viewModel::selectCategory,
-                        onSelectCommand = { cmd ->
-                            handleCommandSelection(cmd)
-                            viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
-                        },
-                        onSelectAll = viewModel::selectAllEntities,
-                        onSelectPrevious = viewModel::selectPreviousEntities,
-                        onClearSelection = viewModel::clearSelection,
-                        modifier = Modifier.align(Alignment.CenterStart)
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
 
-                // 4. Contextual Command Line, Prefix Autocomplete & Active Command Options (Section 14.4)
-                ContextualCommandAndOptionsDock(
-                    uiState = uiState,
-                    commandLineInput = commandLineInput,
-                    onCommandLineInputChange = { query ->
-                        commandLineInput = query
-                        viewModel.updateCommandInputQuery(query)
-                    },
-                    onOpenCommandEditing = {
-                        viewModel.openCommandLineEditing(commandLineInput)
-                    },
-                    onCloseCommandEditing = {
-                        commandLineInput = ""
-                        viewModel.closeCommandLineEditing()
-                    },
-                    onSubmitCommandLine = {
-                        viewModel.submitCommandOrCoordinateInput(commandLineInput)
-                        commandLineInput = ""
-                    },
-                    onSelectCommand = { cmd ->
-                        commandLineInput = ""
-                        handleCommandSelection(cmd)
-                    },
-                    onSelectSubOption = viewModel::setCommandSubOption,
-                    onParameterChange = viewModel::setCommandParameterValue,
-                    onToggleQDim = viewModel::setQuickDimensionEnabled,
-                    onRefreshQDim = viewModel::refreshQuickDimensions,
-                    onSelectQDimDensity = viewModel::setQDimDensity,
-                    onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                    onOpenQDimDialog = { showQDimDialog = true },
-                    onOpenActionLauncher = { showActionLauncherDialog = true },
-                    onToggleToolDrawer = viewModel::toggleToolDrawer,
-                    onOpenProperties = { showPropertiesDialog = true },
-                    onDeleteSelected = viewModel::deleteSelectedEntities,
-                    onClearSelection = viewModel::clearSelection,
-                    onSelectByLayer = viewModel::selectEntitiesByLayer,
-                    onSelectByType = viewModel::selectEntitiesByType,
-                    onFinishCommand = { viewModel.finishCurrentCommand() },
-                    onCancelCommand = viewModel::cancelCurrentCommand
-                )
+                // 3. Bottom Overlay Stack: Floating Overview Card + Persistent 3-Tier Bottom Control Stack
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .onSizeChanged { bottomStackHeightPx = it.height.toFloat() }
+                ) {
+                    // Section 30: Separate Floating Overview Overlay above the Function Toolbar
+                    OverviewOverlayCard(
+                        overview = uiState.activeOverview,
+                        onDismiss = viewModel::dismissOverview,
+                        modifier = Modifier
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .align(Alignment.Start)
+                    )
 
-                // 5. Collapsible Virtual Cursor Controller Dock (Section 14.6)
-                VirtualCursorControllerDeck(
-                    config = uiState.controllerConfig,
-                    cursorModelPos = uiState.snappedCursorModelPos,
-                    storageUnit = uiState.storageUnit,
-                    displayUnit = uiState.displayUnit,
-                    precision = uiState.precision,
-                    pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
-                    onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
-                    onJoystickVelocityStep = viewModel::moveCursorByDelta,
-                    onStepNudge = viewModel::stepNudgeCursor,
-                    onPickAtCursor = viewModel::pickPointAtCursor,
-                    onFinishCommand = { viewModel.finishCurrentCommand() },
-                    onCancelCommand = viewModel::cancelCurrentCommand,
-                    onModeChange = viewModel::setControllerMode,
-                    onIncrementSelect = viewModel::setStepIncrement,
-                    onOpenControllerSettings = { showControllerSettingsDialog = true },
-                    onToggleCollapse = viewModel::toggleControllerCollapse,
-                    onSetCollapsed = { collapsed ->
-                        viewModel.setControllerDockState(
-                            if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
-                        )
+                    // Tier 1 & Tier 2: Function/Action Bar + Persistent Command Entry & Prompt Bar
+                    ContextualCommandAndOptionsDock(
+                        uiState = uiState,
+                        commandLineInput = commandLineInput,
+                        onCommandLineInputChange = { query ->
+                            commandLineInput = query
+                            viewModel.updateCommandInputQuery(query)
+                        },
+                        onOpenCommandEditing = {
+                            viewModel.openCommandLineEditing(commandLineInput)
+                        },
+                        onCloseCommandEditing = {
+                            commandLineInput = ""
+                            viewModel.closeCommandLineEditing()
+                        },
+                        onSubmitCommandLine = {
+                            viewModel.submitCommandOrCoordinateInput(commandLineInput)
+                            commandLineInput = ""
+                        },
+                        onSelectCommand = { cmd ->
+                            commandLineInput = ""
+                            handleCommandSelection(cmd)
+                        },
+                        onSelectSubOption = viewModel::setCommandSubOption,
+                        onParameterChange = viewModel::setCommandParameterValue,
+                        onToggleQDim = viewModel::setQuickDimensionEnabled,
+                        onRefreshQDim = viewModel::refreshQuickDimensions,
+                        onSelectQDimDensity = viewModel::setQDimDensity,
+                        onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
+                        onOpenQDimDialog = { showQDimDialog = true },
+                        onOpenActionLauncher = { showActionLauncherDialog = true },
+                        onToggleToolDrawer = viewModel::toggleToolDrawer,
+                        onPickPointAtCursor = viewModel::pickPointAtCursor,
+                        onFitDrawing = { viewModel.fitDrawing() },
+                        onOpenProperties = { showPropertiesDialog = true },
+                        onDeleteSelected = viewModel::deleteSelectedEntities,
+                        onClearSelection = viewModel::clearSelection,
+                        onSelectByLayer = viewModel::selectEntitiesByLayer,
+                        onSelectByType = viewModel::selectEntitiesByType,
+                        onFinishCommand = { viewModel.finishCurrentCommand() },
+                        onCancelCommand = viewModel::cancelCurrentCommand
+                    )
+
+                    // Tier 3: Collapsible Virtual Cursor Controller Dock
+                    VirtualCursorControllerDeck(
+                        config = uiState.controllerConfig,
+                        cursorModelPos = uiState.snappedCursorModelPos,
+                        storageUnit = uiState.storageUnit,
+                        displayUnit = uiState.displayUnit,
+                        precision = uiState.precision,
+                        pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
+                        onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
+                        onJoystickVelocityStep = viewModel::moveCursorByDelta,
+                        onStepNudge = viewModel::stepNudgeCursor,
+                        onPickAtCursor = viewModel::pickPointAtCursor,
+                        onFinishCommand = { viewModel.finishCurrentCommand() },
+                        onCancelCommand = viewModel::cancelCurrentCommand,
+                        onModeChange = viewModel::setControllerMode,
+                        onIncrementSelect = viewModel::setStepIncrement,
+                        onOpenControllerSettings = { showControllerSettingsDialog = true },
+                        onToggleCollapse = viewModel::toggleControllerCollapse,
+                        onSetCollapsed = { collapsed ->
+                            viewModel.setControllerDockState(
+                                if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+                            )
+                        },
+                        onOpenCoordinateDialog = { showCoordinateDialog = true }
+                    )
+                }
+
+                // 4. Left-Edge Swipe Tool Browser Overlay (No arrow handle; vertical category tiles + multi-accordions)
+                RetractableSideToolDrawer(
+                    uiState = uiState,
+                    onCloseDrawer = { viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED) },
+                    onSelectCategoryTile = viewModel::selectCategoryTile,
+                    onToggleAccordionSection = viewModel::toggleToolSection,
+                    onSelectCommand = { cmd ->
+                        handleCommandSelection(cmd)
+                        viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
                     },
-                    onOpenCoordinateDialog = { showCoordinateDialog = true }
+                    onSelectAll = viewModel::selectAllEntities,
+                    onSelectPrevious = viewModel::selectPreviousEntities,
+                    onClearSelection = viewModel::clearSelection,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(top = 68.dp, bottom = 12.dp)
                 )
             }
         } else {
-            // --- LANDSCAPE ADAPTIVE FULL-SCREEN WORKSPACE ---
+            // --- LANDSCAPE ADAPTIVE FULL-SCREEN WORKSPACE (Overlay-Invariant Viewport) ---
             Column(modifier = Modifier.fillMaxSize()) {
                 TopEngineeringHeaderBar(
                     projectName = uiState.currentProjectName,
@@ -406,125 +454,143 @@ fun CadWorkspaceScreen(
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    // Central 2D Technical CAD Viewport + Contextual Bottom Command Dock
-                    Column(
+                    // Central 2D Technical CAD Viewport (Full-height Box with overlays)
+                    var landscapeBottomHeightPx by remember { mutableFloatStateOf(with(density) { 96.dp.toPx() }) }
+                    Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
-                                .onSizeChanged { size ->
-                                    val topHudPx = with(density) { 42.dp.toPx() }
-                                    val leftDrawerPx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
-                                        with(density) { 188.dp.toPx() }
-                                    } else {
-                                        with(density) { 28.dp.toPx() }
-                                    }
-                                    viewModel.updateUsableViewportRect(
-                                        UsableViewportRect(
-                                            leftPx = leftDrawerPx.coerceAtMost(size.width * 0.4f),
-                                            topPx = topHudPx.coerceAtMost(size.height * 0.25f),
-                                            rightPx = size.width.toFloat(),
-                                            bottomPx = size.height.toFloat()
-                                        )
-                                    )
+                            .onSizeChanged { size ->
+                                val topHudPx = with(density) { 38.dp.toPx() }
+                                val leftDrawerPx = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
+                                    with(density) { 244.dp.toPx() }.coerceAtMost(size.width * 0.45f)
+                                } else {
+                                    with(density) { 12.dp.toPx() }
                                 }
+                                val bottomSafePx = (size.height - landscapeBottomHeightPx).coerceAtLeast(topHudPx + 100f)
+                                viewModel.updateUsableViewportRect(
+                                    UsableViewportRect(
+                                        leftPx = leftDrawerPx,
+                                        topPx = topHudPx.coerceAtMost(size.height * 0.25f),
+                                        rightPx = size.width.toFloat(),
+                                        bottomPx = bottomSafePx
+                                    )
+                                )
+                            }
+                    ) {
+                        CadViewportCanvas(
+                            workspaceSpace = uiState.workspaceSpace,
+                            sheetSetup = uiState.sheetSetup,
+                            gridSnapConfig = uiState.gridSnapConfig,
+                            storageUnit = uiState.storageUnit,
+                            displayUnit = uiState.displayUnit,
+                            precision = uiState.precision,
+                            dimensionStyle = uiState.dimensionStyle,
+                            layers = uiState.layers,
+                            entities = uiState.entities,
+                            blocks = uiState.blocks,
+                            selectedEntityIds = uiState.selectedEntityIds,
+                            isolatedEntityIds = uiState.isolatedEntityIds,
+                            previewEntities = previewEntities,
+                            cursorModelPos = uiState.snappedCursorModelPos,
+                            activeSnapCandidate = uiState.activeSnapCandidate,
+                            referencePoint = uiState.commandStepPoints.lastOrNull(),
+                            selectionBoxDrag = uiState.selectionBoxDrag,
+                            viewport = uiState.viewport,
+                            isToolDrawerOpen = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                            onViewportChanged = viewModel::updateViewport,
+                            onViewportSizeChanged = viewModel::updateViewportDimensions,
+                            onGestureStateChanged = viewModel::onViewportGestureStateChanged,
+                            onRevealToolDrawer = { viewModel.setToolDrawerState(ToolDrawerState.EXPANDED) }
+                        )
+
+                        ViewportFloatingStatusHud(
+                            uiState = uiState,
+                            onToggleGrid = viewModel::toggleGridVisibility,
+                            onToggleGridSnap = viewModel::toggleGridSnap,
+                            onToggleOsnap = viewModel::toggleOsnap,
+                            onToggleOrtho = viewModel::toggleOrtho,
+                            onOpenLayers = { showLayerBlockDialog = true },
+                            onOpenProperties = { showPropertiesDialog = true },
+                            onSelectAll = viewModel::selectAllEntities,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                        )
+
+                        RetractableSideToolDrawer(
+                            uiState = uiState,
+                            onCloseDrawer = { viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED) },
+                            onSelectCategoryTile = viewModel::selectCategoryTile,
+                            onToggleAccordionSection = viewModel::toggleToolSection,
+                            onSelectCommand = { cmd ->
+                                handleCommandSelection(cmd)
+                                viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
+                            },
+                            onSelectAll = viewModel::selectAllEntities,
+                            onSelectPrevious = viewModel::selectPreviousEntities,
+                            onClearSelection = viewModel::clearSelection,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .padding(vertical = 36.dp)
+                        )
+
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .onSizeChanged { landscapeBottomHeightPx = it.height.toFloat() }
                         ) {
-                            CadViewportCanvas(
-                                workspaceSpace = uiState.workspaceSpace,
-                                sheetSetup = uiState.sheetSetup,
-                                gridSnapConfig = uiState.gridSnapConfig,
-                                storageUnit = uiState.storageUnit,
-                                displayUnit = uiState.displayUnit,
-                                precision = uiState.precision,
-                                dimensionStyle = uiState.dimensionStyle,
-                                layers = uiState.layers,
-                                entities = uiState.entities,
-                                blocks = uiState.blocks,
-                                selectedEntityIds = uiState.selectedEntityIds,
-                                isolatedEntityIds = uiState.isolatedEntityIds,
-                                previewEntities = previewEntities,
-                                cursorModelPos = uiState.snappedCursorModelPos,
-                                activeSnapCandidate = uiState.activeSnapCandidate,
-                                referencePoint = uiState.commandStepPoints.lastOrNull(),
-                                selectionBoxDrag = uiState.selectionBoxDrag,
-                                viewport = uiState.viewport,
-                                onViewportChanged = viewModel::updateViewport,
-                                onViewportSizeChanged = viewModel::updateViewportDimensions,
-                                onGestureStateChanged = viewModel::onViewportGestureStateChanged
-                            )
-
-                            ViewportFloatingStatusHud(
-                                uiState = uiState,
-                                onToggleGrid = viewModel::toggleGridVisibility,
-                                onToggleGridSnap = viewModel::toggleGridSnap,
-                                onToggleOsnap = viewModel::toggleOsnap,
-                                onToggleOrtho = viewModel::toggleOrtho,
-                                onOpenLayers = { showLayerBlockDialog = true },
-                                onOpenProperties = { showPropertiesDialog = true },
-                                onSelectAll = viewModel::selectAllEntities,
+                            OverviewOverlayCard(
+                                overview = uiState.activeOverview,
+                                onDismiss = viewModel::dismissOverview,
                                 modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .padding(start = 34.dp, top = 6.dp, end = 6.dp)
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    .align(Alignment.Start)
                             )
 
-                            RetractableSideToolDrawer(
+                            ContextualCommandAndOptionsDock(
                                 uiState = uiState,
-                                onToggleDrawer = viewModel::toggleToolDrawer,
-                                onSelectCategory = viewModel::selectCategory,
-                                onSelectCommand = { cmd ->
-                                    handleCommandSelection(cmd)
-                                    viewModel.setToolDrawerState(ToolDrawerState.COLLAPSED)
+                                commandLineInput = commandLineInput,
+                                onCommandLineInputChange = { query ->
+                                    commandLineInput = query
+                                    viewModel.updateCommandInputQuery(query)
                                 },
-                                onSelectAll = viewModel::selectAllEntities,
-                                onSelectPrevious = viewModel::selectPreviousEntities,
+                                onOpenCommandEditing = {
+                                    viewModel.openCommandLineEditing(commandLineInput)
+                                },
+                                onCloseCommandEditing = {
+                                    commandLineInput = ""
+                                    viewModel.closeCommandLineEditing()
+                                },
+                                onSubmitCommandLine = {
+                                    viewModel.submitCommandOrCoordinateInput(commandLineInput)
+                                    commandLineInput = ""
+                                },
+                                onSelectCommand = { cmd ->
+                                    commandLineInput = ""
+                                    handleCommandSelection(cmd)
+                                },
+                                onSelectSubOption = viewModel::setCommandSubOption,
+                                onParameterChange = viewModel::setCommandParameterValue,
+                                onToggleQDim = viewModel::setQuickDimensionEnabled,
+                                onRefreshQDim = viewModel::refreshQuickDimensions,
+                                onSelectQDimDensity = viewModel::setQDimDensity,
+                                onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
+                                onOpenQDimDialog = { showQDimDialog = true },
+                                onOpenActionLauncher = { showActionLauncherDialog = true },
+                                onToggleToolDrawer = viewModel::toggleToolDrawer,
+                                onPickPointAtCursor = viewModel::pickPointAtCursor,
+                                onFitDrawing = { viewModel.fitDrawing() },
+                                onOpenProperties = { showPropertiesDialog = true },
+                                onDeleteSelected = viewModel::deleteSelectedEntities,
                                 onClearSelection = viewModel::clearSelection,
-                                modifier = Modifier.align(Alignment.CenterStart)
+                                onSelectByLayer = viewModel::selectEntitiesByLayer,
+                                onSelectByType = viewModel::selectEntitiesByType,
+                                onFinishCommand = { viewModel.finishCurrentCommand() },
+                                onCancelCommand = viewModel::cancelCurrentCommand
                             )
                         }
-
-                        ContextualCommandAndOptionsDock(
-                            uiState = uiState,
-                            commandLineInput = commandLineInput,
-                            onCommandLineInputChange = { query ->
-                                commandLineInput = query
-                                viewModel.updateCommandInputQuery(query)
-                            },
-                            onOpenCommandEditing = {
-                                viewModel.openCommandLineEditing(commandLineInput)
-                            },
-                            onCloseCommandEditing = {
-                                commandLineInput = ""
-                                viewModel.closeCommandLineEditing()
-                            },
-                            onSubmitCommandLine = {
-                                viewModel.submitCommandOrCoordinateInput(commandLineInput)
-                                commandLineInput = ""
-                            },
-                            onSelectCommand = { cmd ->
-                                commandLineInput = ""
-                                handleCommandSelection(cmd)
-                            },
-                            onSelectSubOption = viewModel::setCommandSubOption,
-                            onParameterChange = viewModel::setCommandParameterValue,
-                            onToggleQDim = viewModel::setQuickDimensionEnabled,
-                            onRefreshQDim = viewModel::refreshQuickDimensions,
-                            onSelectQDimDensity = viewModel::setQDimDensity,
-                            onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                            onOpenQDimDialog = { showQDimDialog = true },
-                            onOpenActionLauncher = { showActionLauncherDialog = true },
-                            onToggleToolDrawer = viewModel::toggleToolDrawer,
-                            onOpenProperties = { showPropertiesDialog = true },
-                            onDeleteSelected = viewModel::deleteSelectedEntities,
-                            onClearSelection = viewModel::clearSelection,
-                            onSelectByLayer = viewModel::selectEntitiesByLayer,
-                            onSelectByType = viewModel::selectEntitiesByType,
-                            onFinishCommand = { viewModel.finishCurrentCommand() },
-                            onCancelCommand = viewModel::cancelCurrentCommand
-                        )
                     }
 
                     // Right-Side Opaque Inspector + Collapsible Virtual Cursor Controller
@@ -694,8 +760,10 @@ fun CadWorkspaceScreen(
             currentDensity = uiState.qdimDensity,
             currentArrangement = uiState.qdimArrangementPreference,
             alignmentReport = uiState.lastAlignmentReport,
+            totalDimensionCount = uiState.entities.count { it is CadEntity.DimensionEntity },
             onToggleQuickDimension = viewModel::setQuickDimensionEnabled,
             onRefreshQuickDimension = viewModel::refreshQuickDimensions,
+            onClearAllDimensions = viewModel::clearAllDimensionsConfirmed,
             onExecuteQDim = { mode, density, replaceAuto, arrangement ->
                 viewModel.executeQuickDimension(mode, density, replaceAuto, arrangement)
             },
@@ -1278,13 +1346,14 @@ private fun HudToggleBadge(
     }
 }
 
-// --- Section 14.5: Retractable Side Tool-Category Drawer ---
+// --- Section 14.3 & Section 18: Edge-Swipe Tool Browser with Vertical Category Side Tiles & Multi-Accordions ---
 
 @Composable
 private fun RetractableSideToolDrawer(
     uiState: CadWorkspaceUiState,
-    onToggleDrawer: () -> Unit,
-    onSelectCategory: (CadCommandCategory) -> Unit,
+    onCloseDrawer: () -> Unit,
+    onSelectCategoryTile: (CadCommandCategory) -> Unit,
+    onToggleAccordionSection: (CadCommandCategory) -> Unit,
     onSelectCommand: (CadCommandId) -> Unit,
     onSelectAll: () -> Unit,
     onSelectPrevious: () -> Unit,
@@ -1293,88 +1362,243 @@ private fun RetractableSideToolDrawer(
 ) {
     val isExpanded = uiState.toolDrawerState == ToolDrawerState.EXPANDED
 
-    Row(
+    // Section 14.3 & 18.1: No arrow/chevron handle in either closed or open state.
+    // Opens via left-edge inward swipe or Function Bar trigger; closes via leftward swipe or Android Back.
+    AnimatedVisibility(
+        visible = isExpanded,
         modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically
+        enter = expandHorizontally(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+        exit = shrinkHorizontally(animationSpec = tween(180)) + fadeOut(animationSpec = tween(180))
     ) {
-        AnimatedVisibility(
-            visible = isExpanded,
-            enter = expandHorizontally(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-            exit = shrinkHorizontally(animationSpec = tween(180)) + fadeOut(animationSpec = tween(180))
+        Surface(
+            modifier = Modifier
+                .width(248.dp)
+                .heightIn(max = 300.dp)
+                .border(1.dp, CadBorderStrong, RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp))
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                        )
+                        val startPos = down.position
+                        var closedBySwipe = false
+                        while (true) {
+                            val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                            val active = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                            if (active == null || !active.pressed) break
+                            val dx = active.position.x - startPos.x
+                            val dy = active.position.y - startPos.y
+                            if (!closedBySwipe && dx < -36f && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.3f) {
+                                closedBySwipe = true
+                                event.changes.forEach { it.consume() }
+                                onCloseDrawer()
+                                break
+                            }
+                        }
+                    }
+                }
+                .testTag("tool_drawer_panel"),
+            shape = RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp),
+            color = CadPanelSurface
         ) {
-            Surface(
-                modifier = Modifier
-                    .width(184.dp)
-                    .heightIn(max = 380.dp)
-                    .border(1.dp, CadCyanPrimary, RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp))
-                    .testTag("tool_drawer_panel"),
-                shape = RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp),
-                color = CadPanelSurface
-            ) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                // Left Vertical Category Side Tile Rail (5 CAD Category Side Tiles — Section 18.2)
                 Column(
                     modifier = Modifier
-                        .padding(8.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                        .width(56.dp)
+                        .verticalScroll(rememberScrollState())
+                        .background(CadModelSpaceBg)
+                        .border(1.dp, CadBorderHairline)
+                        .padding(vertical = 6.dp, horizontal = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "CAD TOOL CATEGORIES",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = CadCyanPrimary,
+                        text = "CATS",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 8.5.sp,
+                        color = CadTextMuted,
                         fontWeight = FontWeight.Bold
                     )
-
                     CadCommandCategory.entries.forEach { cat ->
-                        val isCat = uiState.activeCategory == cat
+                        val isActive = uiState.activeCategory == cat
+                        val isSectionOpen = cat in uiState.expandedToolSections
+                        val shortCode = when (cat) {
+                            CadCommandCategory.DRAW -> "DRAW"
+                            CadCommandCategory.MODIFY -> "MOD"
+                            CadCommandCategory.SELECT_INQUIRY -> "SEL"
+                            CadCommandCategory.ANNOTATE_DIM -> "DIM"
+                            CadCommandCategory.DOCUMENT_SYSTEM -> "DOC"
+                        }
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .height(42.dp)
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(if (isCat) OpaqueCyanBadgeBg else CadPanelElevated)
+                                .background(
+                                    when {
+                                        isActive -> OpaqueCyanBadgeBg
+                                        isSectionOpen -> CadPanelElevated
+                                        else -> CadHudSurface
+                                    }
+                                )
                                 .border(
                                     1.dp,
-                                    if (isCat) CadCyanPrimary else CadBorderHairline,
+                                    when {
+                                        isActive -> CadCyanPrimary
+                                        isSectionOpen -> CadBorderStrong
+                                        else -> CadBorderHairline
+                                    },
                                     RoundedCornerShape(6.dp)
                                 )
-                                .clickable { onSelectCategory(cat) }
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
-                                .testTag("category_tab_${cat.name}")
+                                .clickable { onSelectCategoryTile(cat) }
+                                .testTag("category_tile_${cat.name}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = shortCode,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 9.5.sp,
+                                color = if (isActive) CadCyanPrimary else CadTextPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Right Multi-Section Independent Accordion Panel (Section 18.3)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(8.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "CAD TOOL BROWSER",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Swipe ←",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = CadTextMuted,
+                            modifier = Modifier
+                                .clickable(onClick = onCloseDrawer)
+                                .testTag("tool_drawer_close_button")
+                        )
+                    }
+
+                    CadCommandCategory.entries.forEach { cat ->
+                        val isOpen = cat in uiState.expandedToolSections
+                        val isActiveCat = uiState.activeCategory == cat
+                        // Section 18.2: Ensure LINE and POLYGON are prominently ordered at the top of DRAW
+                        val categoryCommands = remember(cat) {
+                            val raw = CadCommandId.entries.filter { it.category == cat }
+                            if (cat == CadCommandCategory.DRAW) {
+                                val priority = listOf(
+                                    CadCommandId.LINE,
+                                    CadCommandId.POLYGON,
+                                    CadCommandId.POLYLINE,
+                                    CadCommandId.CIRCLE,
+                                    CadCommandId.ARC,
+                                    CadCommandId.RECTANGLE
+                                )
+                                priority + raw.filterNot { it in priority }
+                            } else {
+                                raw
+                            }
+                        }
+
+                        // Accordion Section Header
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isOpen) OpaqueCyanBadgeBg else CadPanelElevated)
+                                .border(
+                                    1.dp,
+                                    if (isActiveCat || isOpen) CadCyanPrimary else CadBorderHairline,
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .clickable { onToggleAccordionSection(cat) }
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .testTag("category_tab_${cat.name}"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = cat.label,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isCat) CadCyanPrimary else CadTextSecondary,
-                                fontWeight = FontWeight.Bold
+                                color = if (isOpen) CadCyanPrimary else CadTextSecondary,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = if (isOpen) "−" else "+",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isOpen) CadCyanPrimary else CadTextMuted,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testTag("accordion_header_${cat.name}")
                             )
                         }
 
-                        if (isCat) {
+                        AnimatedVisibility(
+                            visible = isOpen,
+                            enter = expandVertically(animationSpec = tween(160)) + fadeIn(animationSpec = tween(160)),
+                            exit = shrinkVertically(animationSpec = tween(140)) + fadeOut(animationSpec = tween(140))
+                        ) {
                             Column(
-                                modifier = Modifier.padding(start = 6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 2.dp, top = 2.dp, bottom = 2.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                CadCommandId.entries.filter { it.category == cat }.forEach { cmd ->
-                                    val isCmd = uiState.activeCommand == cmd
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(5.dp))
-                                            .background(if (isCmd) OpaqueAmberBadgeBg else CadHudSurface)
-                                            .border(
-                                                1.dp,
-                                                if (isCmd) CadAmberSnap else CadBorderHairline,
-                                                RoundedCornerShape(5.dp)
-                                            )
-                                            .clickable { onSelectCommand(cmd) }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            .testTag("cmd_button_${cmd.commandName}")
+                                categoryCommands.chunked(2).forEach { rowCmds ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
-                                        Text(
-                                            text = "${cmd.shortLabel} (${cmd.primaryAlias})",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (isCmd) CadAmberSnap else CadTextPrimary,
-                                            fontWeight = if (isCmd) FontWeight.Bold else FontWeight.Normal
-                                        )
+                                        rowCmds.forEach { cmd ->
+                                            val isCmd = uiState.activeCommand == cmd
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(5.dp))
+                                                    .background(if (isCmd) OpaqueAmberBadgeBg else CadHudSurface)
+                                                    .border(
+                                                        1.dp,
+                                                        if (isCmd) CadAmberSnap else CadBorderHairline,
+                                                        RoundedCornerShape(5.dp)
+                                                    )
+                                                    .clickable { onSelectCommand(cmd) }
+                                                    .padding(horizontal = 6.dp, vertical = 5.dp)
+                                                    .testTag("cmd_button_${cmd.commandName}")
+                                            ) {
+                                                Text(
+                                                    text = "${cmd.shortLabel} (${cmd.primaryAlias})",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 9.5.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = if (isCmd) CadAmberSnap else CadTextPrimary,
+                                                    fontWeight = if (isCmd) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            }
+                                        }
+                                        if (rowCmds.size == 1) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
                                     }
                                 }
                             }
@@ -1416,43 +1640,89 @@ private fun RetractableSideToolDrawer(
                 }
             }
         }
+    }
+}
 
-        // Retractable Handle Rail (100% Opaque, >= 48dp touch height)
-        Surface(
-            modifier = Modifier
-                .width(26.dp)
-                .height(74.dp)
-                .border(
-                    1.dp,
-                    if (isExpanded) CadCyanPrimary else CadBorderHairline,
-                    RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp)
+// --- Section 30: Separate Animated Floating Overview Overlay Card ---
+
+@Composable
+private fun OverviewOverlayCard(
+    overview: OverviewCardEvent?,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AnimatedContent(
+        targetState = overview,
+        contentKey = { it?.id ?: 0L },
+        transitionSpec = {
+            (fadeIn(animationSpec = tween(200)) + slideInVertically(animationSpec = tween(200)) { it / 3 })
+                .togetherWith(
+                    fadeOut(animationSpec = tween(180)) + slideOutVertically(animationSpec = tween(180)) { -it / 3 }
                 )
-                .clickable(onClick = onToggleDrawer)
-                .testTag("tool_drawer_handle"),
-            shape = RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp),
-            color = CadHudSurface
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
+        },
+        modifier = modifier,
+        label = "OverviewOverlayTransition"
+    ) { activeEvent ->
+        if (activeEvent != null) {
+            val borderCol = when (activeEvent.category) {
+                NotificationCategory.SUCCESS -> CadEmeraldCrossing
+                NotificationCategory.WARNING -> CadAmberSnap
+                NotificationCategory.ERROR -> CadRedAlert
+                NotificationCategory.INFO -> CadCyanPrimary
+            }
+            Surface(
+                modifier = Modifier
+                    .widthIn(min = 220.dp, max = 440.dp)
+                    .border(1.dp, borderCol, RoundedCornerShape(8.dp))
+                    .clickable(onClick = onDismiss)
+                    .testTag("overview_overlay_card"),
+                shape = RoundedCornerShape(8.dp),
+                color = CadSurfaceCard
             ) {
-                Icon(
-                    imageVector = if (isExpanded) {
-                        Icons.AutoMirrored.Filled.KeyboardArrowLeft
-                    } else {
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight
-                    },
-                    contentDescription = if (isExpanded) "Collapse tools" else "Expand tools",
-                    tint = CadCyanPrimary,
-                    modifier = Modifier.size(18.dp)
-                )
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "OVERVIEW",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = borderCol,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "•",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextMuted
+                        )
+                        Text(
+                            text = activeEvent.title,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextPrimary,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = activeEvent.explanation,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontSize = 11.sp,
+                        color = CadTextSecondary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
 }
 
-// --- Section 14.4: Contextual Command Line, Ranked Prefix Autocomplete & Active Command Bar ---
+// --- Sections 14.2 & 19: Persistent 3-Tier Bottom Control Stack (Tier 1 Function Bar + Tier 2 Persistent Command Entry) ---
 
 @Composable
 private fun ContextualCommandAndOptionsDock(
@@ -1472,6 +1742,8 @@ private fun ContextualCommandAndOptionsDock(
     onOpenQDimDialog: () -> Unit,
     onOpenActionLauncher: () -> Unit,
     onToggleToolDrawer: () -> Unit,
+    onPickPointAtCursor: () -> Unit,
+    onFitDrawing: () -> Unit,
     onOpenProperties: () -> Unit,
     onDeleteSelected: () -> Unit,
     onClearSelection: () -> Unit,
@@ -1480,7 +1752,6 @@ private fun ContextualCommandAndOptionsDock(
     onFinishCommand: () -> Unit,
     onCancelCommand: () -> Unit
 ) {
-    val isEditingCommand = uiState.commandPanelState is CommandPanelState.Editing || commandLineInput.isNotBlank()
     val isRunningActiveCommand = uiState.commandPanelState is CommandPanelState.Running ||
         uiState.activeCommand != CadCommandId.SELECT ||
         uiState.commandStepPoints.isNotEmpty() ||
@@ -1496,118 +1767,119 @@ private fun ContextualCommandAndOptionsDock(
             .border(1.dp, CadBorderHairline),
         color = CadPanelSurface
     ) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-            // 1. IDLE STATE: Compact low-profile trigger strip only (Section 14.4.1)
-            if (!isEditingCommand && !isRunningActiveCommand) {
+        Column(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // TIER 1 (Top of Bottom Stack): Persistent Function / Action Bar (No trailing prompt text)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .testTag("function_action_bar"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                // + Action Launcher button
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(OpaqueAmberBadgeBg)
+                        .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
+                        .clickable(onClick = onOpenActionLauncher)
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .testTag("action_launcher_fab"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Compact CMD button
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(OpaqueCyanBadgeBg)
-                            .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
-                            .clickable(onClick = onOpenCommandEditing)
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                            .testTag("cmd_activate_button"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Terminal,
-                            contentDescription = "Open Command Line",
-                            tint = CadCyanPrimary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "CMD / X,Y",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = CadCyanPrimary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Open Action Launcher",
+                        tint = CadAmberSnap,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "+ LAUNCHER",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CadAmberSnap,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
 
-                    // + Action Launcher button
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(OpaqueAmberBadgeBg)
-                            .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
-                            .clickable(onClick = onOpenActionLauncher)
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                            .testTag("action_launcher_fab"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Open Action Launcher",
-                            tint = CadAmberSnap,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "+ LAUNCHER",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = CadAmberSnap,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                // Tool Browser Toggle (No arrow icon)
+                OpaqueChipButton(
+                    label = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) "Close Tools" else "Tools Browser",
+                    active = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                    activeBg = OpaqueCyanBadgeBg,
+                    activeBorder = CadCyanPrimary,
+                    textColor = CadTextPrimary,
+                    tag = "bottom_tools_toggle_button",
+                    onClick = onToggleToolDrawer
+                )
 
-                    // Tools Drawer Toggle
+                // PICK PT affordance in Function Bar when awaiting point or in Relative Touchpad mode
+                if (isRunningActiveCommand || uiState.controllerConfig.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
                     OpaqueChipButton(
-                        label = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) "Hide Tools" else "Tools Drawer",
-                        active = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                        label = "PICK PT",
+                        active = true,
                         activeBg = OpaqueCyanBadgeBg,
                         activeBorder = CadCyanPrimary,
-                        textColor = CadTextPrimary,
-                        tag = "bottom_tools_toggle_button",
-                        onClick = onToggleToolDrawer
+                        textColor = CadCyanPrimary,
+                        tag = "function_bar_pick_point_button",
+                        onClick = onPickPointAtCursor
                     )
+                }
 
-                    // Selection quick actions when objects are selected
-                    if (uiState.selectedEntityIds.isNotEmpty()) {
-                        OpaqueChipButton(
-                            label = "Props (${uiState.selectedEntityIds.size})",
-                            active = true,
-                            activeBg = OpaqueAmberBadgeBg,
-                            activeBorder = CadAmberSnap,
-                            textColor = CadAmberSnap,
-                            onClick = onOpenProperties
-                        )
-                        OpaqueChipButton(
-                            label = "Erase",
-                            active = true,
-                            activeBg = OpaqueRedBadgeBg,
-                            activeBorder = CadRedAlert,
-                            textColor = CadRedAlert,
-                            onClick = onDeleteSelected
-                        )
-                        OpaqueChipButton(
-                            label = "Deselect",
-                            active = false,
-                            activeBg = CadPanelElevated,
-                            activeBorder = CadBorderHairline,
-                            textColor = CadTextSecondary,
-                            onClick = onClearSelection
-                        )
-                    } else {
-                        Text(
-                            text = uiState.commandPromptBanner,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = CadTextMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                OpaqueChipButton(
+                    label = "FIT",
+                    active = false,
+                    activeBg = CadPanelElevated,
+                    activeBorder = CadBorderHairline,
+                    textColor = CadTextPrimary,
+                    tag = "function_bar_fit_button",
+                    onClick = onFitDrawing
+                )
+
+                OpaqueChipButton(
+                    label = if (uiState.isQuickDimensionEnabled) "QDIM: ON" else "QDIM",
+                    active = uiState.isQuickDimensionEnabled,
+                    activeBg = OpaqueEmeraldBadgeBg,
+                    activeBorder = CadEmeraldCrossing,
+                    textColor = if (uiState.isQuickDimensionEnabled) CadEmeraldCrossing else CadTextPrimary,
+                    tag = "function_bar_qdim_button",
+                    onClick = onOpenQDimDialog
+                )
+
+                // Selection quick actions when objects are selected
+                if (uiState.selectedEntityIds.isNotEmpty()) {
+                    OpaqueChipButton(
+                        label = "Props (${uiState.selectedEntityIds.size})",
+                        active = true,
+                        activeBg = OpaqueAmberBadgeBg,
+                        activeBorder = CadAmberSnap,
+                        textColor = CadAmberSnap,
+                        onClick = onOpenProperties
+                    )
+                    OpaqueChipButton(
+                        label = "Erase",
+                        active = true,
+                        activeBg = OpaqueRedBadgeBg,
+                        activeBorder = CadRedAlert,
+                        textColor = CadRedAlert,
+                        onClick = onDeleteSelected
+                    )
+                    OpaqueChipButton(
+                        label = "Deselect",
+                        active = false,
+                        activeBg = CadPanelElevated,
+                        activeBorder = CadBorderHairline,
+                        textColor = CadTextSecondary,
+                        onClick = onClearSelection
+                    )
                 }
             }
 
-            // 2. ACTIVE-COMMAND STATE: Show only active command prompt & valid sub-options (Section 14.4.3)
+            // Active Command Prompt & Step Options (when a command is running)
             if (isRunningActiveCommand) {
                 ActiveCommandContextBar(
                     uiState = uiState,
@@ -1626,90 +1898,116 @@ private fun ContextualCommandAndOptionsDock(
                 )
             }
 
-            // 3. TYPING / AUTOCOMPLETE STATE: Prefix-ranked suggestion strip + input field (Section 14.4.2)
-            if (isEditingCommand) {
-                if (rankedSuggestions.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(bottom = 4.dp)
-                            .testTag("command_suggestion_strip"),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        rankedSuggestions.forEachIndexed { idx, spec ->
-                            val isTopMatch = idx == 0
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (isTopMatch) OpaqueAmberBadgeBg else CadPanelElevated)
-                                    .border(
-                                        1.dp,
-                                        if (isTopMatch) CadAmberSnap else CadCyanPrimary,
-                                        RoundedCornerShape(6.dp)
-                                    )
-                                    .clickable { onSelectCommand(spec.id) }
-                                    .padding(horizontal = 9.dp, vertical = 4.dp)
-                                    .testTag("suggestion_chip_${spec.id.commandName}")
-                            ) {
-                                Text(
-                                    text = "${spec.id.commandName} (${spec.id.primaryAlias})",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isTopMatch) CadAmberSnap else CadCyanPrimary,
-                                    fontWeight = FontWeight.Bold
+            // Ranked Prefix Autocomplete Strip (when typing a command prefix)
+            if (commandLineInput.isNotBlank() && rankedSuggestions.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .testTag("command_suggestion_strip"),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    rankedSuggestions.forEachIndexed { idx, spec ->
+                        val isTopMatch = idx == 0
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isTopMatch) OpaqueAmberBadgeBg else CadPanelElevated)
+                                .border(
+                                    1.dp,
+                                    if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                                    RoundedCornerShape(6.dp)
                                 )
-                            }
+                                .clickable { onSelectCommand(spec.id) }
+                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                                .testTag("suggestion_chip_${spec.id.commandName}")
+                        ) {
+                            Text(
+                                text = "${spec.id.commandName} (${spec.id.primaryAlias})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
+            }
 
+            // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
+            // Continuously visible in idle, typing, and active-command states without auto-focusing on launch.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("persistent_command_entry_bar"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(OpaqueCyanBadgeBg)
+                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(5.dp))
+                        .clickable(onClick = onOpenCommandEditing)
+                        .padding(horizontal = 7.dp, vertical = 5.dp)
+                        .testTag("cmd_activate_button"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.Terminal,
+                        contentDescription = "Command Input",
+                        tint = CadCyanPrimary,
+                        modifier = Modifier.size(13.dp)
+                    )
                     Text(
                         text = "CMD:",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = CadCyanPrimary,
                         fontWeight = FontWeight.Bold
                     )
-                    OutlinedTextField(
-                        value = commandLineInput,
-                        onValueChange = onCommandLineInputChange,
-                        placeholder = {
-                            Text(
-                                text = "Type command prefix (L, PL, C, F, QDIM) or coords (125,85 / @25,-10 / 50<45)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CadTextMuted
-                            )
-                        },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { onSubmitCommandLine() }),
-                        textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(46.dp)
-                            .testTag("command_line_input_field")
-                    )
-                    IconButton(
-                        onClick = onSubmitCommandLine,
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(OpaqueCyanBadgeBg)
-                            .border(1.dp, CadCyanPrimary, RoundedCornerShape(7.dp))
-                            .testTag("command_line_submit_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Send,
-                            contentDescription = "Execute Command or Coordinate",
-                            tint = CadCyanPrimary,
-                            modifier = Modifier.size(17.dp)
+                }
+
+                OutlinedTextField(
+                    value = commandLineInput,
+                    onValueChange = onCommandLineInputChange,
+                    placeholder = {
+                        Text(
+                            text = "Command or X,Y coordinates (L, PL, C, F, QDIM, 100,150, @25,-10)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                    }
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onSubmitCommandLine() }),
+                    textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(46.dp)
+                        .testTag("command_line_input_field")
+                )
+
+                IconButton(
+                    onClick = onSubmitCommandLine,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(OpaqueCyanBadgeBg)
+                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(7.dp))
+                        .testTag("command_line_submit_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Send,
+                        contentDescription = "Execute Command or Coordinate",
+                        tint = CadCyanPrimary,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
+                if (commandLineInput.isNotEmpty() || uiState.commandPanelState is CommandPanelState.Editing) {
                     IconButton(
                         onClick = onCloseCommandEditing,
                         modifier = Modifier
@@ -1721,7 +2019,7 @@ private fun ContextualCommandAndOptionsDock(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Close Command Input",
+                            contentDescription = "Clear Command Input",
                             tint = CadTextSecondary,
                             modifier = Modifier.size(17.dp)
                         )

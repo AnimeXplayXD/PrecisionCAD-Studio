@@ -539,8 +539,10 @@ fun QuickDimensionDialog(
     currentDensity: QDimDensityPolicy,
     currentArrangement: DimensionArrangementPreference = DimensionArrangementPreference.AUTO_CHAIN,
     alignmentReport: DimensionAlignmentReport? = null,
+    totalDimensionCount: Int = 0,
     onToggleQuickDimension: (Boolean) -> Unit,
     onRefreshQuickDimension: () -> Unit,
+    onClearAllDimensions: () -> Unit = {},
     onExecuteQDim: (
         mode: QDimOperatingMode,
         density: QDimDensityPolicy,
@@ -556,7 +558,58 @@ fun QuickDimensionDialog(
     }
     var density by remember(currentDensity) { mutableStateOf(currentDensity) }
     var arrangement by remember(currentArrangement) { mutableStateOf(currentArrangement) }
-    var replaceAuto by remember { mutableStateOf(true) }
+    var showClearAllConfirm by remember { mutableStateOf(false) }
+
+    if (showClearAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearAllConfirm = false },
+            containerColor = CadPanelSurface,
+            modifier = Modifier.testTag("clear_all_dimensions_confirm_dialog"),
+            title = {
+                Text(
+                    text = "Clear All Dimensions?",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = CadCrimsonAlert,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = if (totalDimensionCount > 0) {
+                        "Remove all $totalDimensionCount dimensions (manual and Quick Dimensions) and auto center marks from this sheet? All drawing geometry, text notes, and leaders will be preserved. You can undo this action in one step."
+                    } else {
+                        "No dimensions are currently present on this sheet. Confirming will reset Quick Dimension state to OFF."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CadTextPrimary
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearAllConfirm = false
+                        onClearAllDimensions()
+                        onDismiss()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CadCrimsonAlert,
+                        contentColor = Color(0xFF1A0808)
+                    ),
+                    modifier = Modifier.testTag("clear_all_dimensions_confirm_button")
+                ) {
+                    Text("Clear All ($totalDimensionCount)", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showClearAllConfirm = false },
+                    modifier = Modifier.testTag("clear_all_dimensions_cancel_button")
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -658,7 +711,7 @@ fun QuickDimensionDialog(
                 }
 
                 Text(
-                    text = "Analyzes sheet geometry, identifies overall bounds, hole diameters (⌀), arc/fillet radii (R), pattern counts, and pitches, and places collision-free ISO/ASME dimensions via DimensionAlignmentEngine.",
+                    text = "Analyzes sheet geometry, identifies overall bounds, local horizontal/vertical shoulders, hole diameters (⌀), arc/fillet radii (R), pattern counts, and pitches, and places collision-free ISO/ASME dimensions via DimensionAlignmentEngine.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = CadTextSecondary
                 )
@@ -741,7 +794,7 @@ fun QuickDimensionDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "DimensionAlignmentEngine Report • Score: ${"%.0f".format(alignmentReport.layoutScore)}/100",
+                            text = "DimensionAlignmentEngine Report • Completeness: ${"%.0f".format(alignmentReport.generationCompletenessScore)}% • Layout: ${"%.0f".format(alignmentReport.layoutQualityScore)}/100",
                             style = MaterialTheme.typography.labelLarge,
                             color = CadCyanPrimary,
                             fontWeight = FontWeight.Bold
@@ -763,25 +816,31 @@ fun QuickDimensionDialog(
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                // Section 37: Destructive Clear All Dimensions Master Action
+                OutlinedButton(
+                    onClick = { showClearAllConfirm = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("clear_all_dimensions_button"),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color(0xFF1A0C0E),
+                        contentColor = CadCrimsonAlert
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CadCrimsonAlert)
                 ) {
                     Text(
-                        text = "Refresh previous auto-dimensions (Manual annotations are always preserved)",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = CadTextSecondary,
-                        modifier = Modifier.weight(1f)
+                        text = "CLEAR ALL DIMENSIONS ($totalDimensionCount)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CadCrimsonAlert,
+                        fontWeight = FontWeight.Bold
                     )
-                    Switch(checked = replaceAuto, onCheckedChange = { replaceAuto = it })
                 }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    onExecuteQDim(mode, density, replaceAuto, arrangement)
+                    onExecuteQDim(mode, density, true, arrangement)
                     onDismiss()
                 },
                 modifier = Modifier.testTag("execute_qdim_confirm_button")

@@ -78,6 +78,25 @@ enum class CollisionClearanceStatus {
     UNRESOLVED_CROWDED
 }
 
+enum class EdgeDimensionStatus {
+    EMITTED_EXPLICIT,
+    COVERED_BY_PRIMARY_OVERALL,
+    DERIVABLE_FROM_OVERALL_AND_FILLETS,
+    SUPPRESSED_BY_SPARSE_POLICY,
+    COVERED_BY_MANUAL_DIMENSION
+}
+
+data class EdgeDimensionDiagnostic(
+    val sourceEntityId: String,
+    val start: Point2D,
+    val end: Point2D,
+    val length: Double,
+    val orientation: String,
+    val status: EdgeDimensionStatus,
+    val emittedDimensionId: String? = null,
+    val reason: String
+)
+
 data class CompletenessFinding(
     val axisOrFeature: String,
     val category: DimensionCompletenessCategory,
@@ -117,7 +136,10 @@ data class DimensionAlignmentReport(
     val unresolvedWarnings: List<String>,
     val layoutScore: Double,
     val arrangementPreference: DimensionArrangementPreference,
-    val densityPolicy: QDimDensityPolicy
+    val densityPolicy: QDimDensityPolicy,
+    val edgeDiagnostics: List<EdgeDimensionDiagnostic> = emptyList(),
+    val generationCompletenessScore: Double = 100.0,
+    val layoutQualityScore: Double = layoutScore
 ) {
     val resolvedDimensions: List<CadEntity.DimensionEntity>
         get() = placements.map { it.dimension }
@@ -336,6 +358,7 @@ object DimensionAlignmentEngine {
         obstacleArcs: List<CadEntity.ArcEntity> = emptyList(),
         obstacleLines: List<CadEntity.LineEntity> = emptyList(),
         completenessFindings: List<CompletenessFinding> = emptyList(),
+        edgeDiagnostics: List<EdgeDimensionDiagnostic> = emptyList(),
         arrangementPreference: DimensionArrangementPreference = DimensionArrangementPreference.AUTO_CHAIN,
         densityPolicy: QDimDensityPolicy = QDimDensityPolicy.BALANCED,
         style: DimensionStyleConfig = DimensionStyleConfig(),
@@ -344,6 +367,24 @@ object DimensionAlignmentEngine {
         displayUnit: CadUnit = CadUnit.MM,
         viewport: ViewportTransform = ViewportTransform(pixelsPerModelUnit = 3.0f)
     ): DimensionAlignmentReport {
+        val requiredEdges = edgeDiagnostics.filter {
+            it.status == EdgeDimensionStatus.EMITTED_EXPLICIT ||
+                it.status == EdgeDimensionStatus.COVERED_BY_PRIMARY_OVERALL ||
+                it.status == EdgeDimensionStatus.COVERED_BY_MANUAL_DIMENSION
+        }
+        val genScore = if (edgeDiagnostics.isEmpty()) {
+            100.0
+        } else {
+            val coveredCount = edgeDiagnostics.count {
+                it.status == EdgeDimensionStatus.EMITTED_EXPLICIT ||
+                    it.status == EdgeDimensionStatus.COVERED_BY_PRIMARY_OVERALL ||
+                    it.status == EdgeDimensionStatus.DERIVABLE_FROM_OVERALL_AND_FILLETS ||
+                    it.status == EdgeDimensionStatus.COVERED_BY_MANUAL_DIMENSION ||
+                    (densityPolicy == QDimDensityPolicy.SPARSE && it.status == EdgeDimensionStatus.SUPPRESSED_BY_SPARSE_POLICY)
+            }
+            (coveredCount.toDouble() / edgeDiagnostics.size.toDouble()) * 100.0
+        }
+
         if (candidateDimensions.isEmpty()) {
             return DimensionAlignmentReport(
                 placements = emptyList(),
@@ -351,16 +392,19 @@ object DimensionAlignmentEngine {
                 unresolvedWarnings = emptyList(),
                 layoutScore = 100.0,
                 arrangementPreference = arrangementPreference,
-                densityPolicy = densityPolicy
+                densityPolicy = densityPolicy,
+                edgeDiagnostics = edgeDiagnostics,
+                generationCompletenessScore = genScore,
+                layoutQualityScore = 100.0
             )
         }
 
         val spanScale = max(overallBounds.width, overallBounds.height).coerceAtLeast(20.0)
-        // Band 1 (closest to geometry): Secondary feature-location dimensions
+        // Band 1 (closest to geometry): Secondary & local feature-location dimensions
         val band1Offset = max(style.baselineTrackSpacingMm, (spanScale * 0.085).coerceIn(8.0, 20.0))
         // Inter-band spacing for parallel tracks and outermost Primary overall envelope
         val interBandSpacing = max(style.baselineTrackSpacingMm * 0.9, (spanScale * 0.075).coerceIn(7.5, 16.0))
-        // Primary overall dimensions always sit in an outer band relative to Band 1
+        // Primary overall dimensions always sit in an outer band relative to inner bands
         val primaryEnvelopeOffset = band1Offset + interBandSpacing
 
         val placements = mutableListOf<AlignedDimensionPlacementResult>()
@@ -373,11 +417,14 @@ object DimensionAlignmentEngine {
             occupiedBoxes.add(estimateTextBoundingBox(manual, spanScale, style))
         }
 
-        // 1. Arrange Horizontal Linear Dimensions (Secondary Feature Band vs Primary Overall Outer Band)
+        // 1. Arrange Horizontal Linear Dimensions (Secondary/Local Feature Band vs Primary Overall Outer Band)
         val horizSecondaryRaw = candidateDimensions.filter {
             it.dimensionType == DimensionType.LINEAR_HORIZONTAL &&
                 it.hierarchyTier != DimensionHierarchyTier.PRIMARY_OVERALL
-        }.sortedBy { min(it.anchor1.x, it.anchor2.x) }
+        }.sortedWith(
+            compareBy<CadEntity.DimensionEntity> { it.hierarchyTier.ordinal }
+                .thenBy { min(it.anchor1.x, it.anchor2.x) }
+        )
 
         val horizPrimaryRaw = candidateDimensions.filter {
             it.dimensionType == DimensionType.LINEAR_HORIZONTAL &&
@@ -407,26 +454,40 @@ object DimensionAlignmentEngine {
                     arrangementMode = DimensionArrangementMode.BASELINE,
                     groupId = "HORIZ_BASELINE_BOTTOM",
                     datumReference = bottomDatumTag,
+                    overallBounds = overallBounds,
+                    interBandSpacing = interBandSpacing,
                     occupiedBoxes = occupiedBoxes,
                     occupiedSegments = occupiedSegments,
+                    obstacleLines = obstacleLines,
                     style = style,
                     precision = precision,
                     storageUnit = storageUnit,
                     displayUnit = displayUnit,
-                    viewport = viewport,
-                    staggerDirection = if (idx % 2 == 0) 1.0 else -1.0
+                    viewport = viewport
                 )
                 placements.add(result)
             }
         } else {
             val bottomChainY = overallBounds.minY - band1Offset
+            val topInnerChainY = overallBounds.maxY + band1Offset
             horizSecondaryRaw.forEachIndexed { idx, dim ->
                 val midX = (dim.anchor1.x + dim.anchor2.x) * 0.5
-                val alignedDim = dim.copy(dimensionLinePoint = Point2D(midX, bottomChainY))
+                val avgAnchorY = (dim.anchor1.y + dim.anchor2.y) * 0.5
+                // Place upper local features (top shoulders) on the upper inner band and lower/recess features on the bottom band
+                val preferredTrackY = when {
+                    dim.hierarchyTier == DimensionHierarchyTier.TERTIARY_LOCAL &&
+                        avgAnchorY >= overallBounds.maxY - 1.0 -> topInnerChainY
+                    dim.hierarchyTier == DimensionHierarchyTier.TERTIARY_LOCAL &&
+                        avgAnchorY > overallBounds.minY + 1.0 && avgAnchorY < overallBounds.maxY - 1.0 -> bottomChainY
+                    else -> bottomChainY
+                }
+                val alignedDim = dim.copy(dimensionLinePoint = Point2D(midX, preferredTrackY))
                 val isVerifiedEqual = completenessFindings.any {
                     it.axisOrFeature == "HORIZONTAL_HOLE_PITCH" && it.isSymmetricOrEqualVerified
                 }
-                val mode = if (isVerifiedEqual && horizSecondaryRaw.size > 2 && idx > 0) {
+                val mode = if (isVerifiedEqual && horizSecondaryRaw.size > 2 && idx > 0 &&
+                    dim.hierarchyTier == DimensionHierarchyTier.SECONDARY_FEATURE
+                ) {
                     DimensionArrangementMode.SYMMETRIC_OR_EQUAL_SPACING
                 } else {
                     DimensionArrangementMode.CONTINUOUS_CHAIN
@@ -434,48 +495,64 @@ object DimensionAlignmentEngine {
                 val result = buildLinearPlacementResult(
                     dim = alignedDim,
                     arrangementMode = mode,
-                    groupId = "HORIZ_CHAIN_BOTTOM",
+                    groupId = if (preferredTrackY >= overallBounds.maxY) "HORIZ_CHAIN_TOP_INNER" else "HORIZ_CHAIN_BOTTOM",
                     datumReference = bottomDatumTag,
+                    overallBounds = overallBounds,
+                    interBandSpacing = interBandSpacing,
                     occupiedBoxes = occupiedBoxes,
                     occupiedSegments = occupiedSegments,
+                    obstacleLines = obstacleLines,
                     style = style,
                     precision = precision,
                     storageUnit = storageUnit,
                     displayUnit = displayUnit,
-                    viewport = viewport,
-                    staggerDirection = if (idx % 2 == 0) -1.0 else 1.0
+                    viewport = viewport
                 )
                 placements.add(result)
             }
         }
 
-        // Primary Overall Horizontal Dimensions: placed in Outer Envelope Band (strictly outside Band 1)
+        // Primary Overall Horizontal Dimensions: placed in Outer Envelope Band (strictly outside inner bands)
+        val maxUpperPlacedY = placements
+            .filter { it.dimension.dimensionType == DimensionType.LINEAR_HORIZONTAL && it.dimLineStartModel.y >= overallBounds.maxY }
+            .maxOfOrNull { it.dimLineStartModel.y }
+        val baseOuterTopY = if (maxUpperPlacedY != null) {
+            max(overallBounds.maxY + primaryEnvelopeOffset, maxUpperPlacedY + interBandSpacing)
+        } else {
+            overallBounds.maxY + primaryEnvelopeOffset
+        }
+
         horizPrimaryRaw.forEachIndexed { idx, dim ->
             val midX = (dim.anchor1.x + dim.anchor2.x) * 0.5
-            val outerTopY = overallBounds.maxY + primaryEnvelopeOffset + (idx * interBandSpacing)
+            val outerTopY = baseOuterTopY + (idx * interBandSpacing)
             val alignedDim = dim.copy(dimensionLinePoint = Point2D(midX, outerTopY))
             val result = buildLinearPlacementResult(
                 dim = alignedDim,
                 arrangementMode = DimensionArrangementMode.OVERALL,
                 groupId = "PRIMARY_ENVELOPE_HORIZ",
                 datumReference = "ENVELOPE_WIDTH_${fmt(overallBounds.minX)}_${fmt(overallBounds.maxX)}",
+                overallBounds = overallBounds,
+                interBandSpacing = interBandSpacing,
                 occupiedBoxes = occupiedBoxes,
                 occupiedSegments = occupiedSegments,
+                obstacleLines = obstacleLines,
                 style = style,
                 precision = precision,
                 storageUnit = storageUnit,
                 displayUnit = displayUnit,
-                viewport = viewport,
-                staggerDirection = 1.0
+                viewport = viewport
             )
             placements.add(result)
         }
 
-        // 2. Arrange Vertical Linear Dimensions (Secondary Feature Band vs Primary Overall Outer Band)
+        // 2. Arrange Vertical Linear Dimensions (Secondary/Local Feature Band vs Primary Overall Outer Band)
         val vertSecondaryRaw = candidateDimensions.filter {
             it.dimensionType == DimensionType.LINEAR_VERTICAL &&
                 it.hierarchyTier != DimensionHierarchyTier.PRIMARY_OVERALL
-        }.sortedBy { min(it.anchor1.y, it.anchor2.y) }
+        }.sortedWith(
+            compareBy<CadEntity.DimensionEntity> { it.hierarchyTier.ordinal }
+                .thenBy { min(it.anchor1.y, it.anchor2.y) }
+        )
 
         val vertPrimaryRaw = candidateDimensions.filter {
             it.dimensionType == DimensionType.LINEAR_VERTICAL &&
@@ -505,26 +582,39 @@ object DimensionAlignmentEngine {
                     arrangementMode = DimensionArrangementMode.BASELINE,
                     groupId = "VERT_BASELINE_RIGHT",
                     datumReference = verticalDatumTag,
+                    overallBounds = overallBounds,
+                    interBandSpacing = interBandSpacing,
                     occupiedBoxes = occupiedBoxes,
                     occupiedSegments = occupiedSegments,
+                    obstacleLines = obstacleLines,
                     style = style,
                     precision = precision,
                     storageUnit = storageUnit,
                     displayUnit = displayUnit,
-                    viewport = viewport,
-                    staggerDirection = if (idx % 2 == 0) 1.0 else -1.0
+                    viewport = viewport
                 )
                 placements.add(result)
             }
         } else {
             val rightChainX = overallBounds.maxX + band1Offset
+            val leftInnerChainX = overallBounds.minX - band1Offset
             vertSecondaryRaw.forEachIndexed { idx, dim ->
                 val midY = (dim.anchor1.y + dim.anchor2.y) * 0.5
-                val alignedDim = dim.copy(dimensionLinePoint = Point2D(rightChainX, midY))
+                val avgAnchorX = (dim.anchor1.x + dim.anchor2.x) * 0.5
+                val preferredTrackX = if (dim.hierarchyTier == DimensionHierarchyTier.TERTIARY_LOCAL &&
+                    avgAnchorX <= overallBounds.center.x
+                ) {
+                    leftInnerChainX
+                } else {
+                    rightChainX
+                }
+                val alignedDim = dim.copy(dimensionLinePoint = Point2D(preferredTrackX, midY))
                 val isVerifiedEqual = completenessFindings.any {
                     it.axisOrFeature == "VERTICAL_HOLE_PITCH" && it.isSymmetricOrEqualVerified
                 }
-                val mode = if (isVerifiedEqual && vertSecondaryRaw.size > 2 && idx > 0) {
+                val mode = if (isVerifiedEqual && vertSecondaryRaw.size > 2 && idx > 0 &&
+                    dim.hierarchyTier == DimensionHierarchyTier.SECONDARY_FEATURE
+                ) {
                     DimensionArrangementMode.SYMMETRIC_OR_EQUAL_SPACING
                 } else {
                     DimensionArrangementMode.CONTINUOUS_CHAIN
@@ -532,39 +622,52 @@ object DimensionAlignmentEngine {
                 val result = buildLinearPlacementResult(
                     dim = alignedDim,
                     arrangementMode = mode,
-                    groupId = "VERT_CHAIN_RIGHT",
+                    groupId = if (preferredTrackX <= overallBounds.minX) "VERT_CHAIN_LEFT_INNER" else "VERT_CHAIN_RIGHT",
                     datumReference = verticalDatumTag,
+                    overallBounds = overallBounds,
+                    interBandSpacing = interBandSpacing,
                     occupiedBoxes = occupiedBoxes,
                     occupiedSegments = occupiedSegments,
+                    obstacleLines = obstacleLines,
                     style = style,
                     precision = precision,
                     storageUnit = storageUnit,
                     displayUnit = displayUnit,
-                    viewport = viewport,
-                    staggerDirection = if (idx % 2 == 0) -1.0 else 1.0
+                    viewport = viewport
                 )
                 placements.add(result)
             }
         }
 
-        // Primary Overall Vertical Dimensions: placed in Outer Envelope Band (strictly outside Band 1)
+        // Primary Overall Vertical Dimensions: placed in Outer Envelope Band (strictly outside inner bands)
+        val minLeftPlacedX = placements
+            .filter { it.dimension.dimensionType == DimensionType.LINEAR_VERTICAL && it.dimLineStartModel.x <= overallBounds.minX }
+            .minOfOrNull { it.dimLineStartModel.x }
+        val baseOuterLeftX = if (minLeftPlacedX != null) {
+            min(overallBounds.minX - primaryEnvelopeOffset, minLeftPlacedX - interBandSpacing)
+        } else {
+            overallBounds.minX - primaryEnvelopeOffset
+        }
+
         vertPrimaryRaw.forEachIndexed { idx, dim ->
             val midY = (dim.anchor1.y + dim.anchor2.y) * 0.5
-            val outerLeftX = overallBounds.minX - primaryEnvelopeOffset - (idx * interBandSpacing)
+            val outerLeftX = baseOuterLeftX - (idx * interBandSpacing)
             val alignedDim = dim.copy(dimensionLinePoint = Point2D(outerLeftX, midY))
             val result = buildLinearPlacementResult(
                 dim = alignedDim,
                 arrangementMode = DimensionArrangementMode.OVERALL,
                 groupId = "PRIMARY_ENVELOPE_VERT",
                 datumReference = "ENVELOPE_HEIGHT_${fmt(overallBounds.minY)}_${fmt(overallBounds.maxY)}",
+                overallBounds = overallBounds,
+                interBandSpacing = interBandSpacing,
                 occupiedBoxes = occupiedBoxes,
                 occupiedSegments = occupiedSegments,
+                obstacleLines = obstacleLines,
                 style = style,
                 precision = precision,
                 storageUnit = storageUnit,
                 displayUnit = displayUnit,
-                viewport = viewport,
-                staggerDirection = 1.0
+                viewport = viewport
             )
             placements.add(result)
         }
@@ -791,27 +894,40 @@ object DimensionAlignmentEngine {
             unresolvedWarnings = unresolvedWarnings,
             layoutScore = score,
             arrangementPreference = arrangementPreference,
-            densityPolicy = densityPolicy
+            densityPolicy = densityPolicy,
+            edgeDiagnostics = edgeDiagnostics,
+            generationCompletenessScore = genScore,
+            layoutQualityScore = score
         )
     }
 
+    /**
+     * Section 32 — Coherent Whole-Dimension Assembly Relocation.
+     * Never moves `textAnchorModel` alone while leaving `dimLineStartModel`/`EndModel` and extension lines behind.
+     * When a collision is detected, shifts the entire dimension assembly to a clean parallel offset track
+     * and recomputes `AdaptiveAnnotationRenderer.computeRenderPlan(currentDim)` so extension lines,
+     * dimension line, arrowheads, and text label stay geometrically attached.
+     */
     private fun buildLinearPlacementResult(
         dim: CadEntity.DimensionEntity,
         arrangementMode: DimensionArrangementMode,
         groupId: String,
         datumReference: String,
+        overallBounds: BoundingBox2D,
+        interBandSpacing: Double,
         occupiedBoxes: MutableList<BoundingBox2D>,
         occupiedSegments: MutableList<Pair<Point2D, Point2D>>,
+        obstacleLines: List<CadEntity.LineEntity>,
         style: DimensionStyleConfig,
         precision: PrecisionFormatConfig,
         storageUnit: CadUnit,
         displayUnit: CadUnit,
-        viewport: ViewportTransform,
-        staggerDirection: Double
+        viewport: ViewportTransform
     ): AlignedDimensionPlacementResult {
         val spanScale = max(abs(dim.anchor2.x - dim.anchor1.x), abs(dim.anchor2.y - dim.anchor1.y)).coerceAtLeast(10.0)
-        val plan = AdaptiveAnnotationRenderer.computeRenderPlan(
-            dim = dim,
+        var currentDim = dim
+        var currentPlan = AdaptiveAnnotationRenderer.computeRenderPlan(
+            dim = currentDim,
             precision = precision,
             storageUnit = storageUnit,
             displayUnit = displayUnit,
@@ -819,58 +935,83 @@ object DimensionAlignmentEngine {
             viewport = viewport
         )
 
-        var textAnchor = plan.textPositionModel
-        var candidateBox = estimatePlanTextBox(plan, spanScale)
+        var candidateBox = estimatePlanTextBox(currentPlan, spanScale)
         var status = CollisionClearanceStatus.CLEAR
         val reviewFlags = mutableListOf<String>()
 
+        fun collidesWithOccupiedOrGeometry(plan: AdaptiveDimensionRenderPlan, box: BoundingBox2D): Boolean {
+            if (occupiedBoxes.any { it.intersects(box, tolerance = 0.8) }) return true
+            for (l in obstacleLines) {
+                if (l.id in currentDim.sourceEntityIds) continue
+                val dText = CadGeometryKernel.distancePointToSegment(plan.textPositionModel, l.start, l.end)
+                if (dText < 2.0) return true
+            }
+            return false
+        }
+
+        val initialLinePt = dim.dimensionLinePoint
+        val trackStep = max(interBandSpacing * 0.85, 7.5)
         var attempt = 0
-        while (attempt < 5 && occupiedBoxes.any { it.intersects(candidateBox, tolerance = 0.8) }) {
+        while (attempt < 6 && collidesWithOccupiedOrGeometry(currentPlan, candidateBox)) {
             attempt++
             status = CollisionClearanceStatus.RESOLVED_BY_RELOCATION
-            val shift = (attempt * 5.5) * staggerDirection
-            textAnchor = if (dim.dimensionType == DimensionType.LINEAR_HORIZONTAL) {
-                Point2D(plan.textPositionModel.x + shift, plan.textPositionModel.y - (attempt * 2.5))
+            currentDim = if (dim.dimensionType == DimensionType.LINEAR_HORIZONTAL) {
+                val outwardSign = if (initialLinePt.y >= overallBounds.center.y) 1.0 else -1.0
+                dim.copy(
+                    dimensionLinePoint = Point2D(
+                        initialLinePt.x,
+                        initialLinePt.y + outwardSign * (attempt * trackStep)
+                    )
+                )
             } else {
-                Point2D(plan.textPositionModel.x + (attempt * 2.5), plan.textPositionModel.y + shift)
+                val outwardSign = if (initialLinePt.x >= overallBounds.center.x) 1.0 else -1.0
+                dim.copy(
+                    dimensionLinePoint = Point2D(
+                        initialLinePt.x + outwardSign * (attempt * trackStep),
+                        initialLinePt.y
+                    )
+                )
             }
-            val w = candidateBox.width
-            val h = candidateBox.height
-            candidateBox = BoundingBox2D(
-                textAnchor.x - w * 0.5,
-                textAnchor.y - h * 0.5,
-                textAnchor.x + w * 0.5,
-                textAnchor.y + h * 0.5
+            currentPlan = AdaptiveAnnotationRenderer.computeRenderPlan(
+                dim = currentDim,
+                precision = precision,
+                storageUnit = storageUnit,
+                displayUnit = displayUnit,
+                style = style,
+                viewport = viewport
             )
+            candidateBox = estimatePlanTextBox(currentPlan, spanScale)
         }
 
         if (occupiedBoxes.any { it.intersects(candidateBox, tolerance = 0.4) }) {
             status = CollisionClearanceStatus.UNRESOLVED_CROWDED
-            reviewFlags.add("UNRESOLVED_PLACEMENT: Dense linear chain label near (${fmt(textAnchor.x)}, ${fmt(textAnchor.y)})")
+            reviewFlags.add(
+                "UNRESOLVED_PLACEMENT: Dense linear chain label near (${fmt(currentPlan.textPositionModel.x)}, ${fmt(currentPlan.textPositionModel.y)})"
+            )
         }
 
         occupiedBoxes.add(candidateBox)
-        occupiedSegments.add(plan.dimLineStartModel to plan.dimLineEndModel)
-        occupiedSegments.add(plan.ext1StartModel to plan.ext1EndModel)
-        occupiedSegments.add(plan.ext2StartModel to plan.ext2EndModel)
+        occupiedSegments.add(currentPlan.dimLineStartModel to currentPlan.dimLineEndModel)
+        occupiedSegments.add(currentPlan.ext1StartModel to currentPlan.ext1EndModel)
+        occupiedSegments.add(currentPlan.ext2StartModel to currentPlan.ext2EndModel)
 
         return AlignedDimensionPlacementResult(
-            dimensionId = dim.id,
-            dimension = dim,
+            dimensionId = currentDim.id,
+            dimension = currentDim,
             arrangementMode = arrangementMode,
             groupId = groupId,
-            hierarchyTier = dim.hierarchyTier,
+            hierarchyTier = currentDim.hierarchyTier,
             datumReference = datumReference,
-            dimLineStartModel = plan.dimLineStartModel,
-            dimLineEndModel = plan.dimLineEndModel,
-            ext1StartModel = plan.ext1StartModel,
-            ext1EndModel = plan.ext1EndModel,
-            ext2StartModel = plan.ext2StartModel,
-            ext2EndModel = plan.ext2EndModel,
-            textAnchorModel = textAnchor,
-            textRotationDeg = plan.textRotationDeg,
-            textPlacementMode = if (plan.textInside) TextPlacementMode.CENTERED_INTERNAL else TextPlacementMode.EXTERNAL_OFFSET,
-            arrowPlacementMode = if (plan.arrowsInside) ArrowPlacementMode.INSIDE else ArrowPlacementMode.OUTSIDE,
+            dimLineStartModel = currentPlan.dimLineStartModel,
+            dimLineEndModel = currentPlan.dimLineEndModel,
+            ext1StartModel = currentPlan.ext1StartModel,
+            ext1EndModel = currentPlan.ext1EndModel,
+            ext2StartModel = currentPlan.ext2StartModel,
+            ext2EndModel = currentPlan.ext2EndModel,
+            textAnchorModel = currentPlan.textPositionModel,
+            textRotationDeg = currentPlan.textRotationDeg,
+            textPlacementMode = if (currentPlan.textInside) TextPlacementMode.CENTERED_INTERNAL else TextPlacementMode.EXTERNAL_OFFSET,
+            arrowPlacementMode = if (currentPlan.arrowsInside) ArrowPlacementMode.INSIDE else ArrowPlacementMode.OUTSIDE,
             completenessCategory = if (arrangementMode == DimensionArrangementMode.SYMMETRIC_OR_EQUAL_SPACING) {
                 DimensionCompletenessCategory.VERIFIED_GEOMETRIC_EQUALITY
             } else {

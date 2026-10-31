@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -72,11 +73,13 @@ import com.example.cad.model.PrecisionFormatConfig
 import com.example.cad.model.VirtualControllerMode
 import com.example.ui.theme.CadAmberSnap
 import com.example.ui.theme.CadBorderHairline
+import com.example.ui.theme.CadBorderStrong
 import com.example.ui.theme.CadCrimsonAlert
 import com.example.ui.theme.CadCyanPrimary
 import com.example.ui.theme.CadEmeraldCrossing
 import com.example.ui.theme.CadPanelElevated
 import com.example.ui.theme.CadPanelSurface
+import com.example.ui.theme.CadSurfaceCard
 import com.example.ui.theme.CadTextMuted
 import com.example.ui.theme.CadTextPrimary
 import com.example.ui.theme.CadTextSecondary
@@ -89,15 +92,125 @@ enum class ControllerDockState {
 }
 
 /**
- * Dedicated Velocity-Sensitive Virtual Cursor Controller (Sections 4 & 14.5 of Specification).
+ * Section 26 — Explicit Relative Touchpad Gesture State Machine.
+ * Guarantees tap-safe, hold-safe, multi-pointer-safe cursor movement:
+ * - `IDLE`: No active pointer on the touchpad.
+ * - `PRESSED_UNDECIDED`: Finger is down within `touchSlop`; emits exact `0.0` movement.
+ * - `DRAG_ACTIVE`: Finger has exceeded `touchSlop`; threshold-crossing jump is discarded and active deltas are scaled by velocity gain.
+ * - `MULTI_POINTER_CANCELLED`: A second finger touched the touchpad; cursor freezes until all pointers lift.
+ * - `CANCELLED`: Gesture was cancelled; emits exact `0.0` movement.
+ */
+enum class TouchpadGestureState {
+    IDLE,
+    PRESSED_UNDECIDED,
+    DRAG_ACTIVE,
+    MULTI_POINTER_CANCELLED,
+    CANCELLED
+}
+
+/**
+ * Pure, deterministic state machine and velocity-gain evaluator for Relative Touchpad mode (Sections 26 & 27).
+ */
+class TouchpadMotionEngine(
+    val touchSlopPx: Float = 10f
+) {
+    companion object {
+        const val MIN_FINE_GAIN = 0.72f
+        const val MAX_FAST_GAIN = 2.60f
+        const val FINE_SPEED_REF_PX_PER_SEC = 110f
+        const val FAST_SPEED_SATURATION_PX_PER_SEC = 1400f
+
+        fun computeVelocityGain(speedPxPerSec: Float): Float {
+            if (!speedPxPerSec.isFinite() || speedPxPerSec <= 0f) return MIN_FINE_GAIN
+            if (speedPxPerSec <= FINE_SPEED_REF_PX_PER_SEC) {
+                val t = (speedPxPerSec / FINE_SPEED_REF_PX_PER_SEC).coerceIn(0f, 1f)
+                return MIN_FINE_GAIN + (1.0f - MIN_FINE_GAIN) * t
+            }
+            val norm = ((speedPxPerSec - FINE_SPEED_REF_PX_PER_SEC) /
+                (FAST_SPEED_SATURATION_PX_PER_SEC - FINE_SPEED_REF_PX_PER_SEC)).coerceIn(0f, 1f)
+            val curved = norm.toDouble().pow(1.25).toFloat()
+            return (1.0f + (MAX_FAST_GAIN - 1.0f) * curved).coerceIn(MIN_FINE_GAIN, MAX_FAST_GAIN)
+        }
+    }
+
+    var state: TouchpadGestureState = TouchpadGestureState.IDLE
+        private set
+
+    var downPosition: Offset = Offset.Zero
+        private set
+
+    var lastTrackedPosition: Offset = Offset.Zero
+        private set
+
+    fun onDown(position: Offset) {
+        state = TouchpadGestureState.PRESSED_UNDECIDED
+        downPosition = position
+        lastTrackedPosition = position
+    }
+
+    /**
+     * Processes a move/pointer sample and returns the effective screen-space delta (in px)
+     * after touch-slop gating and velocity-gain scaling.
+     * Returns `Offset.Zero` for taps, holds, threshold-crossing activation frames, and multi-pointer events.
+     */
+    fun onMoveSample(
+        position: Offset,
+        activePointerCount: Int,
+        isCancelled: Boolean = false,
+        velocityPxPerSec: Float = 0f
+    ): Offset {
+        if (isCancelled) {
+            state = TouchpadGestureState.CANCELLED
+            return Offset.Zero
+        }
+        if (activePointerCount > 1) {
+            state = TouchpadGestureState.MULTI_POINTER_CANCELLED
+            return Offset.Zero
+        }
+        return when (state) {
+            TouchpadGestureState.IDLE,
+            TouchpadGestureState.MULTI_POINTER_CANCELLED,
+            TouchpadGestureState.CANCELLED -> Offset.Zero
+
+            TouchpadGestureState.PRESSED_UNDECIDED -> {
+                val distFromDown = hypot(position.x - downPosition.x, position.y - downPosition.y)
+                if (distFromDown <= touchSlopPx) {
+                    Offset.Zero
+                } else {
+                    // Transition to DRAG_ACTIVE and discard the threshold-crossing displacement
+                    state = TouchpadGestureState.DRAG_ACTIVE
+                    lastTrackedPosition = position
+                    Offset.Zero
+                }
+            }
+
+            TouchpadGestureState.DRAG_ACTIVE -> {
+                val rawDelta = position - lastTrackedPosition
+                lastTrackedPosition = position
+                if (rawDelta == Offset.Zero || !rawDelta.x.isFinite() || !rawDelta.y.isFinite()) {
+                    Offset.Zero
+                } else {
+                    val gain = computeVelocityGain(velocityPxPerSec)
+                    Offset(rawDelta.x * gain, rawDelta.y * gain)
+                }
+            }
+        }
+    }
+
+    fun onAllPointersUp() {
+        state = TouchpadGestureState.IDLE
+    }
+}
+
+/**
+ * Dedicated Velocity-Sensitive Virtual Cursor Controller (Sections 4, 14.4, 24, 26 & 27 of Specification).
  * Supports:
- * - Mode A: Relative Touchpad (finger displacement moves cursor without relocating on lift/re-touch)
- * - Mode B: Velocity-Sensitive Virtual Joystick (deflection magnitude controls speed via fine-control curve,
- *   releasing stops cursor movement immediately with zero drift)
- * - Discrete Step Increment Nudging (10, 5, 1, 0.5, 0.1, 0.01, Custom)
- * - Pick Point / Confirm / Cancel triggers without touching the drawing viewport.
- * - Collapsible Compact Dock (`COMPACT_DOCK`) showing only Touchpad, Joystick, X, Y, and Settings,
- *   with swipe-down to collapse and swipe-up to expand on the header/drag handle.
+ * - Mode A (`RELATIVE_TOUCHPAD`): Full-width Relative Touchpad surface ONLY in the main control area
+ *   (StepNudgePad, step-increment strip, and Pick/Enter/Esc buttons are hidden in Touchpad mode).
+ *   Features strict `TouchpadGestureState` tap/hold immunity and `VelocityTracker` non-linear velocity gain.
+ * - Mode B (`VELOCITY_JOYSTICK`): Preserves full layout (`StepNudgePad`, step-increment strip, joystick,
+ *   `PICK PT`, `Enter`, `Escape`) and 60fps frame-integrated velocity curve unchanged.
+ * - Collapsible Compact Dock (`COMPACT_DOCK`) showing Touchpad, Joystick, X, Y, and Settings.
  */
 @Composable
 fun VirtualCursorControllerDeck(
@@ -126,7 +239,7 @@ fun VirtualCursorControllerDeck(
     var isJoystickHeld by remember { mutableStateOf(false) }
     var headerDragAccumulatorY by remember { mutableFloatStateOf(0f) }
 
-    // 60fps velocity integration loop for Velocity-Sensitive Virtual Joystick
+    // 60fps velocity integration loop for Velocity-Sensitive Virtual Joystick (Unchanged per Section 24.2)
     LaunchedEffect(isJoystickHeld, config.mode) {
         if (!isJoystickHeld || config.mode != VirtualControllerMode.VELOCITY_JOYSTICK) {
             joystickDeflection = Offset.Zero
@@ -223,7 +336,7 @@ fun VirtualCursorControllerDeck(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Touchpad vs Joystick Mode Pill (Opaque surfaces)
+                // Touchpad vs Joystick Mode Pill (Opaque dark surfaces)
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -236,7 +349,12 @@ fun VirtualCursorControllerDeck(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isTouchpad) Color(0xFF0B3544) else CadPanelElevated)
+                            .background(if (isTouchpad) CadSurfaceCard else CadPanelElevated)
+                            .border(
+                                width = 1.dp,
+                                color = if (isTouchpad) CadCyanPrimary else Color.Transparent,
+                                shape = RoundedCornerShape(6.dp)
+                            )
                             .clickable {
                                 onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
                             }
@@ -254,7 +372,7 @@ fun VirtualCursorControllerDeck(
                             Text(
                                 text = "TOUCHPAD",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isTouchpad) CadCyanPrimary else CadTextSecondary,
+                                color = if (isTouchpad) CadTextPrimary else CadTextSecondary,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -262,7 +380,12 @@ fun VirtualCursorControllerDeck(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (!isTouchpad) Color(0xFF3A2B09) else CadPanelElevated)
+                            .background(if (!isTouchpad) CadSurfaceCard else CadPanelElevated)
+                            .border(
+                                width = 1.dp,
+                                color = if (!isTouchpad) CadAmberSnap else Color.Transparent,
+                                shape = RoundedCornerShape(6.dp)
+                            )
                             .clickable {
                                 onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
                             }
@@ -280,7 +403,7 @@ fun VirtualCursorControllerDeck(
                             Text(
                                 text = "JOYSTICK",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (!isTouchpad) CadAmberSnap else CadTextSecondary,
+                                color = if (!isTouchpad) CadTextPrimary else CadTextSecondary,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -292,7 +415,7 @@ fun VirtualCursorControllerDeck(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
                         .background(CadPanelElevated)
-                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(6.dp))
+                        .border(1.dp, CadBorderStrong, RoundedCornerShape(6.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                         .testTag("cursor_coordinate_hud_button"),
                     verticalAlignment = Alignment.CenterVertically,
@@ -301,7 +424,7 @@ fun VirtualCursorControllerDeck(
                     Text(
                         text = "X: ${precision.formatCoord(cursorModelPos.x, storageUnit, displayUnit)}",
                         style = MaterialTheme.typography.labelMedium,
-                        color = CadCyanPrimary,
+                        color = CadTextPrimary,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .clickable { onOpenCoordinateDialog() }
@@ -310,7 +433,7 @@ fun VirtualCursorControllerDeck(
                     Text(
                         text = "Y: ${precision.formatCoord(cursorModelPos.y, storageUnit, displayUnit)}",
                         style = MaterialTheme.typography.labelMedium,
-                        color = CadCyanPrimary,
+                        color = CadTextPrimary,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .clickable { onOpenCoordinateDialog() }
@@ -349,94 +472,216 @@ fun VirtualCursorControllerDeck(
             }
 
             if (!config.isCollapsed) {
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Step Increment Selector Strip
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "STEP:",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadTextMuted
-                    )
-                    config.availableIncrements.forEach { inc ->
-                        val isSelected = kotlin.math.abs(config.stepIncrement - inc) < 1e-6
-                        val label = if (inc >= 1.0 && inc % 1.0 == 0.0) inc.toInt().toString() else inc.toString()
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(if (isSelected) CadCyanPrimary.copy(alpha = 0.2f) else CadPanelElevated)
-                                .border(
-                                    width = 1.dp,
-                                    color = if (isSelected) CadCyanPrimary else CadBorderHairline,
-                                    shape = RoundedCornerShape(5.dp)
-                                )
-                                .clickable { onIncrementSelect(inc) }
-                                .padding(horizontal = 7.dp, vertical = 3.dp)
-                                .testTag("step_increment_$label")
-                        ) {
-                            Text(
-                                text = "$label ${displayUnit.symbol}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isSelected) CadCyanPrimary else CadTextSecondary,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Main Interactive Control Deck: [Left: Step Nudge D-Pad] | [Center: Relative Touchpad or Velocity Joystick] | [Right: Pick / Enter / Esc]
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(116.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // 1. Discrete Step Nudge Cross Pad
-                    StepNudgePad(
-                        stepIncrement = config.stepIncrement,
-                        onStepNudge = onStepNudge,
-                        modifier = Modifier.width(104.dp)
-                    )
-
-                    // 2. Central Relative Touchpad OR Velocity-Sensitive Virtual Joystick
+                if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
+                    // Section 14.4 & 24.1 — Relative Touchpad Mode Layout:
+                    // Main area shows ONLY the full-width relative touchpad surface.
+                    // StepNudgePad, step-increment strip, and Pick/Enter/Esc buttons are omitted completely.
+                    Spacer(modifier = Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxSize()
+                            .fillMaxWidth()
+                            .height(116.dp)
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF0D131D))
+                            .background(CadPanelElevated)
                             .border(
-                                width = 1.5.dp,
-                                color = if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD)
-                                    CadCyanPrimary.copy(alpha = 0.55f)
-                                else
-                                    CadAmberSnap.copy(alpha = 0.65f),
+                                width = 1.dp,
+                                color = CadBorderStrong,
                                 shape = RoundedCornerShape(10.dp)
                             )
                             .semantics {
-                                contentDescription = if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
-                                    "Relative Touchpad Surface"
-                                } else {
-                                    "Velocity-Sensitive Virtual Joystick"
-                                }
+                                contentDescription = "Relative Touchpad Surface"
                             }
-                            .testTag("virtual_cursor_surface")
-                            .pointerInput(config.mode, config.touchpadSensitivity, pixelsPerModelUnit) {
+                            .testTag("controller_touchpad_surface")
+                            .pointerInput(config.touchpadSensitivity, pixelsPerModelUnit) {
+                                val touchSlopPx = viewConfiguration.touchSlop
+                                val motionEngine = TouchpadMotionEngine(touchSlopPx = touchSlopPx)
+                                val velocityTracker = VelocityTracker()
+
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
-                                    val centerPx = Offset(size.width * 0.5f, size.height * 0.5f)
-                                    val maxRadiusPx = (minOf(size.width, size.height) * 0.42f).coerceAtLeast(24f)
+                                    down.consume()
+                                    velocityTracker.resetTracking()
+                                    motionEngine.onDown(down.position)
 
-                                    if (config.mode == VirtualControllerMode.VELOCITY_JOYSTICK) {
+                                    var primaryPointerId = down.id
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val pressedChanges = event.changes.filter { it.pressed }
+                                        val isCancelled = event.changes.any { it.isConsumed }
+
+                                        // Consume all touchpad events immediately so no gesture ever leaks to the sheet
+                                        event.changes.forEach { it.consume() }
+
+                                        if (pressedChanges.isEmpty()) {
+                                            motionEngine.onAllPointersUp()
+                                            velocityTracker.resetTracking()
+                                            break
+                                        }
+
+                                        val activeChange = pressedChanges.firstOrNull { it.id == primaryPointerId }
+                                            ?: pressedChanges.first()
+                                        primaryPointerId = activeChange.id
+
+                                        val prevState = motionEngine.state
+                                        if (prevState == TouchpadGestureState.DRAG_ACTIVE && pressedChanges.size == 1 && !isCancelled) {
+                                            velocityTracker.addPosition(activeChange.uptimeMillis, activeChange.position)
+                                        }
+
+                                        val velocity = if (prevState == TouchpadGestureState.DRAG_ACTIVE && pressedChanges.size == 1) {
+                                            val v = velocityTracker.calculateVelocity()
+                                            hypot(v.x, v.y)
+                                        } else {
+                                            0f
+                                        }
+
+                                        val effectiveDeltaPx = motionEngine.onMoveSample(
+                                            position = activeChange.position,
+                                            activePointerCount = pressedChanges.size,
+                                            isCancelled = isCancelled,
+                                            velocityPxPerSec = velocity
+                                        )
+
+                                        // Seed VelocityTracker at the exact activation sample after crossing touchSlop
+                                        if (prevState == TouchpadGestureState.PRESSED_UNDECIDED &&
+                                            motionEngine.state == TouchpadGestureState.DRAG_ACTIVE
+                                        ) {
+                                            velocityTracker.resetTracking()
+                                            velocityTracker.addPosition(activeChange.uptimeMillis, activeChange.position)
+                                        } else if (motionEngine.state == TouchpadGestureState.MULTI_POINTER_CANCELLED) {
+                                            velocityTracker.resetTracking()
+                                        }
+
+                                        if (effectiveDeltaPx != Offset.Zero) {
+                                            val safeScale = pixelsPerModelUnit.coerceAtLeast(0.1f)
+                                            val dxModel = (effectiveDeltaPx.x * config.touchpadSensitivity / safeScale).toDouble()
+                                            val dyModel = (-effectiveDeltaPx.y * config.touchpadSensitivity / safeScale).toDouble()
+                                            onRelativeTouchpadDelta(dxModel, dyModel)
+                                        }
+                                    }
+                                }
+                            }
+                    ) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val cx = size.width * 0.5f
+                            val cy = size.height * 0.5f
+                            val stepX = size.width / 6f
+                            val stepY = size.height / 4f
+                            for (i in 1..5) {
+                                drawLine(
+                                    color = CadBorderHairline.copy(alpha = 0.5f),
+                                    start = Offset(i * stepX, 0f),
+                                    end = Offset(i * stepX, size.height),
+                                    strokeWidth = 1f
+                                )
+                            }
+                            for (j in 1..3) {
+                                drawLine(
+                                    color = CadBorderHairline.copy(alpha = 0.5f),
+                                    start = Offset(0f, j * stepY),
+                                    end = Offset(size.width, j * stepY),
+                                    strokeWidth = 1f
+                                )
+                            }
+                            drawCircle(
+                                color = CadCyanPrimary.copy(alpha = 0.35f),
+                                radius = 12f,
+                                center = Offset(cx, cy),
+                                style = Stroke(width = 1.5f)
+                            )
+                        }
+
+                        Text(
+                            text = "RELATIVE TOUCHPAD (TAP-SAFE • VELOCITY-SENSITIVE)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = CadTextMuted,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 4.dp)
+                        )
+                    }
+                } else {
+                    // Section 14.4 & 24.2 — Velocity Joystick Mode Layout (Preserved Unchanged):
+                    // Step Increment Selector Strip + [StepNudgePad | Velocity Joystick | PICK PT / Enter / Esc]
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "STEP:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextMuted
+                        )
+                        config.availableIncrements.forEach { inc ->
+                            val isSelected = kotlin.math.abs(config.stepIncrement - inc) < 1e-6
+                            val label = if (inc >= 1.0 && inc % 1.0 == 0.0) inc.toInt().toString() else inc.toString()
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(if (isSelected) CadSurfaceCard else CadPanelElevated)
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (isSelected) CadCyanPrimary else CadBorderHairline,
+                                        shape = RoundedCornerShape(5.dp)
+                                    )
+                                    .clickable { onIncrementSelect(inc) }
+                                    .padding(horizontal = 7.dp, vertical = 3.dp)
+                                    .testTag("step_increment_$label")
+                            ) {
+                                Text(
+                                    text = "$label ${displayUnit.symbol}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isSelected) CadTextPrimary else CadTextSecondary,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(116.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 1. Discrete Step Nudge Cross Pad
+                        StepNudgePad(
+                            stepIncrement = config.stepIncrement,
+                            onStepNudge = onStepNudge,
+                            modifier = Modifier.width(104.dp)
+                        )
+
+                        // 2. Central Velocity-Sensitive Virtual Joystick
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(CadPanelElevated)
+                                .border(
+                                    width = 1.dp,
+                                    color = CadAmberSnap.copy(alpha = 0.65f),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .semantics {
+                                    contentDescription = "Velocity-Sensitive Virtual Joystick"
+                                }
+                                .testTag("controller_joystick_surface")
+                                .pointerInput(config.mode, pixelsPerModelUnit) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        down.consume()
+                                        val centerPx = Offset(size.width * 0.5f, size.height * 0.5f)
+                                        val maxRadiusPx = (minOf(size.width, size.height) * 0.42f).coerceAtLeast(24f)
+
                                         isJoystickHeld = true
                                         val initDelta = down.position - centerPx
                                         val dist = hypot(initDelta.x, initDelta.y)
@@ -447,76 +692,37 @@ fun VirtualCursorControllerDeck(
                                             x = (clamped.x / maxRadiusPx).coerceIn(-1f, 1f),
                                             y = (clamped.y / maxRadiusPx).coerceIn(-1f, 1f)
                                         )
-                                    }
 
-                                    var pointerId = down.id
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull { it.id == pointerId }
-                                            ?: event.changes.firstOrNull()
-                                        if (change == null || !change.pressed) {
-                                            // Immediate stop on release: zero post-release drift
-                                            isJoystickHeld = false
-                                            joystickDeflection = Offset.Zero
-                                            break
-                                        }
-                                        pointerId = change.id
-                                        if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
-                                            val deltaPx = change.positionChange()
-                                            if (deltaPx != Offset.Zero) {
-                                                val safeScale = pixelsPerModelUnit.coerceAtLeast(0.1f)
-                                                val dxModel = (deltaPx.x * config.touchpadSensitivity / safeScale).toDouble()
-                                                val dyModel = (-deltaPx.y * config.touchpadSensitivity / safeScale).toDouble()
-                                                onRelativeTouchpadDelta(dxModel, dyModel)
+                                        var pointerId = down.id
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                                ?: event.changes.firstOrNull()
+                                            if (change == null || !change.pressed) {
+                                                // Immediate stop on release: zero post-release drift
+                                                isJoystickHeld = false
+                                                joystickDeflection = Offset.Zero
+                                                event.changes.forEach { it.consume() }
+                                                break
                                             }
-                                        } else {
+                                            pointerId = change.id
                                             val rawDelta = change.position - centerPx
-                                            val dist = hypot(rawDelta.x, rawDelta.y)
-                                            val clamped = if (dist > maxRadiusPx) {
-                                                rawDelta * (maxRadiusPx / dist)
+                                            val d = hypot(rawDelta.x, rawDelta.y)
+                                            val c = if (d > maxRadiusPx) {
+                                                rawDelta * (maxRadiusPx / d)
                                             } else rawDelta
                                             joystickDeflection = Offset(
-                                                x = (clamped.x / maxRadiusPx).coerceIn(-1f, 1f),
-                                                y = (clamped.y / maxRadiusPx).coerceIn(-1f, 1f)
+                                                x = (c.x / maxRadiusPx).coerceIn(-1f, 1f),
+                                                y = (c.y / maxRadiusPx).coerceIn(-1f, 1f)
                                             )
+                                            change.consume()
                                         }
-                                        change.consume()
                                     }
                                 }
-                            }
-                    ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val cx = size.width * 0.5f
-                            val cy = size.height * 0.5f
-                            if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
-                                // Subtle relative trackpad gridlines
-                                val stepX = size.width / 6f
-                                val stepY = size.height / 4f
-                                for (i in 1..5) {
-                                    drawLine(
-                                        color = CadBorderHairline.copy(alpha = 0.45f),
-                                        start = Offset(i * stepX, 0f),
-                                        end = Offset(i * stepX, size.height),
-                                        strokeWidth = 1f
-                                    )
-                                }
-                                for (j in 1..3) {
-                                    drawLine(
-                                        color = CadBorderHairline.copy(alpha = 0.45f),
-                                        start = Offset(0f, j * stepY),
-                                        end = Offset(size.width, j * stepY),
-                                        strokeWidth = 1f
-                                    )
-                                }
-                                // Center reticle
-                                drawCircle(
-                                    color = CadCyanPrimary.copy(alpha = 0.35f),
-                                    radius = 12f,
-                                    center = Offset(cx, cy),
-                                    style = Stroke(width = 1.5f)
-                                )
-                            } else {
-                                // Velocity Joystick Concentric Fine/Fast Zones
+                        ) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val cx = size.width * 0.5f
+                                val cy = size.height * 0.5f
                                 val maxR = minOf(size.width, size.height) * 0.42f
                                 val fineR = maxR * 0.45f
                                 drawCircle(
@@ -565,92 +771,89 @@ fun VirtualCursorControllerDeck(
                                     center = knobPos
                                 )
                             }
-                        }
 
-                        Text(
-                            text = if (config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD)
-                                "RELATIVE TOUCHPAD (SLIDE TO MOVE CURSOR)"
-                            else
-                                "VELOCITY JOYSTICK (FINE CENTER • STOP ON RELEASE)",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 9.sp,
-                            color = CadTextMuted,
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 4.dp)
-                        )
-                    }
-
-                    // 3. Primary CAD Cursor Action Buttons (PICK POINT / ENTER / ESC)
-                    Column(
-                        modifier = Modifier
-                            .width(96.dp)
-                            .fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Button(
-                            onClick = onPickAtCursor,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1.25f)
-                                .testTag("cursor_pick_point_button"),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = CadCyanPrimary,
-                                contentColor = Color(0xFF002229)
-                            ),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
                             Text(
-                                text = "PICK PT",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
+                                text = "VELOCITY JOYSTICK (FINE CENTER • STOP ON RELEASE)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 9.sp,
+                                color = CadTextMuted,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 4.dp)
                             )
                         }
 
-                        Row(
+                        // 3. Primary CAD Cursor Action Buttons (PICK POINT / ENTER / ESC)
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                .width(96.dp)
+                                .fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            OutlinedButton(
-                                onClick = onFinishCommand,
+                            Button(
+                                onClick = onPickAtCursor,
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxSize()
-                                    .testTag("cursor_enter_button"),
-                                shape = RoundedCornerShape(7.dp),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                    .fillMaxWidth()
+                                    .weight(1.25f)
+                                    .testTag("cursor_pick_point_button"),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = CadCyanPrimary,
+                                    contentColor = Color(0xFF050608)
+                                ),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Finish / Enter Command",
-                                    tint = CadEmeraldCrossing,
-                                    modifier = Modifier.size(16.dp)
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "PICK PT",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
-                            OutlinedButton(
-                                onClick = onCancelCommand,
+
+                            Row(
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxSize()
-                                    .testTag("cursor_esc_button"),
-                                shape = RoundedCornerShape(7.dp),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Cancel / Escape Command",
-                                    tint = CadCrimsonAlert,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                                OutlinedButton(
+                                    onClick = onFinishCommand,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxSize()
+                                        .testTag("cursor_enter_button"),
+                                    shape = RoundedCornerShape(7.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Finish / Enter Command",
+                                        tint = CadEmeraldCrossing,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = onCancelCommand,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxSize()
+                                        .testTag("cursor_esc_button"),
+                                    shape = RoundedCornerShape(7.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Cancel / Escape Command",
+                                        tint = CadCrimsonAlert,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
                         }
                     }
