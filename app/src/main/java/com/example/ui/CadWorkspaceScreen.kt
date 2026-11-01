@@ -1,19 +1,26 @@
 package com.example.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -34,6 +41,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -53,8 +62,11 @@ import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.MoreVert
@@ -76,6 +88,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,10 +96,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -100,8 +115,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.cad.data.CadProjectMetadataEntity
 import com.example.cad.dimension.DimensionArrangementPreference
 import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.io.CadDxfInterchange
@@ -111,11 +128,13 @@ import com.example.cad.model.CadCommandCategory
 import com.example.cad.model.CadCommandCompatibilityCatalog
 import com.example.cad.model.CadCommandId
 import com.example.cad.model.CadEntity
+import com.example.cad.model.CadUnit
 import com.example.cad.model.HatchPattern
 import com.example.cad.model.Point2D
 import com.example.cad.model.UnitChangeMode
 import com.example.cad.model.VirtualControllerMode
 import com.example.cad.model.WorkspaceSpace
+import java.util.Locale
 import com.example.ui.components.CadViewportCanvas
 import com.example.ui.components.CommandCompatibilityMatrixDialog
 import com.example.ui.components.ControllerAndSnapSettingsDialog
@@ -192,6 +211,48 @@ fun CadWorkspaceScreen(
             CadCommandId.QDIM -> viewModel.activateCommand(cmd)
             else -> viewModel.activateCommand(cmd)
         }
+    }
+
+    // SAF Document Picker for Open Drawing (.dxf) from Home Screen (Section 62.2)
+    val dxfFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()?.let { content ->
+                if (content.isNotBlank()) {
+                    viewModel.importDxfString(content)
+                }
+            }
+        }
+    }
+
+    // Section 62: First-Run Home Screen (default launch entry point before workspace)
+    if (uiState.isHomeScreenVisible) {
+        CadHomeScreen(
+            savedProjects = savedProjects,
+            displayUnit = uiState.displayUnit,
+            onNewBlankDrawing = { name, unit ->
+                viewModel.startNewBlankDrawing(name, unit)
+            },
+            onOpenDxfFilePicker = {
+                dxfFilePickerLauncher.launch(arrayOf("*/*"))
+            },
+            onImportDxfContent = { dxfText ->
+                viewModel.importDxfString(dxfText)
+            },
+            onOpenSavedProject = { projectId ->
+                viewModel.loadProject(projectId)
+            },
+            onRenameSavedProject = { projectId, newName ->
+                viewModel.renameSavedProject(projectId, newName)
+            },
+            onDeleteSavedProject = { projectId ->
+                viewModel.deleteSavedProject(projectId)
+            }
+        )
+        return
     }
 
     // Section 16: Full-screen immersive container without status/navigation bar padding reservation
@@ -283,6 +344,7 @@ fun CadWorkspaceScreen(
                         fitDrawingPolicy = uiState.fitDrawingPolicy,
                         canUndo = uiState.canUndo,
                         canRedo = uiState.canRedo,
+                        onOpenHome = viewModel::openHomeScreen,
                         onOpenProjectHub = { showProjectHubDialog = true },
                         onOpenUnits = { showUnitsDialog = true },
                         onToggleWorkspaceSpace = viewModel::toggleWorkspaceSpace,
@@ -318,15 +380,17 @@ fun CadWorkspaceScreen(
                 }
 
                 // 3. Bottom Overlay Stack: Floating Active-Session / Transient Overview Card + Persistent Bottom Control Stack
+                // Section 49: Apply Modifier.imePadding() to the bottom overlay stack so the entire bottom stack rises above the software keyboard.
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
+                        .imePadding()
                         .zIndex(1f)
                         .onSizeChanged { bottomStackHeightPx = it.height.toFloat() }
                 ) {
-                    // Sections 30, 39.2 & 42.5: Floating Overview Overlay above the Function Toolbar
-                    // Hosts persistent Active-Session Command Controls when a command is active, or transient 2.5s Overview when idle.
+                    // Sections 30, 39.2, 42.5 & 59.2: Floating Overview Overlay above the Function Toolbar
+                    // Emerges upward from behind the function/command dock (lower zIndex than the dock).
                     OverviewOverlayCard(
                         uiState = uiState,
                         overview = uiState.activeOverview,
@@ -344,12 +408,14 @@ fun CadWorkspaceScreen(
                         onFinishCommand = { viewModel.finishCurrentCommand() },
                         onCancelCommand = viewModel::cancelCurrentCommand,
                         modifier = Modifier
+                            .zIndex(0f)
                             .padding(horizontal = 10.dp, vertical = 4.dp)
                             .align(Alignment.Start)
                     )
 
                     // Tier 1 & Tier 2: Function/Action Bar + Persistent Command Entry & Prompt Bar
-                    ContextualCommandAndOptionsDock(
+                    Column(modifier = Modifier.zIndex(1f)) {
+                        ContextualCommandAndOptionsDock(
                         uiState = uiState,
                         commandLineInput = commandLineInput,
                         onCommandLineInputChange = { query ->
@@ -416,6 +482,7 @@ fun CadWorkspaceScreen(
                         },
                         onOpenCoordinateDialog = { showCoordinateDialog = true }
                     )
+                    }
                 }
 
                 // 4. Left-Edge Swipe Tool Browser Overlay (5 Category Tiles + Single Selected Category Pane + Translucent Closed Arrow)
@@ -450,6 +517,7 @@ fun CadWorkspaceScreen(
                     fitDrawingPolicy = uiState.fitDrawingPolicy,
                     canUndo = uiState.canUndo,
                     canRedo = uiState.canRedo,
+                    onOpenHome = viewModel::openHomeScreen,
                     onOpenProjectHub = { showProjectHubDialog = true },
                     onOpenUnits = { showUnitsDialog = true },
                     onToggleWorkspaceSpace = viewModel::toggleWorkspaceSpace,
@@ -563,6 +631,7 @@ fun CadWorkspaceScreen(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
+                                .imePadding()
                                 .onSizeChanged { landscapeBottomHeightPx = it.height.toFloat() }
                         ) {
                             OverviewOverlayCard(
@@ -582,51 +651,54 @@ fun CadWorkspaceScreen(
                                 onFinishCommand = { viewModel.finishCurrentCommand() },
                                 onCancelCommand = viewModel::cancelCurrentCommand,
                                 modifier = Modifier
+                                    .zIndex(0f)
                                     .padding(horizontal = 10.dp, vertical = 4.dp)
                                     .align(Alignment.Start)
                             )
 
-                            ContextualCommandAndOptionsDock(
-                                uiState = uiState,
-                                commandLineInput = commandLineInput,
-                                onCommandLineInputChange = { query ->
-                                    commandLineInput = query
-                                    viewModel.updateCommandInputQuery(query)
-                                },
-                                onOpenCommandEditing = {
-                                    viewModel.openCommandLineEditing(commandLineInput)
-                                },
-                                onCloseCommandEditing = {
-                                    commandLineInput = ""
-                                    viewModel.closeCommandLineEditing()
-                                },
-                                onSubmitCommandLine = {
-                                    viewModel.submitCommandOrCoordinateInput(commandLineInput)
-                                    commandLineInput = ""
-                                },
-                                onSelectCommand = { cmd ->
-                                    commandLineInput = ""
-                                    handleCommandSelection(cmd)
-                                },
-                                onSelectSubOption = viewModel::setCommandSubOption,
-                                onParameterChange = viewModel::setCommandParameterValue,
-                                onToggleQDim = viewModel::setQuickDimensionEnabled,
-                                onRefreshQDim = viewModel::refreshQuickDimensions,
-                                onSelectQDimDensity = viewModel::setQDimDensity,
-                                onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                                onOpenQDimDialog = { showQDimDialog = true },
-                                onOpenActionLauncher = { showActionLauncherDialog = true },
-                                onToggleToolDrawer = viewModel::toggleToolDrawer,
-                                onPickPointAtCursor = viewModel::pickPointAtCursor,
-                                onFitDrawing = { viewModel.fitDrawing() },
-                                onOpenProperties = { showPropertiesDialog = true },
-                                onDeleteSelected = viewModel::deleteSelectedEntities,
-                                onClearSelection = viewModel::clearSelection,
-                                onSelectByLayer = viewModel::selectEntitiesByLayer,
-                                onSelectByType = viewModel::selectEntitiesByType,
-                                onFinishCommand = { viewModel.finishCurrentCommand() },
-                                onCancelCommand = viewModel::cancelCurrentCommand
-                            )
+                            Box(modifier = Modifier.zIndex(1f)) {
+                                ContextualCommandAndOptionsDock(
+                                    uiState = uiState,
+                                    commandLineInput = commandLineInput,
+                                    onCommandLineInputChange = { query ->
+                                        commandLineInput = query
+                                        viewModel.updateCommandInputQuery(query)
+                                    },
+                                    onOpenCommandEditing = {
+                                        viewModel.openCommandLineEditing(commandLineInput)
+                                    },
+                                    onCloseCommandEditing = {
+                                        commandLineInput = ""
+                                        viewModel.closeCommandLineEditing()
+                                    },
+                                    onSubmitCommandLine = {
+                                        viewModel.submitCommandOrCoordinateInput(commandLineInput)
+                                        commandLineInput = ""
+                                    },
+                                    onSelectCommand = { cmd ->
+                                        commandLineInput = ""
+                                        handleCommandSelection(cmd)
+                                    },
+                                    onSelectSubOption = viewModel::setCommandSubOption,
+                                    onParameterChange = viewModel::setCommandParameterValue,
+                                    onToggleQDim = viewModel::setQuickDimensionEnabled,
+                                    onRefreshQDim = viewModel::refreshQuickDimensions,
+                                    onSelectQDimDensity = viewModel::setQDimDensity,
+                                    onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
+                                    onOpenQDimDialog = { showQDimDialog = true },
+                                    onOpenActionLauncher = { showActionLauncherDialog = true },
+                                    onToggleToolDrawer = viewModel::toggleToolDrawer,
+                                    onPickPointAtCursor = viewModel::pickPointAtCursor,
+                                    onFitDrawing = { viewModel.fitDrawing() },
+                                    onOpenProperties = { showPropertiesDialog = true },
+                                    onDeleteSelected = viewModel::deleteSelectedEntities,
+                                    onClearSelection = viewModel::clearSelection,
+                                    onSelectByLayer = viewModel::selectEntitiesByLayer,
+                                    onSelectByType = viewModel::selectEntitiesByType,
+                                    onFinishCommand = { viewModel.finishCurrentCommand() },
+                                    onCancelCommand = viewModel::cancelCurrentCommand
+                                )
+                            }
                         }
                     }
 
@@ -635,6 +707,7 @@ fun CadWorkspaceScreen(
                         modifier = Modifier
                             .width(308.dp)
                             .fillMaxHeight()
+                            .imePadding()
                             .background(CadPanelSurface)
                             .border(1.dp, CadBorderHairline),
                         verticalArrangement = Arrangement.SpaceBetween
@@ -880,6 +953,7 @@ fun CadWorkspaceScreen(
             onLoadProject = viewModel::loadProject,
             onCreateBlankProject = viewModel::createNewBlankProject,
             onSaveCurrentProject = viewModel::saveCurrentProject,
+            onDeleteProject = viewModel::deleteSavedProject,
             onExportShareDxf = { viewModel.exportAndShareDxf(context) },
             onExportSharePdf = { viewModel.exportAndSharePdf(context) },
             onExportShareSvg = { viewModel.exportAndShareSvg(context) },
@@ -900,83 +974,89 @@ private object Point2DDisplayAdapter {
     }
 }
 
-// --- Section 4: Animated Transient Notification Banner ---
+// --- Section 4 & Section 59.2: Top Anchor-Origin Transient Notification Banner ---
 
 @Composable
 private fun TransientNotificationBanner(
     notification: TransientNotification?,
     onDismiss: () -> Unit
 ) {
-    AnimatedVisibility(
-        visible = notification != null,
-        enter = slideInVertically(animationSpec = tween(200)) { -it } + fadeIn(animationSpec = tween(200)),
-        exit = slideOutVertically(animationSpec = tween(180)) { -it } + fadeOut(animationSpec = tween(180))
-    ) {
-        val currentNotification = notification ?: return@AnimatedVisibility
-        AnimatedContent(
-            targetState = currentNotification,
-            contentKey = { it.id },
-            transitionSpec = {
-                (fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(160)) { -it / 2 })
-                    .togetherWith(
-                        fadeOut(animationSpec = tween(140)) + slideOutVertically(animationSpec = tween(140)) { -it / 2 }
-                    )
-            },
-            label = "TopNotificationReplacementTransition"
-        ) { item ->
-            val accentColor = when (item.category) {
-                NotificationCategory.SUCCESS -> CadEmeraldCrossing
-                NotificationCategory.WARNING -> CadAmberSnap
-                NotificationCategory.ERROR -> CadRedAlert
-                NotificationCategory.INFO -> CadCyanPrimary
-            }
-            val bgTint = when (item.category) {
-                NotificationCategory.SUCCESS -> OpaqueEmeraldBadgeBg
-                NotificationCategory.WARNING -> OpaqueAmberBadgeBg
-                NotificationCategory.ERROR -> OpaqueRedBadgeBg
-                NotificationCategory.INFO -> OpaqueCyanBadgeBg
-            }
+    Box(modifier = Modifier.fillMaxWidth().clipToBounds()) {
+        AnimatedVisibility(
+            visible = notification != null,
+            enter = slideInVertically(animationSpec = tween(220)) { -it } +
+                fadeIn(animationSpec = tween(200)) +
+                scaleIn(initialScale = 0.98f, animationSpec = tween(220)),
+            exit = slideOutVertically(animationSpec = tween(190)) { -it } +
+                fadeOut(animationSpec = tween(180)) +
+                scaleOut(targetScale = 0.98f, animationSpec = tween(190))
+        ) {
+            val currentNotification = notification ?: return@AnimatedVisibility
+            AnimatedContent(
+                targetState = currentNotification,
+                contentKey = { it.id },
+                transitionSpec = {
+                    (fadeIn(animationSpec = tween(160)) + slideInVertically(animationSpec = tween(160)) { -it / 2 })
+                        .togetherWith(
+                            fadeOut(animationSpec = tween(140)) + slideOutVertically(animationSpec = tween(140)) { -it / 2 }
+                        )
+                },
+                label = "TopNotificationReplacementTransition"
+            ) { item ->
+                val accentColor = when (item.category) {
+                    NotificationCategory.SUCCESS -> CadEmeraldCrossing
+                    NotificationCategory.WARNING -> CadAmberSnap
+                    NotificationCategory.ERROR -> CadRedAlert
+                    NotificationCategory.INFO -> CadCyanPrimary
+                }
+                val bgTint = when (item.category) {
+                    NotificationCategory.SUCCESS -> OpaqueEmeraldBadgeBg
+                    NotificationCategory.WARNING -> OpaqueAmberBadgeBg
+                    NotificationCategory.ERROR -> OpaqueRedBadgeBg
+                    NotificationCategory.INFO -> OpaqueCyanBadgeBg
+                }
 
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, accentColor, RoundedCornerShape(0.dp))
-                    .testTag("transient_notification_banner"),
-                color = bgTint
-            ) {
-                Row(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .border(1.dp, accentColor, RoundedCornerShape(0.dp))
+                        .testTag("transient_notification_banner"),
+                    color = bgTint
                 ) {
-                    Text(
-                        text = item.message,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = accentColor,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
+                    Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(CadSurfaceCard)
-                            .border(1.dp, CadBorderHairline, RoundedCornerShape(4.dp))
-                            .clickable(onClick = onDismiss)
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                            .testTag("notification_dismiss_button"),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Dismiss notification",
-                            tint = CadTextPrimary,
-                            modifier = Modifier.size(13.dp)
+                        Text(
+                            text = item.message,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = accentColor,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(CadSurfaceCard)
+                                .border(1.dp, CadBorderHairline, RoundedCornerShape(4.dp))
+                                .clickable(onClick = onDismiss)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .testTag("notification_dismiss_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss notification",
+                                tint = CadTextPrimary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -996,6 +1076,7 @@ private fun TopEngineeringHeaderBar(
     fitDrawingPolicy: FitDrawingPolicy,
     canUndo: Boolean,
     canRedo: Boolean,
+    onOpenHome: () -> Unit,
     onOpenProjectHub: () -> Unit,
     onOpenUnits: () -> Unit,
     onToggleWorkspaceSpace: () -> Unit,
@@ -1026,6 +1107,25 @@ private fun TopEngineeringHeaderBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
+            // Home Screen Button
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(CadPanelElevated)
+                    .border(1.dp, CadBorderHairline, RoundedCornerShape(6.dp))
+                    .clickable(onClick = onOpenHome)
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
+                    .testTag("top_home_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Home,
+                    contentDescription = "Return to Home Screen",
+                    tint = CadCyanPrimary,
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+
             // Project Hub Button
             Row(
                 modifier = Modifier
@@ -1717,53 +1817,58 @@ private fun OverviewOverlayCard(
     val isActiveSession = uiState.isActiveCommandSession
     val isVisible = isActiveSession || overview != null
 
-    AnimatedVisibility(
-        visible = isVisible,
-        enter = fadeIn(animationSpec = tween(200)) + slideInVertically(animationSpec = tween(200)) { it / 3 },
-        exit = fadeOut(animationSpec = tween(180)) + slideOutVertically(animationSpec = tween(180)) { it / 3 },
-        modifier = modifier
-    ) {
-        if (isActiveSession) {
-            // Active-Session Mode: Persists continuously while the command/session is active
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, CadAmberSnap, RoundedCornerShape(8.dp))
-                    .testTag("overview_overlay_card"),
-                shape = RoundedCornerShape(8.dp),
-                color = CadSurfaceCard
-            ) {
-                Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    ActiveCommandContextBar(
-                        uiState = uiState,
-                        onSelectSubOption = onSelectSubOption,
-                        onParameterChange = onParameterChange,
-                        onToggleQDim = onToggleQDim,
-                        onRefreshQDim = onRefreshQDim,
-                        onSelectQDimDensity = onSelectQDimDensity,
-                        onSelectQDimArrangement = onSelectQDimArrangement,
-                        onOpenQDimDialog = onOpenQDimDialog,
-                        onOpenCommandEditing = onOpenCommandEditing,
-                        onSelectByLayer = onSelectByLayer,
-                        onSelectByType = onSelectByType,
-                        onFinishCommand = onFinishCommand,
-                        onCancelCommand = onCancelCommand
-                    )
-                }
-            }
-        } else if (overview != null) {
-            // Transient Guidance Mode: Fades in, holds ~2.5s, fades out when no session is active
-            AnimatedContent(
-                targetState = overview,
-                contentKey = { it.id },
-                transitionSpec = {
-                    (fadeIn(animationSpec = tween(180)) + slideInVertically(animationSpec = tween(180)) { it / 3 })
-                        .togetherWith(
-                            fadeOut(animationSpec = tween(160)) + slideOutVertically(animationSpec = tween(160)) { -it / 3 }
+    // Section 59.2: Anchor-Origin Reveal & Retract Motion from behind the Function/Command Toolbar
+    Box(modifier = modifier.clipToBounds()) {
+        AnimatedVisibility(
+            visible = isVisible,
+            enter = slideInVertically(animationSpec = tween(220)) { it } +
+                fadeIn(animationSpec = tween(200)) +
+                scaleIn(initialScale = 0.98f, animationSpec = tween(220)),
+            exit = slideOutVertically(animationSpec = tween(190)) { it } +
+                fadeOut(animationSpec = tween(180)) +
+                scaleOut(targetScale = 0.98f, animationSpec = tween(190))
+        ) {
+            if (isActiveSession) {
+                // Active-Session Mode: Persists continuously while the command/session is active
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, CadAmberSnap, RoundedCornerShape(8.dp))
+                        .testTag("overview_overlay_card"),
+                    shape = RoundedCornerShape(8.dp),
+                    color = CadSurfaceCard
+                ) {
+                    Box(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        ActiveCommandContextBar(
+                            uiState = uiState,
+                            onSelectSubOption = onSelectSubOption,
+                            onParameterChange = onParameterChange,
+                            onToggleQDim = onToggleQDim,
+                            onRefreshQDim = onRefreshQDim,
+                            onSelectQDimDensity = onSelectQDimDensity,
+                            onSelectQDimArrangement = onSelectQDimArrangement,
+                            onOpenQDimDialog = onOpenQDimDialog,
+                            onOpenCommandEditing = onOpenCommandEditing,
+                            onSelectByLayer = onSelectByLayer,
+                            onSelectByType = onSelectByType,
+                            onFinishCommand = onFinishCommand,
+                            onCancelCommand = onCancelCommand
                         )
-                },
-                label = "OverviewOverlayTransientTransition"
-            ) { activeEvent ->
+                    }
+                }
+            } else if (overview != null) {
+                // Transient Guidance Mode: Fades in, holds ~2.5s, fades out when no session is active
+                AnimatedContent(
+                    targetState = overview,
+                    contentKey = { it.id },
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(180)) + slideInVertically(animationSpec = tween(180)) { it })
+                            .togetherWith(
+                                fadeOut(animationSpec = tween(160)) + slideOutVertically(animationSpec = tween(160)) { it }
+                            )
+                    },
+                    label = "OverviewOverlayTransientTransition"
+                ) { activeEvent ->
                 val borderCol = when (activeEvent.category) {
                     NotificationCategory.SUCCESS -> CadEmeraldCrossing
                     NotificationCategory.WARNING -> CadAmberSnap
@@ -1821,6 +1926,7 @@ private fun OverviewOverlayCard(
             }
         }
     }
+}
 }
 
 // --- Sections 14.2 & 19: Persistent 3-Tier Bottom Control Stack (Tier 1 Function Bar + Tier 2 Persistent Command Entry) ---
@@ -2017,7 +2123,21 @@ private fun ContextualCommandAndOptionsDock(
             }
 
             // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
-            // Continuously visible in idle, typing, and active-command states without auto-focusing on launch.
+            // Section 61: Idle state shows only the continuous full-width text field; engaged state reveals the
+            // Stacked Send / Cancel Action-Card Compartment on the right side.
+            var isCommandFieldFocused by remember { mutableStateOf(false) }
+            val isCommandEntryEngaged = isCommandFieldFocused ||
+                commandLineInput.isNotEmpty() ||
+                uiState.commandPanelState is CommandPanelState.Editing ||
+                isRunningActiveCommand
+
+            var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
+            LaunchedEffect(isCommandEntryEngaged) {
+                if (!isCommandEntryEngaged) {
+                    isSendCardInFront = true
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2025,31 +2145,6 @@ private fun ContextualCommandAndOptionsDock(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(OpaqueCyanBadgeBg)
-                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(5.dp))
-                        .clickable(onClick = onOpenCommandEditing)
-                        .padding(horizontal = 7.dp, vertical = 5.dp)
-                        .testTag("cmd_activate_button"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Terminal,
-                        contentDescription = "Command Input",
-                        tint = CadCyanPrimary,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Text(
-                        text = "CMD:",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadCyanPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
                 OutlinedTextField(
                     value = commandLineInput,
                     onValueChange = onCommandLineInputChange,
@@ -2064,47 +2159,183 @@ private fun ContextualCommandAndOptionsDock(
                     },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onSubmitCommandLine() }),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (commandLineInput.isNotBlank()) {
+                            onSubmitCommandLine()
+                        }
+                    }),
                     textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
                     modifier = Modifier
                         .weight(1f)
                         .height(46.dp)
+                        .onFocusChanged { focusState ->
+                            isCommandFieldFocused = focusState.isFocused
+                            if (focusState.isFocused) {
+                                onOpenCommandEditing()
+                            }
+                        }
                         .testTag("command_line_input_field")
                 )
 
-                IconButton(
-                    onClick = onSubmitCommandLine,
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(OpaqueCyanBadgeBg)
-                        .border(1.dp, CadCyanPrimary, RoundedCornerShape(7.dp))
-                        .testTag("command_line_submit_button")
+                // Section 61: Stacked Send / Cancel Action-Card Control on Right Side of Command Bar
+                AnimatedVisibility(
+                    visible = isCommandEntryEngaged,
+                    enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(180)),
+                    exit = fadeOut(animationSpec = tween(160)) + shrinkHorizontally(animationSpec = tween(160))
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Send,
-                        contentDescription = "Execute Command or Coordinate",
-                        tint = CadCyanPrimary,
-                        modifier = Modifier.size(17.dp)
+                    val sendOffsetX by animateDpAsState(
+                        targetValue = if (isSendCardInFront) 0.dp else (-6).dp,
+                        animationSpec = tween(180),
+                        label = "SendCardOffsetX"
                     )
-                }
+                    val sendRotation by animateFloatAsState(
+                        targetValue = if (isSendCardInFront) 0f else -7f,
+                        animationSpec = tween(180),
+                        label = "SendCardRotation"
+                    )
+                    val sendScale by animateFloatAsState(
+                        targetValue = if (isSendCardInFront) 1f else 0.91f,
+                        animationSpec = tween(180),
+                        label = "SendCardScale"
+                    )
+                    val sendAlpha by animateFloatAsState(
+                        targetValue = if (isSendCardInFront) 1f else 0.68f,
+                        animationSpec = tween(180),
+                        label = "SendCardAlpha"
+                    )
 
-                if (commandLineInput.isNotEmpty() || uiState.commandPanelState is CommandPanelState.Editing) {
-                    IconButton(
-                        onClick = onCloseCommandEditing,
+                    val cancelOffsetX by animateDpAsState(
+                        targetValue = if (!isSendCardInFront) 0.dp else (-6).dp,
+                        animationSpec = tween(180),
+                        label = "CancelCardOffsetX"
+                    )
+                    val cancelRotation by animateFloatAsState(
+                        targetValue = if (!isSendCardInFront) 0f else -7f,
+                        animationSpec = tween(180),
+                        label = "CancelCardRotation"
+                    )
+                    val cancelScale by animateFloatAsState(
+                        targetValue = if (!isSendCardInFront) 1f else 0.91f,
+                        animationSpec = tween(180),
+                        label = "CancelCardScale"
+                    )
+                    val cancelAlpha by animateFloatAsState(
+                        targetValue = if (!isSendCardInFront) 1f else 0.68f,
+                        animationSpec = tween(180),
+                        label = "CancelCardAlpha"
+                    )
+
+                    Box(
                         modifier = Modifier
-                            .size(38.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(CadPanelElevated)
-                            .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
-                            .testTag("cmd_close_button")
+                            .width(50.dp)
+                            .height(42.dp)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(
+                                        requireUnconsumed = false,
+                                        pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                                    )
+                                    val startPos = down.position
+                                    val touchSlop = viewConfiguration.touchSlop.coerceAtLeast(10f)
+                                    var swapped = false
+                                    while (true) {
+                                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                                        if (change == null || !change.pressed) break
+                                        val dx = change.position.x - startPos.x
+                                        val dy = change.position.y - startPos.y
+                                        if (!swapped && dy >= touchSlop && dy > abs(dx) * 1.25f) {
+                                            swapped = true
+                                            change.consume()
+                                            isSendCardInFront = !isSendCardInFront
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                            .testTag("command_action_card_stack"),
+                        contentAlignment = Alignment.CenterEnd
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Clear Command Input",
-                            tint = CadTextSecondary,
-                            modifier = Modifier.size(17.dp)
-                        )
+                        // Cancel Card (Red X — peeks behind on the left when Send is front; foreground when swapped)
+                        Surface(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .offset(x = cancelOffsetX, y = if (!isSendCardInFront) 0.dp else 1.dp)
+                                .zIndex(if (!isSendCardInFront) 2f else 1f)
+                                .graphicsLayer {
+                                    rotationZ = cancelRotation
+                                    scaleX = cancelScale
+                                    scaleY = cancelScale
+                                    alpha = cancelAlpha
+                                }
+                                .border(
+                                    1.2.dp,
+                                    CadRedAlert,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable {
+                                    if (!isSendCardInFront) {
+                                        if (isRunningActiveCommand) {
+                                            onCancelCommand()
+                                        }
+                                        onCloseCommandEditing()
+                                    } else {
+                                        isSendCardInFront = false
+                                    }
+                                }
+                                .testTag("command_card_cancel"),
+                            shape = RoundedCornerShape(8.dp),
+                            color = OpaqueRedBadgeBg
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Cancel Active Command or Clear Input",
+                                    tint = CadRedAlert,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        }
+
+                        // Send Card (Green Send Arrow — foreground by default; peeks behind on the left when swapped)
+                        Surface(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .offset(x = sendOffsetX, y = if (isSendCardInFront) 0.dp else 1.dp)
+                                .zIndex(if (isSendCardInFront) 2f else 1f)
+                                .graphicsLayer {
+                                    rotationZ = sendRotation
+                                    scaleX = sendScale
+                                    scaleY = sendScale
+                                    alpha = sendAlpha
+                                }
+                                .border(
+                                    1.2.dp,
+                                    CadEmeraldCrossing,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable {
+                                    if (isSendCardInFront) {
+                                        if (commandLineInput.isNotBlank()) {
+                                            onSubmitCommandLine()
+                                        }
+                                    } else {
+                                        isSendCardInFront = true
+                                    }
+                                }
+                                .testTag("command_card_send"),
+                            shape = RoundedCornerShape(8.dp),
+                            color = OpaqueEmeraldBadgeBg
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Send,
+                                    contentDescription = "Execute Command or Coordinate",
+                                    tint = CadEmeraldCrossing,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2151,14 +2382,20 @@ private fun ActiveCommandContextBar(
     ) || (uiState.activeCommand == CadCommandId.RECTANGLE && uiState.commandSubOption != "Sharp") ||
         (uiState.activeCommand == CadCommandId.CIRCLE && uiState.commandSubOption == "TTR")
 
-    val paramLabel = when (uiState.activeCommand) {
-        CadCommandId.FILLET -> "MANUAL RADIUS (R):"
-        CadCommandId.CHAMFER -> "MANUAL CHAMFER (D):"
-        CadCommandId.OFFSET -> "MANUAL OFFSET (d):"
-        CadCommandId.POLYGON -> "SIDES:"
-        CadCommandId.RECTANGLE -> if (uiState.commandSubOption == "Fillet") "CORNER R:" else "CORNER D:"
-        else -> "MANUAL VAL:"
-    }
+    // Section 51 & 55.2: Standardized generic parameter label "VAL="
+    val paramLabel = "VAL="
+    val fixedValSummary = if (needsNumericParam) {
+        if (uiState.activeCommand == CadCommandId.POLYGON) {
+            "VAL=${uiState.commandParameterValue.toInt().coerceIn(3, 64)}"
+        } else {
+            val formattedVal = if (uiState.commandParameterValue % 1.0 == 0.0) {
+                String.format(Locale.US, "%.2f", uiState.commandParameterValue)
+            } else {
+                String.format(Locale.US, "%.2f", uiState.commandParameterValue)
+            }
+            "VAL=$formattedVal ${uiState.displayUnit.symbol}"
+        }
+    } else null
 
     var manualParamText by rememberSaveable(uiState.activeCommand) {
         mutableStateOf(
@@ -2188,7 +2425,10 @@ private fun ActiveCommandContextBar(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        // Active Command Prompt Header Row
+        // Section 51 & 55.2: Active Command Prompt Header Row
+        // 1. Stationary yellow command badge
+        // 2. Stationary fixed VAL= badge (when numeric parameter applies)
+        // 3. Clipped action-only scrolling marquee (carries ONLY the step action instruction)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -2207,37 +2447,63 @@ private fun ActiveCommandContextBar(
                         .background(OpaqueAmberBadgeBg)
                         .border(1.dp, CadAmberSnap, RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("active_command_name_badge")
                 ) {
                     Text(
                         text = uiState.activeCommand.commandName,
                         style = MaterialTheme.typography.labelSmall,
                         color = CadAmberSnap,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
                     )
                 }
-                Text(
-                    text = uiState.commandPromptBanner,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CadCyanPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+
+                if (fixedValSummary != null) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(CadPanelElevated)
+                            .border(1.dp, CadAmberSnap, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .testTag("active_command_fixed_val_badge")
+                    ) {
+                        Text(
+                            text = fixedValSummary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadAmberSnap,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clipToBounds()
+                ) {
+                    key(uiState.activeCommand, uiState.commandStepPoints.size, uiState.commandSubOption) {
+                        Text(
+                            text = uiState.activeActionPrompt,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadCyanPrimary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .basicMarquee(
+                                    iterations = Int.MAX_VALUE,
+                                    initialDelayMillis = 1200,
+                                    repeatDelayMillis = 1200
+                                )
+                                .testTag("active_command_marquee_text")
+                        )
+                    }
+                }
             }
 
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Quick CMD / Coordinate entry trigger while command is active
-                OpaqueChipButton(
-                    label = "CMD / X,Y",
-                    active = false,
-                    activeBg = OpaqueCyanBadgeBg,
-                    activeBorder = CadCyanPrimary,
-                    textColor = CadCyanPrimary,
-                    tag = "cmd_activate_button",
-                    onClick = onOpenCommandEditing
-                )
+            if (uiState.commandStepPoints.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(5.dp))
@@ -2247,18 +2513,12 @@ private fun ActiveCommandContextBar(
                         .padding(horizontal = 7.dp, vertical = 3.dp)
                         .testTag("active_cmd_finish_button")
                 ) {
-                    Icon(Icons.Default.Check, contentDescription = "Finish Command", tint = CadEmeraldCrossing, modifier = Modifier.size(14.dp))
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(OpaqueRedBadgeBg)
-                        .border(1.dp, CadRedAlert, RoundedCornerShape(5.dp))
-                        .clickable(onClick = onCancelCommand)
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
-                        .testTag("active_cmd_cancel_button")
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = "Cancel Command", tint = CadRedAlert, modifier = Modifier.size(14.dp))
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = "Finish Command",
+                        tint = CadEmeraldCrossing,
+                        modifier = Modifier.size(14.dp)
+                    )
                 }
             }
         }
@@ -2777,3 +3037,411 @@ private fun ActionLauncherDialog(
         }
     }
 }
+
+// --- Section 62: First-Run Home Screen (New Drawing, Open Drawing .dxf, Saved Drawings) ---
+
+@Composable
+private fun CadHomeScreen(
+    savedProjects: List<CadProjectMetadataEntity>,
+    displayUnit: CadUnit,
+    onNewBlankDrawing: (String, CadUnit) -> Unit,
+    onOpenDxfFilePicker: () -> Unit,
+    onImportDxfContent: (String) -> Unit,
+    onOpenSavedProject: (String) -> Unit,
+    onRenameSavedProject: (String, String) -> Unit,
+    onDeleteSavedProject: (String) -> Unit
+) {
+    var newDrawingName by rememberSaveable { mutableStateOf("Untitled Drawing") }
+    var selectedUnitName by rememberSaveable { mutableStateOf(displayUnit.name) }
+    val selectedUnit = remember(selectedUnitName) {
+        CadUnit.entries.firstOrNull { it.name == selectedUnitName } ?: CadUnit.MM
+    }
+    var showInlineDxfImport by rememberSaveable { mutableStateOf(false) }
+    var dxfImportBuffer by rememberSaveable { mutableStateOf("") }
+    var renamingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameText by rememberSaveable { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CadModelSpaceBg)
+            .windowInsetsPadding(WindowInsets.displayCutout)
+            .imePadding()
+            .testTag("cad_home_screen"),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 620.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // App Branding Header
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, CadBorderStrong, RoundedCornerShape(12.dp)),
+                shape = RoundedCornerShape(12.dp),
+                color = CadPanelSurface
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "PRECISIONCAD STUDIO",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = CadCyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "2D Engineering CAD Workspace • Exact Double-Precision Geometry • DXF / PDF / SVG",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CadTextSecondary
+                    )
+                }
+            }
+
+            // Primary Actions Card: New Drawing & Open Drawing (.dxf)
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, CadCyanPrimary, RoundedCornerShape(12.dp)),
+                shape = RoundedCornerShape(12.dp),
+                color = CadSurfaceCard
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "START OR OPEN DRAWING",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = CadAmberSnap,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                onNewBlankDrawing(
+                                    newDrawingName.trim().ifEmpty { "Untitled Drawing" },
+                                    selectedUnit
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_new_drawing_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CadCyanPrimary,
+                                contentColor = Color(0xFF001824)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("New Drawing", fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = onOpenDxfFilePicker,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_open_drawing_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CadPanelElevated,
+                                contentColor = CadTextPrimary
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, tint = CadAmberSnap, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Open Drawing (.dxf)", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // Optional Blank Drawing Setup (Title + Working Unit)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = newDrawingName,
+                            onValueChange = { newDrawingName = it },
+                            label = { Text("New Drawing Title") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("home_new_drawing_name_field")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Units:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextSecondary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        CadUnit.entries.forEach { unit ->
+                            val isSel = selectedUnit == unit
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSel) OpaqueCyanBadgeBg else CadPanelElevated)
+                                    .border(
+                                        1.dp,
+                                        if (isSel) CadCyanPrimary else CadBorderHairline,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable { selectedUnitName = unit.name }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("home_unit_chip_${unit.symbol}")
+                            ) {
+                                Text(
+                                    text = "${unit.label} (${unit.symbol})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isSel) CadCyanPrimary else CadTextSecondary,
+                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CadPanelElevated)
+                                .border(1.dp, CadBorderHairline, RoundedCornerShape(6.dp))
+                                .clickable { showInlineDxfImport = !showInlineDxfImport }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .testTag("home_import_dxf_toggle_button")
+                        ) {
+                            Text(
+                                text = if (showInlineDxfImport) "Hide DXF Paste" else "Paste DXF Text",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CadAmberSnap,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    if (showInlineDxfImport) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = dxfImportBuffer,
+                                onValueChange = { dxfImportBuffer = it },
+                                label = { Text("Paste ASCII DXF Content") },
+                                minLines = 3,
+                                maxLines = 5,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("home_dxf_paste_field")
+                            )
+                            Button(
+                                onClick = {
+                                    if (dxfImportBuffer.isNotBlank()) {
+                                        onImportDxfContent(dxfImportBuffer)
+                                    }
+                                },
+                                enabled = dxfImportBuffer.isNotBlank(),
+                                modifier = Modifier.testTag("home_dxf_paste_submit_button")
+                            ) {
+                                Text("Load Pasted DXF")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Saved Drawings Catalogue Section (Section 62.2 & 62.3)
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, CadBorderHairline, RoundedCornerShape(12.dp))
+                    .testTag("home_saved_drawings_section"),
+                shape = RoundedCornerShape(12.dp),
+                color = CadPanelSurface
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "SAVED DRAWINGS",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = CadCyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    if (savedProjects.isEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(CadModelSpaceBg)
+                                .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
+                                .padding(18.dp)
+                                .testTag("home_empty_saved_drawings"),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                tint = CadTextMuted,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Text(
+                                text = "No saved drawings yet",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = CadTextPrimary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Create a new drawing or open a DXF file to get started.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CadTextSecondary
+                            )
+                        }
+                    } else {
+                        savedProjects.forEach { proj ->
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
+                                    .testTag("home_saved_drawing_${proj.projectId}"),
+                                shape = RoundedCornerShape(8.dp),
+                                color = CadPanelElevated
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable { onOpenSavedProject(proj.projectId) }
+                                        ) {
+                                            Text(
+                                                text = proj.name,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = CadTextPrimary,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "${proj.entityCount} entities • Unit: ${proj.workingUnitSymbol} • Sheet: ${proj.sheetPresetName}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = CadTextSecondary
+                                            )
+                                        }
+
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Button(
+                                                onClick = { onOpenSavedProject(proj.projectId) },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier
+                                                    .height(32.dp)
+                                                    .testTag("home_open_saved_${proj.projectId}")
+                                            ) {
+                                                Text("Open", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                            IconButton(
+                                                onClick = {
+                                                    if (renamingProjectId == proj.projectId) {
+                                                        renamingProjectId = null
+                                                    } else {
+                                                        renamingProjectId = proj.projectId
+                                                        renameText = proj.name
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("home_rename_saved_${proj.projectId}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "Rename Drawing",
+                                                    tint = CadCyanPrimary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { onDeleteSavedProject(proj.projectId) },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("home_delete_saved_${proj.projectId}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Delete,
+                                                    contentDescription = "Delete Drawing",
+                                                    tint = CadRedAlert,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    if (renamingProjectId == proj.projectId) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            OutlinedTextField(
+                                                value = renameText,
+                                                onValueChange = { renameText = it },
+                                                label = { Text("Rename Drawing") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("home_rename_input_${proj.projectId}")
+                                            )
+                                            Button(
+                                                onClick = {
+                                                    if (renameText.isNotBlank()) {
+                                                        onRenameSavedProject(proj.projectId, renameText.trim())
+                                                        renamingProjectId = null
+                                                    }
+                                                },
+                                                modifier = Modifier.testTag("home_rename_confirm_${proj.projectId}")
+                                            ) {
+                                                Text("Save")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

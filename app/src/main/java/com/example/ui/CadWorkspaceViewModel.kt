@@ -7,7 +7,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.cad.data.CadAppDatabase
 import com.example.cad.data.CadProjectMetadataEntity
 import com.example.cad.data.CadProjectRepository
-import com.example.cad.data.CadTemplateFactory
 import com.example.cad.dimension.AutoDimensionEngine
 import com.example.cad.dimension.DimensionAlignmentReport
 import com.example.cad.dimension.DimensionArrangementPreference
@@ -111,8 +110,9 @@ data class DocumentSnapshot(
 )
 
 data class CadWorkspaceUiState(
-    val currentProjectId: String = "proj_mounting_plate",
-    val currentProjectName: String = "CNC 6-Hole Mounting Plate",
+    val isHomeScreenVisible: Boolean = true,
+    val currentProjectId: String = "untitled_drawing",
+    val currentProjectName: String = "Untitled Drawing",
     val workspaceSpace: WorkspaceSpace = WorkspaceSpace.MODEL_SPACE,
     val storageUnit: CadUnit = CadUnit.MM,
     val displayUnit: CadUnit = CadUnit.MM,
@@ -132,13 +132,13 @@ data class CadWorkspaceUiState(
     val commandSubOption: String = "Default",
     val commandParameterValue: Double = 5.0,
     val commandStepPoints: List<Point2D> = emptyList(),
-    val commandPromptBanner: String = "READY • Use controller PICK PT, CMD, or + Launcher",
+    val activeActionPrompt: String = "Position cursor over object and tap PICK PT",
+    val commandPromptBanner: String = "READY • Use controller PICK PT, command bar, or + Launcher",
     val activeNotification: TransientNotification? = null,
     val notificationQueue: List<TransientNotification> = emptyList(),
     val activeOverview: OverviewCardEvent? = null,
     val commandHistoryLog: List<String> = listOf(
-        "PrecisionCAD Studio initialized (2D Technical Viewport).",
-        "Loaded template: CNC 6-Hole Mounting Plate (136 × 96 mm)."
+        "PrecisionCAD Studio initialized (2D Technical Viewport)."
     ),
     val recentCommands: List<CadCommandId> = listOf(
         CadCommandId.LINE,
@@ -206,32 +206,33 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     init {
         viewModelScope.launch {
-            repository.ensureDefaultProjectsSeeded()
+            repository.cleanupUntouchedLegacyTemplatesOnce()
         }
     }
 
     private fun createInitialState(): CadWorkspaceUiState {
-        val initialPayload = CadTemplateFactory.createSixHoleMountingPlate()
         val savedModeName = prefs.getString("unit_change_mode", UnitChangeMode.CONVERT_DISPLAY_UNITS.name)
         val initialMode = UnitChangeMode.entries.firstOrNull { it.name == savedModeName }
             ?: UnitChangeMode.CONVERT_DISPLAY_UNITS
-        val savedDisplayUnitName = prefs.getString("display_unit", initialPayload.displayUnit.name)
+        val savedDisplayUnitName = prefs.getString("display_unit", CadUnit.MM.name)
         val initialDisplayUnit = CadUnit.entries.firstOrNull { it.name == savedDisplayUnitName }
-            ?: initialPayload.displayUnit
-        val savedLinearDecimals = prefs.getInt("linear_decimals", initialPayload.precision.linearDecimals)
-        val savedAngularDecimals = prefs.getInt("angular_decimals", initialPayload.precision.angularDecimals)
-        val savedShowSuffix = prefs.getBoolean("show_unit_suffix", initialPayload.precision.showUnitSuffix)
-        val savedSuppressZeros = prefs.getBoolean("suppress_trailing_zeros", initialPayload.precision.suppressTrailingZeros)
+            ?: CadUnit.MM
+        val savedLinearDecimals = prefs.getInt("linear_decimals", 2)
+        val savedAngularDecimals = prefs.getInt("angular_decimals", 1)
+        val savedShowSuffix = prefs.getBoolean("show_unit_suffix", false)
+        val savedSuppressZeros = prefs.getBoolean("suppress_trailing_zeros", false)
 
         return CadWorkspaceUiState(
-            storageUnit = initialPayload.storageUnit,
+            isHomeScreenVisible = true,
+            currentProjectId = "untitled_drawing",
+            currentProjectName = "Untitled Drawing",
+            storageUnit = initialDisplayUnit,
             displayUnit = initialDisplayUnit,
             unitChangeMode = initialMode,
-            layers = initialPayload.layers,
-            // Quick Dimension is always OFF by default when opening a sheet
-            entities = AutoDimensionEngine.removeAutoDimensions(initialPayload.entities),
-            blocks = initialPayload.blocks.associateBy { it.name },
-            sheetSetup = initialPayload.sheetSetup,
+            layers = CadLayer.defaultLayers(),
+            entities = emptyList(),
+            blocks = emptyMap(),
+            sheetSetup = SheetSetupConfig(),
             precision = PrecisionFormatConfig(
                 linearDecimals = savedLinearDecimals,
                 angularDecimals = savedAngularDecimals,
@@ -240,6 +241,46 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             ),
             isQuickDimensionEnabled = false
         )
+    }
+
+    // --- Section 62: Home Screen & Drawing Lifecycle Navigation ---
+
+    fun openHomeScreen() {
+        _uiState.update { it.copy(isHomeScreenVisible = true) }
+    }
+
+    fun enterWorkspace() {
+        _uiState.update { it.copy(isHomeScreenVisible = false) }
+    }
+
+    fun startNewBlankDrawing(
+        name: String = "Untitled Drawing",
+        unit: CadUnit = _uiState.value.displayUnit
+    ) {
+        createNewBlankProject(name = name, unit = unit)
+    }
+
+    fun renameSavedProject(projectId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            repository.renameProject(projectId, trimmed)
+            _uiState.update { st ->
+                if (st.currentProjectId == projectId) {
+                    st.copy(currentProjectName = trimmed)
+                } else {
+                    st
+                }
+            }
+            emitTransientNotification("PROJECT • Renamed drawing to '$trimmed'", NotificationCategory.SUCCESS)
+        }
+    }
+
+    fun deleteSavedProject(projectId: String) {
+        viewModelScope.launch {
+            repository.deleteProject(projectId)
+            emitTransientNotification("PROJECT • Deleted saved drawing", NotificationCategory.INFO)
+        }
     }
 
     // --- Two-Layer Notification & Active-Session Floating Overview System (Sections 4, 30, 39.2 & 42.5) ---
@@ -1140,7 +1181,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             viewport = st.viewport
         )
         val dimCount = updatedEntities.count { it is CadEntity.DimensionEntity }
-        val msg = "${mode.commandToken} (${density.label} • ${arrangementPreference.label} • ON) • Refreshed $dimCount associative dimensions"
+        val unresolvedCount = alignmentReport.unresolvedWarnings.size
+        val placedCount = alignmentReport.placements.size
+        val msg = if (unresolvedCount > 0) {
+            "QDIM placed $placedCount dimensions; $unresolvedCount could not be placed without overlap. Move the drawing to a clearer area or choose a less dense arrangement, then refresh."
+        } else {
+            "${mode.commandToken} (${density.label} • ${arrangementPreference.label} • ON) • Refreshed $dimCount associative dimensions"
+        }
         _uiState.update {
             it.copy(
                 activeCommand = CadCommandId.SELECT,
@@ -1151,11 +1198,22 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 qdimDensity = density,
                 qdimArrangementPreference = arrangementPreference,
                 lastAlignmentReport = alignmentReport,
+                activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg
             )
         }
         syncPolarAndActiveSessionState()
-        emitTransientNotification(msg, NotificationCategory.SUCCESS)
+        if (unresolvedCount > 0) {
+            emitOverview(
+                title = "QDIM • Insufficient Clear Space ($unresolvedCount unresolved)",
+                explanation = msg,
+                category = NotificationCategory.WARNING,
+                isPersistentSession = false
+            )
+            emitTransientNotification(msg, NotificationCategory.WARNING)
+        } else {
+            emitTransientNotification(msg, NotificationCategory.SUCCESS)
+        }
     }
 
     // --- Command Selection & Execution State Machine (Section 14) ---
@@ -1301,7 +1359,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
 
         val effectiveSubOption = if (command == CadCommandId.SELECT && subOption == "Default") "Single" else subOption
-        val prompt = promptForCommand(command, 0, effectiveSubOption)
+        val actionPrompt = promptForCommand(command, 0, effectiveSubOption)
         _uiState.update {
             it.copy(
                 activeCategory = command.category,
@@ -1310,8 +1368,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandParameterValue = defaultParam,
                 commandStepPoints = emptyList(),
                 selectionBoxDrag = null,
-                commandPromptBanner = prompt,
-                commandPanelState = CommandPanelState.Running(command, prompt, 0),
+                activeActionPrompt = actionPrompt,
+                commandPromptBanner = actionPrompt,
+                commandPanelState = CommandPanelState.Running(command, actionPrompt, 0),
                 recentCommands = updatedRecents
             )
         }
@@ -1336,14 +1395,15 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
         }
-        val prompt = promptForCommand(st.activeCommand, 0, subOption)
+        val actionPrompt = promptForCommand(st.activeCommand, 0, subOption)
         _uiState.update {
             it.copy(
                 commandSubOption = subOption,
                 commandStepPoints = emptyList(),
                 selectionBoxDrag = null,
-                commandPromptBanner = prompt,
-                commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, 0)
+                activeActionPrompt = actionPrompt,
+                commandPromptBanner = actionPrompt,
+                commandPanelState = CommandPanelState.Running(st.activeCommand, actionPrompt, 0)
             )
         }
         syncPolarAndActiveSessionState()
@@ -1352,18 +1412,12 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     fun setCommandParameterValue(value: Double) {
         val coerced = value.coerceAtLeast(0.0)
         _uiState.update { st ->
-            val paramLabel = when (st.activeCommand) {
-                CadCommandId.FILLET -> "R=${fmt(coerced)}"
-                CadCommandId.CHAMFER -> "D=${fmt(coerced)}"
-                CadCommandId.OFFSET -> "d=${fmt(coerced)}"
-                CadCommandId.POLYGON -> "Sides=${coerced.toInt()}"
-                else -> "Val=${fmt(coerced)}"
-            }
-            val prompt = "${st.activeCommand.commandName} ($paramLabel) • ${promptForCommand(st.activeCommand, st.commandStepPoints.size, st.commandSubOption)}"
+            val actionPrompt = promptForCommand(st.activeCommand, st.commandStepPoints.size, st.commandSubOption)
             st.copy(
                 commandParameterValue = coerced,
-                commandPromptBanner = prompt,
-                commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, st.commandStepPoints.size)
+                activeActionPrompt = actionPrompt,
+                commandPromptBanner = actionPrompt,
+                commandPanelState = CommandPanelState.Running(st.activeCommand, actionPrompt, st.commandStepPoints.size)
             )
         }
         syncPolarAndActiveSessionState()
@@ -2468,6 +2522,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
             else -> Unit
         }
+        _uiState.update { stAfter ->
+            val nextActionPrompt = promptForCommand(
+                stAfter.activeCommand,
+                stAfter.commandStepPoints.size,
+                stAfter.commandSubOption
+            )
+            stAfter.copy(activeActionPrompt = nextActionPrompt)
+        }
         syncPolarAndActiveSessionState()
     }
 
@@ -2544,6 +2606,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         commandStepPoints = emptyList(),
                         polarPreview = null,
                         selectionBoxDrag = null,
+                        activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                         commandPromptBanner = msg,
                         commandPanelState = CommandPanelState.Hidden
                     )
@@ -2561,6 +2624,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandStepPoints = emptyList(),
                 polarPreview = null,
                 selectionBoxDrag = null,
+                activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg,
                 commandPanelState = CommandPanelState.Hidden
             )
@@ -2924,6 +2988,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val msg = "DXFIN • Imported ${cleaned.size} entities (${imported.displayUnit.symbol}) • Quick Dimension OFF"
         _uiState.update {
             it.copy(
+                isHomeScreenVisible = false,
                 storageUnit = imported.storageUnit,
                 displayUnit = imported.displayUnit,
                 layers = imported.layers,
@@ -2931,6 +2996,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 blocks = imported.blocks.associateBy { b -> b.name },
                 selectedEntityIds = emptySet(),
                 isQuickDimensionEnabled = false,
+                activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg,
                 commandPanelState = CommandPanelState.Hidden
             )
@@ -2942,9 +3008,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     fun saveCurrentProject(projectName: String) {
         val st = _uiState.value
         val payload = currentDxfPayload()
+        val saveId = if (st.currentProjectId == "untitled_drawing") {
+            "proj_${UUID.randomUUID().toString().take(8)}"
+        } else {
+            st.currentProjectId
+        }
         viewModelScope.launch {
             repository.saveProjectDocument(
-                projectId = st.currentProjectId,
+                projectId = saveId,
                 name = projectName,
                 description = "2D Technical Drawing (${st.entities.size} entities, ${st.displayUnit.symbol})",
                 payload = payload
@@ -2952,6 +3023,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val msg = "SAVE • Saved '$projectName' to local Room & DXF store"
             _uiState.update {
                 it.copy(
+                    currentProjectId = saveId,
                     currentProjectName = projectName,
                     commandPromptBanner = msg
                 )
@@ -2961,6 +3033,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun loadProject(projectId: String) {
+        _uiState.update { it.copy(isHomeScreenVisible = false) }
         viewModelScope.launch {
             val loaded = repository.loadProjectDocument(projectId) ?: return@launch
             val meta = savedProjects.value.firstOrNull { it.projectId == projectId }
@@ -2970,6 +3043,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val msg = "OPEN • Loaded '${meta?.name ?: projectId}' (${entitiesWithoutAutoDim.size} entities • Quick Dimension OFF)"
             _uiState.update {
                 it.copy(
+                    isHomeScreenVisible = false,
                     currentProjectId = projectId,
                     currentProjectName = meta?.name ?: projectId,
                     storageUnit = loaded.storageUnit,
@@ -2982,6 +3056,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     isQuickDimensionEnabled = false,
                     canUndo = false,
                     canRedo = false,
+                    activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                     commandPromptBanner = msg,
                     commandPanelState = CommandPanelState.Hidden
                 )
@@ -2999,17 +3074,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val msg = "NEW • Created blank drawing '$name' in ${unit.label} (Quick Dimension OFF)"
         _uiState.update {
             it.copy(
+                isHomeScreenVisible = false,
                 currentProjectId = newId,
                 currentProjectName = name,
                 storageUnit = unit,
                 displayUnit = unit,
                 layers = CadLayer.defaultLayers(),
                 entities = emptyList(),
+                blocks = emptyMap(),
                 selectedEntityIds = emptySet(),
                 previousSelectedEntityIds = emptySet(),
                 isQuickDimensionEnabled = false,
                 canUndo = false,
                 canRedo = false,
+                activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg,
                 commandPanelState = CommandPanelState.Hidden
             )
@@ -3167,32 +3245,70 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     private fun promptForCommand(cmd: CadCommandId, stepCount: Int, subOption: String): String = when (cmd) {
         CadCommandId.SELECT -> when (subOption) {
-            "Window" -> if (stepCount == 0) "SELECT (Window) • Move cursor to Corner 1 and tap PICK PT" else "SELECT (Window) • Move cursor to Corner 2 and tap PICK PT"
-            "Crossing" -> if (stepCount == 0) "SELECT (Crossing) • Move cursor to Corner 1 and tap PICK PT" else "SELECT (Crossing) • Move cursor to Corner 2 and tap PICK PT"
-            else -> "SELECT • Position cursor over object and tap PICK PT (or choose Window / Crossing / All)"
+            "Window" -> if (stepCount == 0) "Pick first selection corner" else "Specify opposite selection corner"
+            "Crossing" -> if (stepCount == 0) "Pick first selection corner" else "Specify opposite selection corner"
+            else -> "Position cursor over object and tap PICK PT"
         }
-        CadCommandId.LINE -> if (stepCount == 0) "LINE • Pick start point (PICK PT or X,Y)" else "LINE • Pick next point, 'C' to close, or ✓ to finish"
-        CadCommandId.POLYLINE -> "POLYLINE ($subOption) • Pick vertex ${stepCount + 1}, or tap ✓ to finish"
+        CadCommandId.LINE -> if (stepCount == 0) "Pick start point" else "Specify next point or Finish"
+        CadCommandId.POLYLINE -> if (stepCount == 0) "Pick start vertex" else "Specify next vertex or Finish"
         CadCommandId.CIRCLE -> when (subOption) {
-            "2P" -> if (stepCount == 0) "CIRCLE (2P) • Pick first diameter endpoint" else "CIRCLE (2P) • Pick second diameter endpoint"
-            "3P" -> "CIRCLE (3P) • Pick point ${stepCount + 1} of 3 on circumference"
-            "TTR" -> "CIRCLE (TTR) • Pick tangent line ${stepCount + 1} of 2"
-            else -> if (stepCount == 0) "CIRCLE ($subOption) • Pick center point" else "CIRCLE ($subOption) • Pick radius/diameter point"
+            "2P" -> if (stepCount == 0) "Pick first diameter point" else "Pick second diameter point"
+            "3P" -> "Pick circumference point ${stepCount + 1} of 3"
+            "TTR" -> if (stepCount == 0) "Select first tangent line" else "Select second tangent line"
+            "Diameter" -> if (stepCount == 0) "Specify centre" else "Specify diameter"
+            else -> if (stepCount == 0) "Specify centre" else "Specify radius"
         }
-        CadCommandId.ARC -> "ARC ($subOption) • Pick point ${stepCount + 1} of 3"
-        CadCommandId.RECTANGLE -> if (stepCount == 0) "RECTANGLE ($subOption) • Pick first corner" else "RECTANGLE ($subOption) • Pick opposite corner"
-        CadCommandId.POLYGON -> if (stepCount == 0) "POLYGON • Pick center point" else "POLYGON • Pick radius/vertex point"
-        CadCommandId.ELLIPSE -> "ELLIPSE • Pick point ${stepCount + 1} of 3 (Center -> Major Axis -> Minor Radius)"
-        CadCommandId.SPLINE -> "SPLINE • Pick fit point ${stepCount + 1}, then tap ✓ to finish"
-        CadCommandId.OFFSET -> "OFFSET • Pick entity to offset, then pick side"
-        CadCommandId.TRIM -> "TRIM • Move cursor over segment to trim and tap PICK PT"
-        CadCommandId.EXTEND -> "EXTEND • Move cursor near endpoint to extend and tap PICK PT"
-        CadCommandId.FILLET -> "FILLET • Pick first intersecting line"
-        CadCommandId.CHAMFER -> "CHAMFER • Pick first intersecting line"
-        CadCommandId.STRETCH -> "STRETCH • Pick crossing corner 1 -> corner 2 -> displacement point"
-        CadCommandId.DIMLINEAR -> "DIMLINEAR • Pick extension origin ${stepCount + 1} of 2, then dimension line location"
-        CadCommandId.DIMALIGNED -> "DIMALIGNED • Pick extension origin ${stepCount + 1} of 2, then dimension line location"
-        else -> "${cmd.commandName} • Position cursor and tap PICK PT"
+        CadCommandId.ARC -> when (subOption) {
+            "SCE" -> when (stepCount) {
+                0 -> "Pick start point"
+                1 -> "Specify centre"
+                else -> "Pick end point"
+            }
+            else -> "Pick arc point ${stepCount + 1} of 3"
+        }
+        CadCommandId.RECTANGLE -> if (stepCount == 0) "Pick first corner" else "Specify opposite corner"
+        CadCommandId.POLYGON -> if (stepCount == 0) "Specify centre" else "Specify radius"
+        CadCommandId.ELLIPSE -> when (stepCount) {
+            0 -> "Specify centre"
+            1 -> "Specify major axis endpoint"
+            else -> "Specify minor axis radius"
+        }
+        CadCommandId.SPLINE -> if (stepCount == 0) "Pick first fit point" else "Pick next fit point or Finish"
+        CadCommandId.OFFSET -> if (stepCount == 0) "Select object to offset" else "Pick side to offset"
+        CadCommandId.TRIM -> "Pick segment to trim"
+        CadCommandId.EXTEND -> "Pick endpoint to extend"
+        CadCommandId.FILLET -> if (stepCount == 0) "Pick first intersection" else "Pick second intersection"
+        CadCommandId.CHAMFER -> if (stepCount == 0) "Select first line" else "Select second line"
+        CadCommandId.MOVE -> if (stepCount == 0) "Pick base point" else "Pick destination point"
+        CadCommandId.COPY -> if (stepCount == 0) "Pick base point" else "Pick destination point"
+        CadCommandId.ROTATE -> if (stepCount == 0) "Pick pivot point" else "Specify rotation angle point"
+        CadCommandId.SCALE -> if (stepCount == 0) "Pick base point" else "Specify scale factor point"
+        CadCommandId.MIRROR -> if (stepCount == 0) "Pick first mirror line point" else "Pick second mirror line point"
+        CadCommandId.STRETCH -> when (stepCount) {
+            0 -> "Pick crossing corner 1"
+            1 -> "Pick crossing corner 2"
+            else -> "Pick displacement point"
+        }
+        CadCommandId.BREAK -> if (stepCount == 0) "Pick first break point" else "Pick second break point"
+        CadCommandId.ALIGN -> "Pick alignment point ${stepCount + 1} of 4"
+        CadCommandId.LENGTHEN -> "Select line to lengthen"
+        CadCommandId.MEASURE -> if (stepCount == 0) "Pick first measurement point" else "Pick second measurement point"
+        CadCommandId.DIMLINEAR, CadCommandId.DIMALIGNED -> when (stepCount) {
+            0 -> "Pick first extension origin"
+            1 -> "Pick second extension origin"
+            else -> "Pick dimension line location"
+        }
+        CadCommandId.DIMANGULAR -> when (stepCount) {
+            0 -> "Pick vertex point"
+            1 -> "Pick first angle arm"
+            else -> "Pick second angle arm"
+        }
+        CadCommandId.DIMRADIUS, CadCommandId.DIMDIAMETER -> "Select circle, arc, or fillet"
+        CadCommandId.DIMORDINATE -> if (stepCount == 0) "Pick feature datum point" else "Pick leader landing point"
+        CadCommandId.LEADER -> if (stepCount == 0) "Pick leader arrow tip" else "Pick leader shoulder point"
+        CadCommandId.TEXT -> "Pick note insertion point"
+        CadCommandId.CENTERMARK -> "Select circle, arc, or fillet"
+        else -> "Position cursor and tap PICK PT"
     }
 
     private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)

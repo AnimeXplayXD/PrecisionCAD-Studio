@@ -90,14 +90,39 @@ class CadProjectRepository(
     private val projectsDir: File
         get() = File(context.filesDir, "projects").apply { mkdirs() }
 
-    suspend fun ensureDefaultProjectsSeeded() = withContext(Dispatchers.IO) {
+    /**
+     * Section 62.4 & 62.5 — Safe One-Time Legacy Template Cleanup Migration:
+     * Never seeds starter drawings on launch. On upgrade from earlier versions, removes the three
+     * known stock industrial templates ONLY if their ID, name, and stock description remain untouched.
+     * Preserves all user-created or user-modified drawings.
+     */
+    suspend fun cleanupUntouchedLegacyTemplatesOnce() = withContext(Dispatchers.IO) {
+        val prefs = context.getSharedPreferences("precision_cad_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("v16_legacy_templates_cleaned", false)) return@withContext
+
+        val stockTemplates = mapOf(
+            "proj_mounting_plate" to (
+                "CNC 6-Hole Mounting Plate" to
+                    "136 × 96 mm rectangular plate with 6 equally spaced ⌀10 mm mounting holes and ⌀28 mm central bore (Section 23 & 28 QDIM Showcase)."
+                ),
+            "proj_flanged_housing" to (
+                "Flanged Bearing Housing" to
+                    "Circular ⌀140 mm industrial bearing flange with 6-bolt polar array, keyway bore, and centerlines."
+                ),
+            "proj_bellcrank_bracket" to (
+                "Slotted Bellcrank & Section" to
+                    "Machined bellcrank lever with ANSI31 hatched cross-section view, fillets, and GD&T callout leader."
+                )
+        )
+
         val existing = dao.getAllProjectsOnce()
-        if (existing.isEmpty() || existing.any { it.schemaVersion < 4 }) {
-            val templates = CadTemplateFactory.createIndustrialTemplates()
-            for ((meta, payload) in templates) {
-                saveProjectDocument(meta.projectId, meta.name, meta.description, payload)
+        for (proj in existing) {
+            val stock = stockTemplates[proj.projectId]
+            if (stock != null && proj.name == stock.first && proj.description == stock.second) {
+                deleteProject(proj.projectId)
             }
         }
+        prefs.edit().putBoolean("v16_legacy_templates_cleaned", true).apply()
     }
 
     suspend fun saveProjectDocument(
@@ -123,6 +148,18 @@ class CadProjectRepository(
             updatedAtEpochMs = System.currentTimeMillis()
         )
         dao.upsertProject(meta)
+    }
+
+    suspend fun renameProject(projectId: String, newName: String) = withContext(Dispatchers.IO) {
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return@withContext
+        val existing = dao.getAllProjectsOnce().firstOrNull { it.projectId == projectId } ?: return@withContext
+        dao.upsertProject(
+            existing.copy(
+                name = trimmed,
+                updatedAtEpochMs = System.currentTimeMillis()
+            )
+        )
     }
 
     suspend fun loadProjectDocument(projectId: String): DxfDocumentPayload? = withContext(Dispatchers.IO) {

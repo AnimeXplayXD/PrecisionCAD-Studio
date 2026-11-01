@@ -771,14 +771,28 @@ object DimensionAlignmentEngine {
                     DimensionType.ALIGNED -> {
                         val mid = adjusted.anchor1.midpointTo(adjusted.anchor2)
                         val lineAng = adjusted.anchor1.angleToDeg(adjusted.anchor2)
-                        val sign = if (attempt % 2 == 1) 1.0 else -1.0
-                        val normalRad = Math.toRadians(lineAng + 90.0 * sign)
-                        val offsetDist = 9.0 + (attempt * 4.0)
+                        val n1Rad = Math.toRadians(lineAng + 90.0)
+                        val n2Rad = Math.toRadians(lineAng - 90.0)
+                        val c1 = Point2D(mid.x + 10.0 * cos(n1Rad), mid.y + 10.0 * sin(n1Rad))
+                        val c2 = Point2D(mid.x + 10.0 * cos(n2Rad), mid.y + 10.0 * sin(n2Rad))
+                        val outwardRad = if (c1.distanceTo(overallBounds.center) >= c2.distanceTo(overallBounds.center)) n1Rad else n2Rad
+                        val inwardRad = if (outwardRad == n1Rad) n2Rad else n1Rad
+                        val useRad = if (attempt <= 7) outwardRad else inwardRad
+                        val offsetDist = 10.0 + (attempt * 4.5)
                         adjusted = adjusted.copy(
                             dimensionLinePoint = Point2D(
-                                mid.x + offsetDist * cos(normalRad),
-                                mid.y + offsetDist * sin(normalRad)
+                                mid.x + offsetDist * cos(useRad),
+                                mid.y + offsetDist * sin(useRad)
                             )
+                        )
+                    }
+                    DimensionType.ANGULAR -> {
+                        val v = adjusted.angularVertex ?: adjusted.anchor1
+                        val baseRay = v.angleToDeg(adjusted.dimensionLinePoint)
+                        val baseDist = v.distanceTo(adjusted.dimensionLinePoint).coerceAtLeast(6.0)
+                        val newDist = baseDist + (attempt * 3.5)
+                        adjusted = adjusted.copy(
+                            dimensionLinePoint = v.polarOffset(newDist, baseRay)
                         )
                     }
                     else -> {
@@ -884,6 +898,13 @@ object DimensionAlignmentEngine {
                 )
             )
         }
+
+        // Collect any unresolved linear warnings into unresolvedWarnings
+        placements.filter { it.collisionClearanceStatus == CollisionClearanceStatus.UNRESOLVED_CROWDED }
+            .flatMap { it.reviewFlags }
+            .forEach { flag ->
+                if (flag !in unresolvedWarnings) unresolvedWarnings.add(flag)
+            }
 
         // Compute overall layout quality score (0..100)
         val unresolvedPenalty = unresolvedWarnings.size * 15.0

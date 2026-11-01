@@ -855,4 +855,94 @@ class ExampleUnitTest {
         assertEquals(farCursor.x, roundTripModel.x, 1e-3)
         assertEquals(farCursor.y, roundTripModel.y, 1e-3)
     }
+
+    @Test
+    fun `TC-DIM-16 verify v16 QDIM Triangle Angular Candidates, Donut Inner Outer Diameters, and Ellipse Major Minor Axes`() {
+        // 1. Equilateral triangle (3-sided polygon) -> BALANCED emits 3× 60° and zero fabricated radius callouts;
+        //    DETAILED emits all 3 individual 60° vertex angles
+        val equilateralTriangle = CadGeometryKernel.createRegularPolygon(
+            center = Point2D(50.0, 50.0),
+            radius = 30.0,
+            sides = 3,
+            circumscribed = false
+        )
+        val balancedTriEntities = AutoDimensionEngine.generateQuickDimensions(
+            allEntities = listOf(equilateralTriangle),
+            targetEntities = listOf(equilateralTriangle),
+            density = QDimDensityPolicy.BALANCED
+        )
+        val balancedTriDims = balancedTriEntities.filterIsInstance<CadEntity.DimensionEntity>()
+        // Straight-edged triangle must NEVER receive a fabricated radius callout
+        assertTrue(balancedTriDims.none { it.dimensionType == DimensionType.RADIUS })
+        val balancedAngularDims = balancedTriDims.filter { it.dimensionType == DimensionType.ANGULAR }
+        assertEquals(1, balancedAngularDims.size)
+        assertEquals("3× ", balancedAngularDims.first().customPrefix)
+        assertEquals(60.0, balancedAngularDims.first().measuredModelValue(), 0.2)
+
+        val detailedTriEntities = AutoDimensionEngine.generateQuickDimensions(
+            allEntities = listOf(equilateralTriangle),
+            targetEntities = listOf(equilateralTriangle),
+            density = QDimDensityPolicy.DETAILED
+        )
+        val detailedAngularDims = detailedTriEntities.filterIsInstance<CadEntity.DimensionEntity>()
+            .filter { it.dimensionType == DimensionType.ANGULAR }
+        assertEquals(3, detailedAngularDims.size)
+        assertTrue(detailedAngularDims.all { abs(it.measuredModelValue() - 60.0) < 0.2 })
+
+        // 2. Scalene 3-4-5 right triangle from 3 connected LineEntity segments -> emits 3 distinct interior angles (90°, ~36.87°, ~53.13°)
+        val scaleneLines = listOf(
+            CadEntity.LineEntity(id = "s1", start = Point2D(0.0, 0.0), end = Point2D(40.0, 0.0)),
+            CadEntity.LineEntity(id = "s2", start = Point2D(40.0, 0.0), end = Point2D(0.0, 30.0)),
+            CadEntity.LineEntity(id = "s3", start = Point2D(0.0, 30.0), end = Point2D(0.0, 0.0))
+        )
+        val scaleneQDim = AutoDimensionEngine.generateQuickDimensions(
+            allEntities = scaleneLines,
+            targetEntities = scaleneLines,
+            density = QDimDensityPolicy.BALANCED
+        )
+        val scaleneAngDims = scaleneQDim.filterIsInstance<CadEntity.DimensionEntity>()
+            .filter { it.dimensionType == DimensionType.ANGULAR }
+        assertEquals(3, scaleneAngDims.size)
+        assertTrue(scaleneAngDims.any { abs(it.measuredModelValue() - 90.0) < 0.2 })
+        assertTrue(scaleneAngDims.any { abs(it.measuredModelValue() - 36.87) < 0.5 })
+        assertTrue(scaleneAngDims.any { abs(it.measuredModelValue() - 53.13) < 0.5 })
+
+        // 3. DonutEntity -> QDIM extracts both outer diameter and inner diameter
+        val donut = CadEntity.DonutEntity(
+            id = "donut_1",
+            center = Point2D(100.0, 100.0),
+            innerDiameter = 12.0,
+            outerDiameter = 28.0
+        )
+        val donutQDim = AutoDimensionEngine.generateQuickDimensions(
+            allEntities = listOf(donut),
+            targetEntities = listOf(donut),
+            density = QDimDensityPolicy.BALANCED
+        )
+        val donutDims = donutQDim.filterIsInstance<CadEntity.DimensionEntity>()
+            .filter { it.dimensionType == DimensionType.DIAMETER }
+        assertEquals(2, donutDims.size)
+        assertTrue(donutDims.any { abs(it.measuredModelValue() - 28.0) < 1e-3 })
+        assertTrue(donutDims.any { abs(it.measuredModelValue() - 12.0) < 1e-3 })
+
+        // 4. EllipseEntity -> QDIM extracts both major-axis (2a = 80) and minor-axis (2b = 40) ALIGNED dimensions
+        val ellipse = CadEntity.EllipseEntity(
+            id = "ellipse_1",
+            center = Point2D(80.0, 60.0),
+            majorRadius = 40.0,
+            minorRadius = 20.0,
+            rotationAngleDeg = 30.0
+        )
+        val ellipseQDim = AutoDimensionEngine.generateQuickDimensions(
+            allEntities = listOf(ellipse),
+            targetEntities = listOf(ellipse),
+            density = QDimDensityPolicy.BALANCED
+        )
+        val ellipseAlignedDims = ellipseQDim.filterIsInstance<CadEntity.DimensionEntity>()
+            .filter { it.dimensionType == DimensionType.ALIGNED }
+        assertEquals(2, ellipseAlignedDims.size)
+        assertTrue(ellipseAlignedDims.any { abs(it.measuredModelValue() - 80.0) < 1e-3 })
+        assertTrue(ellipseAlignedDims.any { abs(it.measuredModelValue() - 40.0) < 1e-3 })
+    }
 }
+

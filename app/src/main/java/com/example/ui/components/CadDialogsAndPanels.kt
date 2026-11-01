@@ -1,8 +1,13 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -61,18 +67,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
 import com.example.cad.data.CadProjectMetadataEntity
 import com.example.cad.dimension.DimensionAlignmentReport
 import com.example.cad.dimension.DimensionArrangementPreference
 import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.dimension.QDimOperatingMode
+import com.example.cad.kernel.CadSnapAndCoordEngine
 import com.example.cad.model.BlockDefinition
 import com.example.cad.model.CADCommandMatrix
+import java.util.Locale
+import kotlin.math.abs
 import com.example.cad.model.CadCommandCategory
 import com.example.cad.model.CadCommandId
 import com.example.cad.model.CadEntity
@@ -1238,6 +1250,17 @@ fun LayerAndBlockManagerDialog(
 /**
  * 6. Direct Coordinate, Parameter & Controller Settings Dialogs.
  */
+enum class CoordinateInputMode {
+    CARTESIAN_XY,
+    POLAR_OR_EXPRESSION
+}
+
+/**
+ * 6. Direct Coordinate, Parameter & Controller Settings Dialogs (Section 50 — Structured 3-Part Input).
+ * Provides distinct X coordinate, Y coordinate, and Polar / Other Expression parts with explicit
+ * mode switching, Absolute / Relative (@) Cartesian toggle, live resolved coordinate preview,
+ * and inline validation.
+ */
 @Composable
 fun DirectCoordinateInputDialog(
     currentCursor: Point2D,
@@ -1246,46 +1269,280 @@ fun DirectCoordinateInputDialog(
     onSubmitCoordinateExpression: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var inputText by remember {
-        mutableStateOf("${String.format("%.2f", currentCursor.x)},${String.format("%.2f", currentCursor.y)}")
+    var mode by rememberSaveable { mutableStateOf(CoordinateInputMode.CARTESIAN_XY) }
+    var isRelativeCartesian by rememberSaveable { mutableStateOf(false) }
+    var xText by rememberSaveable {
+        mutableStateOf(String.format(Locale.US, "%.2f", currentCursor.x))
+    }
+    var yText by rememberSaveable {
+        mutableStateOf(String.format(Locale.US, "%.2f", currentCursor.y))
+    }
+    var polarText by rememberSaveable {
+        mutableStateOf("@30<45")
+    }
+    var validationError by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val resolvedPolarPreview = remember(mode, polarText, referencePoint, currentCursor) {
+        if (mode == CoordinateInputMode.POLAR_OR_EXPRESSION) {
+            CadSnapAndCoordEngine.parseCoordinateInput(
+                rawInput = polarText.trim(),
+                referencePoint = referencePoint,
+                currentCursor = currentCursor,
+                orthoEnabled = false
+            )
+        } else {
+            null
+        }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CadPanelSurface,
         title = {
-            Text("Direct Coordinate & Polar Input (${displayUnit.symbol})", style = MaterialTheme.typography.titleLarge)
+            Column {
+                Text(
+                    text = "Direct Coordinate & Polar Input (${displayUnit.symbol})",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = CadTextPrimary
+                )
+                Text(
+                    text = if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                        "Active Mode: Cartesian X / Y (${if (isRelativeCartesian) "Relative @ΔX,ΔY" else "Absolute X,Y"})"
+                    } else {
+                        "Active Mode: Polar / Expression (e.g., 50<45, @30<90, @25,-10, 40)"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadCyanPrimary
+                )
+            }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "Supported formats:\n• Absolute Cartesian: 125,85\n• Relative Cartesian: @25,-10\n• Absolute Polar: 50<45\n• Relative Polar: @30<90\n• Distance along cursor angle: 40",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = CadTextSecondary
-                )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Mode Selector: Cartesian (X/Y) vs Polar / Expression
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val isCartesian = mode == CoordinateInputMode.CARTESIAN_XY
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isCartesian) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
+                            .border(
+                                width = if (isCartesian) 1.5.dp else 1.dp,
+                                color = if (isCartesian) CadCyanPrimary else CadBorderHairline,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable {
+                                mode = CoordinateInputMode.CARTESIAN_XY
+                                validationError = null
+                            }
+                            .padding(vertical = 8.dp, horizontal = 10.dp)
+                            .testTag("coord_mode_cartesian"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Cartesian (X/Y)",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isCartesian) CadCyanPrimary else CadTextSecondary,
+                            fontWeight = if (isCartesian) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 1
+                        )
+                    }
+
+                    val isPolar = mode == CoordinateInputMode.POLAR_OR_EXPRESSION
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isPolar) CadAmberSnap.copy(alpha = 0.22f) else CadPanelElevated)
+                            .border(
+                                width = if (isPolar) 1.5.dp else 1.dp,
+                                color = if (isPolar) CadAmberSnap else CadBorderHairline,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable {
+                                mode = CoordinateInputMode.POLAR_OR_EXPRESSION
+                                validationError = null
+                            }
+                            .padding(vertical = 8.dp, horizontal = 10.dp)
+                            .testTag("coord_mode_polar"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Polar / Expression",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isPolar) CadAmberSnap else CadTextSecondary,
+                            fontWeight = if (isPolar) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 1
+                        )
+                    }
+                }
+
                 if (referencePoint != null) {
                     Text(
-                        text = "Last Reference Point: (${String.format("%.2f", referencePoint.x)}, ${String.format("%.2f", referencePoint.y)})",
+                        text = "Last Reference Point: (${String.format(Locale.US, "%.2f", referencePoint.x)}, ${String.format(Locale.US, "%.2f", referencePoint.y)}) ${displayUnit.symbol}",
                         style = MaterialTheme.typography.labelMedium,
                         color = CadAmberSnap
                     )
                 }
+
+                // Cartesian Absolute vs Relative (@) toggle
+                if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(CadPanelElevated)
+                            .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
+                            .clickable {
+                                isRelativeCartesian = !isRelativeCartesian
+                                validationError = null
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("coord_cartesian_abs_rel_toggle"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isRelativeCartesian) {
+                                "Cartesian Reference: Relative (@ΔX, ΔY from last point)"
+                            } else {
+                                "Cartesian Reference: Absolute (X, Y in model space)"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isRelativeCartesian) CadEmeraldCrossing else CadTextPrimary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = if (isRelativeCartesian) "REL (@)" else "ABS",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isRelativeCartesian) CadEmeraldCrossing else CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Part 1 & Part 2: Side-by-side X and Y Coordinate Fields
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val displayX = if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                        xText
+                    } else {
+                        resolvedPolarPreview?.let { String.format(Locale.US, "%.2f", it.x) } ?: "—"
+                    }
+                    val displayY = if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                        yText
+                    } else {
+                        resolvedPolarPreview?.let { String.format(Locale.US, "%.2f", it.y) } ?: "—"
+                    }
+
+                    OutlinedTextField(
+                        value = displayX,
+                        onValueChange = {
+                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                                xText = it
+                                validationError = null
+                            }
+                        },
+                        enabled = mode == CoordinateInputMode.CARTESIAN_XY,
+                        label = { Text("X (${displayUnit.symbol})") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("coord_input_x_field")
+                    )
+
+                    OutlinedTextField(
+                        value = displayY,
+                        onValueChange = {
+                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                                yText = it
+                                validationError = null
+                            }
+                        },
+                        enabled = mode == CoordinateInputMode.CARTESIAN_XY,
+                        label = { Text("Y (${displayUnit.symbol})") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("coord_input_y_field")
+                    )
+                }
+
+                // Part 3: Dedicated Polar / Other Expression Field
                 OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    label = { Text("Coordinate or Polar Expression") },
+                    value = polarText,
+                    onValueChange = {
+                        if (mode == CoordinateInputMode.POLAR_OR_EXPRESSION) {
+                            polarText = it
+                            validationError = null
+                        }
+                    },
+                    enabled = mode == CoordinateInputMode.POLAR_OR_EXPRESSION,
+                    label = { Text("Polar / Expression") },
+                    placeholder = { Text("50<45, @30<90, @25,-10, or 40") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("direct_coordinate_text_field")
+                        .testTag("coord_input_polar_field")
                 )
+
+                Text(
+                    text = "Polar & Expression examples: 50<45 (absolute polar) • @30<90 (relative polar) • @25,-10 (relative ΔX,ΔY) • 40 (distance along current cursor angle)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CadTextSecondary
+                )
+
+                if (validationError != null) {
+                    Text(
+                        text = validationError!!,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CadCrimsonAlert,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.testTag("coord_validation_error_text")
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    onSubmitCoordinateExpression(inputText)
-                    onDismiss()
+                    if (mode == CoordinateInputMode.CARTESIAN_XY) {
+                        val parsedX = xText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+                        val parsedY = yText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+                        if (parsedX == null || parsedY == null) {
+                            validationError = "Enter valid numeric X and Y coordinates."
+                            return@Button
+                        }
+                        val prefix = if (isRelativeCartesian) "@" else ""
+                        val expr = "$prefix${xText.trim()},${yText.trim()}"
+                        onSubmitCoordinateExpression(expr)
+                        onDismiss()
+                    } else {
+                        val rawExpr = polarText.trim()
+                        val resolved = CadSnapAndCoordEngine.parseCoordinateInput(
+                            rawInput = rawExpr,
+                            referencePoint = referencePoint,
+                            currentCursor = currentCursor,
+                            orthoEnabled = false
+                        )
+                        if (resolved == null) {
+                            validationError = "Invalid polar or coordinate expression (use e.g. 50<45, @30<90, @25,-10, or 40)."
+                            return@Button
+                        }
+                        onSubmitCoordinateExpression(rawExpr)
+                        onDismiss()
+                    }
                 },
                 modifier = Modifier.testTag("submit_coordinate_button")
             ) {
@@ -1293,7 +1550,10 @@ fun DirectCoordinateInputDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("coord_cancel_button")
+            ) {
                 Text("Cancel")
             }
         }
@@ -1689,6 +1949,42 @@ fun PropertiesAndConstraintsDialog(
     )
 }
 
+private enum class ExportFormatCardSpec(
+    val shortCode: String,
+    val subtitle: String,
+    val tag: String,
+    val accentColor: Color,
+    val surfaceBg: Color
+) {
+    DXF(
+        shortCode = "DXF",
+        subtitle = "AC1015 R2000 CAD Interchange (.dxf)",
+        tag = "project_hub_export_card_dxf",
+        accentColor = CadCyanPrimary,
+        surfaceBg = Color(0xFF101B26)
+    ),
+    PDF(
+        shortCode = "PDF",
+        subtitle = "ISO / ASME Technical Sheet Plot (.pdf)",
+        tag = "project_hub_export_card_pdf",
+        accentColor = CadEmeraldCrossing,
+        surfaceBg = Color(0xFF0E2019)
+    ),
+    SVG(
+        shortCode = "SVG",
+        subtitle = "Precision Vector Sheet (.svg)",
+        tag = "project_hub_export_card_svg",
+        accentColor = CadAmberSnap,
+        surfaceBg = Color(0xFF211A0E)
+    )
+}
+
+/**
+ * Sections 63, 65, 66 & 67: Project Hub & Drawing Formats Dialog.
+ * Replaces the horizontal DXF / PDF / SVG button row with a Three-Format Stacked Export Card Deck
+ * supporting tap-to-export on the foreground card and downward-swipe cycling (DXF -> PDF -> SVG -> DXF)
+ * with single-line non-wrapping format labels. Excludes DWG/DWF.
+ */
 @Composable
 fun DxfAndProjectHubDialog(
     projects: List<CadProjectMetadataEntity>,
@@ -1701,65 +1997,222 @@ fun DxfAndProjectHubDialog(
     onExportSharePdf: () -> Unit,
     onExportShareSvg: () -> Unit,
     onImportDxfString: (String) -> Unit,
+    onDeleteProject: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    var saveName by remember { mutableStateOf(currentProjectName) }
+    var saveName by remember(currentProjectName) { mutableStateOf(currentProjectName) }
     var dxfImportInput by remember { mutableStateOf("") }
     var showImportBox by remember { mutableStateOf(false) }
+    var frontExportIndex by rememberSaveable { mutableIntStateOf(0) }
+
+    val formats = ExportFormatCardSpec.entries
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CadPanelSurface,
         title = {
-            Text("Project Hub & DXF / PDF / SVG Interoperability", style = MaterialTheme.typography.titleLarge)
+            Column {
+                Text(
+                    text = "Project Hub & Drawing Formats",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = CadTextPrimary,
+                    modifier = Modifier.testTag("project_hub_title")
+                )
+                Text(
+                    text = "Supported Interchange: DXF • PDF • SVG",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadCyanPrimary
+                )
+            }
         },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 340.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Export & Share Current Drawing", style = MaterialTheme.typography.titleSmall, color = CadCyanPrimary)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Button(
-                        onClick = onExportShareDxf,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("export_dxf_button")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("DXF")
-                    }
-                    Button(
-                        onClick = onExportSharePdf,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("export_pdf_button")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("PDF")
-                    }
-                    Button(
-                        onClick = onExportShareSvg,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("export_svg_button")
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("SVG")
+                    Text(
+                        text = "Export & Share Current Drawing",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = CadCyanPrimary,
+                        modifier = Modifier.testTag("project_hub_export_subtitle")
+                    )
+                    Text(
+                        text = "Swipe ↓ to cycle (${formats[frontExportIndex].shortCode} front)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CadTextSecondary
+                    )
+                }
+
+                // Three-Format (DXF / PDF / SVG) Stacked Export Card Deck (Sections 65, 66 & 67)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(82.dp)
+                        .padding(start = 18.dp, top = 4.dp, bottom = 4.dp)
+                        .pointerInput(frontExportIndex) {
+                            val touchSlop = viewConfiguration.touchSlop
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val startPos = down.position
+                                var totalDx = 0f
+                                var totalDy = 0f
+                                var swipedDown = false
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                                    if (change == null || !change.pressed) break
+                                    totalDx = change.position.x - startPos.x
+                                    totalDy = change.position.y - startPos.y
+                                    if (!swipedDown && totalDy >= touchSlop && totalDy > abs(totalDx) * 1.25f) {
+                                        swipedDown = true
+                                        change.consume()
+                                        frontExportIndex = (frontExportIndex + 1) % formats.size
+                                        break
+                                    }
+                                }
+                                if (!swipedDown && abs(totalDx) < touchSlop && abs(totalDy) < touchSlop) {
+                                    when (formats[frontExportIndex]) {
+                                        ExportFormatCardSpec.DXF -> onExportShareDxf()
+                                        ExportFormatCardSpec.PDF -> onExportSharePdf()
+                                        ExportFormatCardSpec.SVG -> onExportShareSvg()
+                                    }
+                                }
+                            }
+                        }
+                        .testTag("project_hub_export_card_deck"),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    formats.forEachIndexed { idx, spec ->
+                        val depth = (idx - frontExportIndex + formats.size) % formats.size
+                        val isFront = depth == 0
+                        val targetOffsetX = when (depth) {
+                            0 -> 0.dp
+                            1 -> (-9).dp
+                            else -> (-17).dp
+                        }
+                        val targetOffsetY = when (depth) {
+                            0 -> 0.dp
+                            1 -> 4.dp
+                            else -> 8.dp
+                        }
+                        val targetRotation = when (depth) {
+                            0 -> 0f
+                            1 -> -5f
+                            else -> -9f
+                        }
+                        val targetAlpha = when (depth) {
+                            0 -> 1f
+                            1 -> 0.72f
+                            else -> 0.46f
+                        }
+                        val animOffsetX by animateDpAsState(targetOffsetX, tween(180), label = "ExportDeckOffsetX_${spec.name}")
+                        val animOffsetY by animateDpAsState(targetOffsetY, tween(180), label = "ExportDeckOffsetY_${spec.name}")
+                        val animRotation by animateFloatAsState(targetRotation, tween(180), label = "ExportDeckRot_${spec.name}")
+                        val animAlpha by animateFloatAsState(targetAlpha, tween(180), label = "ExportDeckAlpha_${spec.name}")
+
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(66.dp)
+                                .zIndex((formats.size - depth).toFloat())
+                                .offset(x = animOffsetX, y = animOffsetY)
+                                .graphicsLayer {
+                                    rotationZ = animRotation
+                                    alpha = animAlpha
+                                }
+                                .border(
+                                    width = if (isFront) 1.5.dp else 1.dp,
+                                    color = if (isFront) spec.accentColor else CadBorderHairline,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .testTag(spec.tag),
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isFront) spec.surfaceBg else CadPanelElevated
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(spec.accentColor.copy(alpha = 0.20f))
+                                            .border(1.dp, spec.accentColor, RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = spec.shortCode,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = spec.accentColor,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Export ${spec.shortCode}",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = CadTextPrimary,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                        Text(
+                                            text = spec.subtitle,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = CadTextSecondary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Export ${spec.shortCode}",
+                                        tint = spec.accentColor,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = if (isFront) "TAP" else "PEEK",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = spec.accentColor,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
                 OutlinedButton(
                     onClick = { showImportBox = !showImportBox },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("project_hub_dxf_inspector_button")
                 ) {
                     Text(if (showImportBox) "Hide DXF Inspector / Importer" else "Inspect / Paste ASCII DXF Content")
                 }
@@ -1796,49 +2249,91 @@ fun DxfAndProjectHubDialog(
                         onValueChange = { saveName = it },
                         label = { Text("Drawing Name") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("project_hub_save_name_field")
                     )
-                    Button(onClick = { onSaveCurrentProject(saveName) }) {
+                    Button(
+                        onClick = { onSaveCurrentProject(saveName) },
+                        modifier = Modifier.testTag("project_hub_save_button")
+                    ) {
                         Text("Save")
                     }
                 }
 
                 HorizontalDivider(color = CadBorderHairline)
-                Text("Saved Drawings & Industrial Templates", style = MaterialTheme.typography.titleSmall, color = CadTextPrimary)
-                projects.forEach { proj ->
-                    Row(
+                Text("Saved Drawings (${projects.size})", style = MaterialTheme.typography.titleSmall, color = CadTextPrimary)
+                if (projects.isEmpty()) {
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(CadPanelElevated)
                             .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
-                            .clickable {
-                                onLoadProject(proj.projectId)
-                                onDismiss()
-                            }
-                            .padding(8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(12.dp)
+                            .testTag("project_hub_empty_saved_drawings")
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(proj.name, style = MaterialTheme.typography.titleSmall, color = CadCyanPrimary)
-                            Text(proj.description, style = MaterialTheme.typography.bodyMedium, color = CadTextSecondary, maxLines = 2)
-                            Text(
-                                text = "Units: ${proj.workingUnitSymbol} • ${proj.entityCount} entities (${proj.dimensionCount} dims)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CadTextMuted
-                            )
+                        Text(
+                            text = "No saved drawings yet. Save your current drawing to store it locally.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CadTextSecondary
+                        )
+                    }
+                } else {
+                    projects.forEach { proj ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(CadPanelElevated)
+                                .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
+                                .clickable {
+                                    onLoadProject(proj.projectId)
+                                    onDismiss()
+                                }
+                                .padding(8.dp)
+                                .testTag("project_hub_saved_item_${proj.projectId}"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(proj.name, style = MaterialTheme.typography.titleSmall, color = CadCyanPrimary)
+                                Text(proj.description, style = MaterialTheme.typography.bodyMedium, color = CadTextSecondary, maxLines = 2)
+                                Text(
+                                    text = "Units: ${proj.workingUnitSymbol} • ${proj.entityCount} entities (${proj.dimensionCount} dims)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CadTextMuted
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("OPEN", style = MaterialTheme.typography.labelMedium, color = CadAmberSnap, fontWeight = FontWeight.Bold)
+                                IconButton(
+                                    onClick = { onDeleteProject(proj.projectId) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete Saved Drawing",
+                                        tint = CadCrimsonAlert,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
                         }
-                        Text("OPEN", style = MaterialTheme.typography.labelMedium, color = CadAmberSnap, fontWeight = FontWeight.Bold)
                     }
                 }
 
                 OutlinedButton(
                     onClick = {
-                        onCreateBlankProject("NEW MECHANICAL DRAWING", CadUnit.MM)
+                        onCreateBlankProject("Untitled Drawing", CadUnit.MM)
                         onDismiss()
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("project_hub_new_blank_button")
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
@@ -1847,9 +2342,13 @@ fun DxfAndProjectHubDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("project_hub_close_button")
+            ) {
                 Text("Close")
             }
         }
     )
 }
+
