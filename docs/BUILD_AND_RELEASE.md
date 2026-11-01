@@ -20,7 +20,7 @@
 ## 3. GitHub Actions Workflow (`.github/workflows/build-signed-apk.yml`)
 
 1. **Modern Android SDK Provisioning**:
-   - Uses `android-actions/setup-android@v3` and installs only supported SDK packages (`platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) after accepting licenses. Never references the obsolete `tools` package.
+   - Uses `android-actions/setup-android@v4` with `with: packages: 'platform-tools'` (which defaults to `platform-tools` and strips any obsolete `tools` package) and installs only supported SDK packages (`platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) after accepting licenses.
 2. **Release Signing & Verification**:
    - Uses repository secrets (`KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`) when configured, or generates a deterministic JKS signing key (`alias: upload`) so CI builds remain self-contained.
    - Verifies both `app-release.apk` and `app-debug.apk` with `apksigner verify --verbose --print-certs` and enforces that each variant directory contains exactly 1 APK.

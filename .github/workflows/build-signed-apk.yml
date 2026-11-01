@@ -47,13 +47,15 @@ jobs:
           java-version: '21'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Install required Android SDK packages
         shell: bash
         run: |
           set +o pipefail
-          yes | sdkmanager --licenses
+          yes | sdkmanager --licenses > /dev/null
           set -o pipefail
           sdkmanager --install \
             "platform-tools" \
