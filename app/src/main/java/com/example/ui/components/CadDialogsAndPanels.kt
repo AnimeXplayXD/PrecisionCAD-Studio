@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -625,6 +626,7 @@ fun QuickDimensionDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 300.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1312,6 +1314,15 @@ fun ControllerAndSnapSettingsDialog(
     var gridSnapIntText by remember { mutableStateOf(gridSnapConfig.gridSnapInterval.toString()) }
     var majorGridText by remember { mutableStateOf(gridSnapConfig.majorGridInterval.toString()) }
     var enabledOsnaps by remember { mutableStateOf(gridSnapConfig.enabledOsnapModes) }
+    var polarEnabled by remember { mutableStateOf(gridSnapConfig.polarTrackingEnabled) }
+    var polarSnapEnabled by remember { mutableStateOf(gridSnapConfig.polarSnapEnabled) }
+    var polarIncrementDeg by remember { mutableDoubleStateOf(gridSnapConfig.polarTrackingAngleDeg) }
+    var polarAdditionalAnglesText by remember {
+        mutableStateOf(gridSnapConfig.polarAdditionalAnglesDeg.joinToString(", ") {
+            if (it % 1.0 == 0.0) it.toInt().toString() else it.toString()
+        })
+    }
+    var polarRelativeToLast by remember { mutableStateOf(gridSnapConfig.polarRelativeToLastSegment) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1366,6 +1377,101 @@ fun ControllerAndSnapSettingsDialog(
                 )
 
                 HorizontalDivider(color = CadBorderHairline)
+                Text("Visual Polar Tracking (R, θ, θp)", style = MaterialTheme.typography.titleSmall, color = CadEmeraldCrossing)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Enable Visual Polar Tracking (Disables ORTHO)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = CadTextPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = polarEnabled,
+                        onCheckedChange = { polarEnabled = it },
+                        modifier = Modifier.testTag("settings_polar_tracking_switch")
+                    )
+                }
+
+                Text("Polar Increment Angle Presets", style = MaterialTheme.typography.labelSmall, color = CadTextSecondary)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    GridAndSnapConfig.standardPolarIncrementPresets.forEach { preset ->
+                        val isSelected = kotlin.math.abs(polarIncrementDeg - preset) < 1e-3
+                        val label = if (preset % 1.0 == 0.0) "${preset.toInt()}°" else "${preset}°"
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSelected) CadEmeraldCrossing.copy(alpha = 0.22f) else CadPanelElevated)
+                                .border(1.dp, if (isSelected) CadEmeraldCrossing else CadBorderHairline, RoundedCornerShape(6.dp))
+                                .clickable { polarIncrementDeg = preset }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                .testTag("polar_preset_${preset}")
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected) CadEmeraldCrossing else CadTextSecondary,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = polarAdditionalAnglesText,
+                    onValueChange = { polarAdditionalAnglesText = it },
+                    label = { Text("Additional Custom Polar Angles (e.g., 126, 216)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("polar_additional_angles_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Measure Polar Angle Relative to Last Segment",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CadTextSecondary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = polarRelativeToLast,
+                        onCheckedChange = { polarRelativeToLast = it },
+                        modifier = Modifier.testTag("polar_relative_reference_switch")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "PolarSnap: Project Candidate Point Onto Acquired Ray",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CadTextSecondary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = polarSnapEnabled,
+                        onCheckedChange = { polarSnapEnabled = it },
+                        modifier = Modifier.testTag("polar_snap_projection_switch")
+                    )
+                }
+
+                HorizontalDivider(color = CadBorderHairline)
                 Text("Active Object Snap (OSNAP) Modes", style = MaterialTheme.typography.titleSmall, color = CadTextPrimary)
                 OsnapMode.entries.chunked(2).forEach { rowModes ->
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1400,6 +1506,12 @@ fun ControllerAndSnapSettingsDialog(
                     val updatedList = if (controllerConfig.availableIncrements.none { kotlin.math.abs(it - customInc) < 1e-6 }) {
                         (controllerConfig.availableIncrements + customInc).sortedDescending()
                     } else controllerConfig.availableIncrements
+                    val parsedAdditionalAngles = polarAdditionalAnglesText
+                        .split(",", ";", " ")
+                        .mapNotNull { it.trim().toDoubleOrNull() }
+                        .filter { it.isFinite() }
+                        .map { ((it % 360.0) + 360.0) % 360.0 }
+                        .distinct()
                     onUpdateController(
                         controllerConfig.copy(
                             touchpadSensitivity = sensitivity,
@@ -1412,7 +1524,13 @@ fun ControllerAndSnapSettingsDialog(
                         gridSnapConfig.copy(
                             gridSnapInterval = gridSnapIntText.toDoubleOrNull()?.coerceAtLeast(0.001) ?: gridSnapConfig.gridSnapInterval,
                             majorGridInterval = majorGridText.toDoubleOrNull()?.coerceAtLeast(1.0) ?: gridSnapConfig.majorGridInterval,
-                            enabledOsnapModes = enabledOsnaps
+                            enabledOsnapModes = enabledOsnaps,
+                            polarTrackingEnabled = polarEnabled,
+                            orthoEnabled = if (polarEnabled) false else gridSnapConfig.orthoEnabled,
+                            polarSnapEnabled = polarSnapEnabled,
+                            polarTrackingAngleDeg = polarIncrementDeg,
+                            polarAdditionalAnglesDeg = parsedAdditionalAngles,
+                            polarRelativeToLastSegment = polarRelativeToLast
                         )
                     )
                     onDismiss()

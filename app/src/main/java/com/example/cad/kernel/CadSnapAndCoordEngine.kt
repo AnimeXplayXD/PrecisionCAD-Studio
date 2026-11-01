@@ -272,7 +272,152 @@ data class SnapCandidate(
     val sourceEntityId: String? = null
 )
 
+/**
+ * Sections 45, 46, 47 & 48 — Read-Only Visual Polar Tracking & Live Measurement State.
+ * Strictly visual/read-only: never mutates the raw stored virtual cursor coordinate,
+ * never creates editable near-cursor text fields, and never enters document entities or exports.
+ *
+ * - [basePoint]: Accepted command base point B = (Bx, By).
+ * - [rawCursorPoint]: Live raw virtual cursor position P = (Px, Py).
+ * - [radialDistanceR]: Live raw radial distance R = hypot(Px - Bx, Py - By) in model units.
+ * - [actualAngleThetaDeg]: Live unrounded cursor bearing θ in [0, 360) degrees (null if R is degenerate ~ 0).
+ * - [referenceAngleDeg]: Reference zero-angle direction (0° absolute +X, or previous segment angle when relative mode is active).
+ * - [activePolarAngleDeg]: Acquired configured polar angle θp in [0, 360) degrees when |θ - θp| <= tolerance and polarTrackingEnabled is true; null otherwise.
+ * - [worldPolarAngleDeg]: Active polar direction in absolute world degrees [0, 360) for ray rendering and projection.
+ * - [projectedPolarPoint]: Point B + R * (cos θp, sin θp) along the active polar ray (used only as candidate point if polarSnapEnabled is true).
+ */
+data class PolarTrackingPreviewState(
+    val basePoint: Point2D,
+    val rawCursorPoint: Point2D,
+    val radialDistanceR: Double,
+    val actualAngleThetaDeg: Double?,
+    val referenceAngleDeg: Double = 0.0,
+    val activePolarAngleDeg: Double? = null,
+    val worldPolarAngleDeg: Double? = null,
+    val projectedPolarPoint: Point2D? = null
+) {
+    val hasValidDirection: Boolean get() = actualAngleThetaDeg != null && radialDistanceR > 1e-5
+    val isPolarGuideAcquired: Boolean get() = activePolarAngleDeg != null && worldPolarAngleDeg != null && hasValidDirection
+}
+
 object CadSnapAndCoordEngine {
+
+    fun normalizeAngle360(deg: Double): Double {
+        if (!deg.isFinite()) return 0.0
+        val mod = deg % 360.0
+        val pos = if (mod < 0.0) mod + 360.0 else mod
+        return if (abs(pos - 360.0) < 1e-7) 0.0 else pos
+    }
+
+    fun wrappedAngularDiffDeg(a: Double, b: Double): Double {
+        val d = abs(normalizeAngle360(a) - normalizeAngle360(b)) % 360.0
+        return if (d > 180.0) 360.0 - d else d
+    }
+
+    /**
+     * Sections 45–48: Computes the live read-only Polar Tracking preview (R, θ, θp, guide ray & arc)
+     * from the accepted command [basePoint] to [rawCursorPoint] in model space.
+     * Returns null when [basePoint] is null (e.g. before the first point of LINE/POLYLINE is accepted).
+     */
+    fun computePolarTrackingPreview(
+        basePoint: Point2D?,
+        rawCursorPoint: Point2D,
+        snapConfig: GridAndSnapConfig,
+        previousBasePoint: Point2D? = null
+    ): PolarTrackingPreviewState? {
+        if (basePoint == null) return null
+        val dx = rawCursorPoint.x - basePoint.x
+        val dy = rawCursorPoint.y - basePoint.y
+        val r = hypot(dx, dy)
+
+        val refDeg = if (
+            snapConfig.polarRelativeToLastSegment &&
+            previousBasePoint != null &&
+            previousBasePoint.distanceTo(basePoint) > 1e-5
+        ) {
+            normalizeAngle360(previousBasePoint.angleToDeg(basePoint))
+        } else {
+            0.0
+        }
+
+        if (!r.isFinite() || r <= 1e-5) {
+            return PolarTrackingPreviewState(
+                basePoint = basePoint,
+                rawCursorPoint = rawCursorPoint,
+                radialDistanceR = 0.0,
+                actualAngleThetaDeg = null,
+                referenceAngleDeg = refDeg,
+                activePolarAngleDeg = null,
+                worldPolarAngleDeg = null,
+                projectedPolarPoint = null
+            )
+        }
+
+        val rawWorldDeg = normalizeAngle360(Math.toDegrees(kotlin.math.atan2(dy, dx)))
+        val relativeThetaDeg = normalizeAngle360(rawWorldDeg - refDeg)
+
+        if (!snapConfig.polarTrackingEnabled) {
+            return PolarTrackingPreviewState(
+                basePoint = basePoint,
+                rawCursorPoint = rawCursorPoint,
+                radialDistanceR = r,
+                actualAngleThetaDeg = relativeThetaDeg,
+                referenceAngleDeg = refDeg,
+                activePolarAngleDeg = null,
+                worldPolarAngleDeg = null,
+                projectedPolarPoint = null
+            )
+        }
+
+        // Build configured polar angle set A = { multiples of increment } U { additionalAngles }
+        val inc = snapConfig.polarTrackingAngleDeg.coerceIn(1.0, 180.0)
+        val configuredAngles = mutableListOf<Double>()
+        var deg = 0.0
+        while (deg < 360.0 - 1e-5) {
+            configuredAngles.add(normalizeAngle360(deg))
+            deg += inc
+        }
+        snapConfig.polarAdditionalAnglesDeg.forEach { addAngle ->
+            if (addAngle.isFinite()) {
+                val norm = normalizeAngle360(addAngle)
+                if (configuredAngles.none { abs(it - norm) < 1e-4 }) {
+                    configuredAngles.add(norm)
+                }
+            }
+        }
+
+        val tolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
+        val bestPolarDeg = configuredAngles.minByOrNull { cand ->
+            wrappedAngularDiffDeg(relativeThetaDeg, cand)
+        }
+        val minDiff = if (bestPolarDeg != null) wrappedAngularDiffDeg(relativeThetaDeg, bestPolarDeg) else Double.MAX_VALUE
+
+        return if (bestPolarDeg != null && minDiff <= tolerance) {
+            val worldPolar = normalizeAngle360(refDeg + bestPolarDeg)
+            val projectedPt = basePoint.polarOffset(r, worldPolar)
+            PolarTrackingPreviewState(
+                basePoint = basePoint,
+                rawCursorPoint = rawCursorPoint,
+                radialDistanceR = r,
+                actualAngleThetaDeg = relativeThetaDeg,
+                referenceAngleDeg = refDeg,
+                activePolarAngleDeg = bestPolarDeg,
+                worldPolarAngleDeg = worldPolar,
+                projectedPolarPoint = projectedPt
+            )
+        } else {
+            PolarTrackingPreviewState(
+                basePoint = basePoint,
+                rawCursorPoint = rawCursorPoint,
+                radialDistanceR = r,
+                actualAngleThetaDeg = relativeThetaDeg,
+                referenceAngleDeg = refDeg,
+                activePolarAngleDeg = null,
+                worldPolarAngleDeg = null,
+                projectedPolarPoint = null
+            )
+        }
+    }
 
     /**
      * Parses direct numeric coordinate expressions:
@@ -357,11 +502,13 @@ object CadSnapAndCoordEngine {
 
     /**
      * Evaluates OSNAP candidates in screen-space proximity while preserving exact model-space coordinates.
-     * Snap priority:
+     * Snap priority (Section 45.7):
      * 1. Temporary OSNAP override (if active)
      * 2. Active OSNAP modes (Endpoint/Intersection/Center/Midpoint/Quadrant/Perpendicular/Tangent/Insertion/Nearest)
-     * 3. Grid Snap (if enabled)
-     * 4. Ortho lock / unrestricted cursor coordinate
+     * 3. Optional PolarSnap candidate (only when polarTrackingEnabled && polarSnapEnabled && activePolarAngleDeg != null)
+     * 4. Ortho lock (when orthoEnabled)
+     * 5. Grid Snap (if enabled)
+     * 6. Free cursor candidate
      */
     fun resolveCursorSnap(
         rawModelCursor: Point2D,
@@ -369,7 +516,8 @@ object CadSnapAndCoordEngine {
         entities: List<CadEntity>,
         snapConfig: GridAndSnapConfig,
         viewport: ViewportTransform,
-        snapApertureScreenPx: Float = 26f
+        snapApertureScreenPx: Float = 26f,
+        previousReferencePoint: Point2D? = null
     ): Pair<Point2D, SnapCandidate?> {
         val activeModes: Set<OsnapMode> = when {
             snapConfig.temporaryOsnapOverride != null -> setOf(snapConfig.temporaryOsnapOverride)
@@ -402,6 +550,17 @@ object CadSnapAndCoordEngine {
         var working = rawModelCursor
         if (snapConfig.orthoEnabled && referencePoint != null) {
             working = applyOrthoLock(working, referencePoint)
+        } else if (snapConfig.polarTrackingEnabled && snapConfig.polarSnapEnabled && referencePoint != null) {
+            val polarPreview = computePolarTrackingPreview(
+                basePoint = referencePoint,
+                rawCursorPoint = working,
+                snapConfig = snapConfig,
+                previousBasePoint = previousReferencePoint
+            )
+            if (polarPreview?.projectedPolarPoint != null) {
+                working = polarPreview.projectedPolarPoint
+                return working to null
+            }
         }
         if (snapConfig.gridSnapEnabled) {
             working = applyGridSnap(working, snapConfig.gridSnapInterval)

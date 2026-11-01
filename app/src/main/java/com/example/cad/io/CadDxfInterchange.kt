@@ -308,12 +308,12 @@ object CadDxfInterchange {
                 sb.appendLine("0\nHATCH\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")
                 appendCommonEntityProps(sb, ent)
                 sb.appendLine("100\nAcDbHatch")
-                sb.appendLine("2\n${ent.pattern.dxfName}\n70\n${if (ent.pattern == HatchPattern.SOLID) 1 else 0}")
-                sb.appendLine("41\n${fmt(ent.patternScale)}\n52\n${fmt(ent.patternAngleDeg)}")
-                sb.appendLine("93\n${ent.boundaryPoints.size}")
+                sb.appendLine("2\n${ent.pattern.dxfName}\n70\n${if (ent.pattern == HatchPattern.SOLID) 1 else 0}\n71\n0")
+                sb.appendLine("91\n1\n92\n2\n72\n0\n73\n1\n93\n${ent.boundaryPoints.size}")
                 for (pt in ent.boundaryPoints) {
                     sb.appendLine("10\n${u(pt.x)}\n20\n${u(pt.y)}")
                 }
+                sb.appendLine("97\n0\n75\n0\n76\n1\n41\n${fmt(ent.patternScale)}\n52\n${fmt(ent.patternAngleDeg)}\n98\n0")
             }
             is CadEntity.TextEntity -> {
                 sb.appendLine("0\nMTEXT\n5\n${nextHandle()}\n100\nAcDbEntity\n8\n${ent.layerName}")

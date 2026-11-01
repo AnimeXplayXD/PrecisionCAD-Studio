@@ -503,7 +503,6 @@ object AutoDimensionEngine {
 
         for ((srcId, line) in allLines) {
             val len = line.length
-            if (len <= 1.0) continue
             val ang = ((line.angleDeg % 180.0) + 180.0) % 180.0
             val isHorizontal = abs(ang) < 1e-2 || abs(ang - 180.0) < 1e-2
             val isVertical = abs(ang - 90.0) < 1e-2
@@ -511,6 +510,21 @@ object AutoDimensionEngine {
                 isHorizontal -> "HORIZONTAL"
                 isVertical -> "VERTICAL"
                 else -> "INCLINED"
+            }
+
+            if (len <= 1.0) {
+                edgeDiagnostics.add(
+                    EdgeDimensionDiagnostic(
+                        sourceEntityId = srcId,
+                        start = line.start,
+                        end = line.end,
+                        length = len,
+                        orientation = orientation,
+                        status = EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH,
+                        reason = "Segment length (${"%.2f".format(len)}) is below minimum feature threshold (1.0)."
+                    )
+                )
+                continue
             }
 
             if (isHorizontal) {
@@ -585,7 +599,20 @@ object AutoDimensionEngine {
                             )
                         )
                     }
-                    !alreadyInCandidates && len > 2.0 -> {
+                    len <= 2.0 -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH,
+                                reason = "Horizontal segment (${"%.2f".format(len)}) below 2.0 minimum local feature threshold."
+                            )
+                        )
+                    }
+                    !alreadyInCandidates -> {
                         val trackY = if (segY >= overallBounds.maxY - 1.0) {
                             overallBounds.maxY + innerTrackOffset
                         } else {
@@ -687,7 +714,20 @@ object AutoDimensionEngine {
                             )
                         )
                     }
-                    !alreadyInCandidates && len > 2.0 -> {
+                    len <= 2.0 -> {
+                        edgeDiagnostics.add(
+                            EdgeDimensionDiagnostic(
+                                sourceEntityId = srcId,
+                                start = line.start,
+                                end = line.end,
+                                length = len,
+                                orientation = orientation,
+                                status = EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH,
+                                reason = "Vertical segment (${"%.2f".format(len)}) below 2.0 minimum local feature threshold."
+                            )
+                        )
+                    }
+                    !alreadyInCandidates -> {
                         val trackX = if (segX <= overallBounds.center.x) {
                             overallBounds.minX - innerTrackOffset
                         } else {
@@ -731,7 +771,19 @@ object AutoDimensionEngine {
                             reason = "Inclined edge suppressed under Sparse density policy."
                         )
                     )
-                } else if (len > 3.0) {
+                } else if (len <= 3.0) {
+                    edgeDiagnostics.add(
+                        EdgeDimensionDiagnostic(
+                            sourceEntityId = srcId,
+                            start = line.start,
+                            end = line.end,
+                            length = len,
+                            orientation = orientation,
+                            status = EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH,
+                            reason = "Inclined segment (${"%.2f".format(len)}) below 3.0 minimum local feature threshold."
+                        )
+                    )
+                } else {
                     val normalRad = Math.toRadians(line.angleDeg + 90.0)
                     val mid = line.midpoint
                     val alignedDim = CadEntity.DimensionEntity(

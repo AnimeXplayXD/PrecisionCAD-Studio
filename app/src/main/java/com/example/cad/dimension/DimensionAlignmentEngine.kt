@@ -83,7 +83,8 @@ enum class EdgeDimensionStatus {
     COVERED_BY_PRIMARY_OVERALL,
     DERIVABLE_FROM_OVERALL_AND_FILLETS,
     SUPPRESSED_BY_SPARSE_POLICY,
-    COVERED_BY_MANUAL_DIMENSION
+    COVERED_BY_MANUAL_DIMENSION,
+    BELOW_MINIMUM_FEATURE_LENGTH
 }
 
 data class EdgeDimensionDiagnostic(
@@ -380,6 +381,7 @@ object DimensionAlignmentEngine {
                     it.status == EdgeDimensionStatus.COVERED_BY_PRIMARY_OVERALL ||
                     it.status == EdgeDimensionStatus.DERIVABLE_FROM_OVERALL_AND_FILLETS ||
                     it.status == EdgeDimensionStatus.COVERED_BY_MANUAL_DIMENSION ||
+                    it.status == EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH ||
                     (densityPolicy == QDimDensityPolicy.SPARSE && it.status == EdgeDimensionStatus.SUPPRESSED_BY_SPARSE_POLICY)
             }
             (coveredCount.toDouble() / edgeDiagnostics.size.toDouble()) * 100.0
@@ -945,6 +947,35 @@ object DimensionAlignmentEngine {
                 if (l.id in currentDim.sourceEntityIds) continue
                 val dText = CadGeometryKernel.distancePointToSegment(plan.textPositionModel, l.start, l.end)
                 if (dText < 2.0) return true
+                // Check if candidate dimension line crosses an unrelated obstacle line in its interior
+                val crossPt = CadGeometryKernel.intersectSegments(
+                    plan.dimLineStartModel,
+                    plan.dimLineEndModel,
+                    l.start,
+                    l.end
+                )
+                if (crossPt != null &&
+                    crossPt.distanceTo(plan.dimLineStartModel) > 1.0 &&
+                    crossPt.distanceTo(plan.dimLineEndModel) > 1.0
+                ) {
+                    return true
+                }
+            }
+            for ((s1, s2) in occupiedSegments) {
+                val crossDim = CadGeometryKernel.intersectSegments(
+                    plan.dimLineStartModel,
+                    plan.dimLineEndModel,
+                    s1,
+                    s2
+                )
+                if (crossDim != null &&
+                    crossDim.distanceTo(plan.dimLineStartModel) > 1.0 &&
+                    crossDim.distanceTo(plan.dimLineEndModel) > 1.0 &&
+                    crossDim.distanceTo(s1) > 1.0 &&
+                    crossDim.distanceTo(s2) > 1.0
+                ) {
+                    return true
+                }
             }
             return false
         }

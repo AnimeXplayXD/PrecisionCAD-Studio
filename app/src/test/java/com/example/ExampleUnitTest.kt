@@ -520,7 +520,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `TC-NAV-14 verify v10 Sheet Gesture State Machine (1-Finger Pan, 2-Finger Pinch Zoom-Only, Left-Edge Drawer Reveal)`() {
+    fun `TC-NAV-14 verify v15 Sheet Gesture State Machine (1-Finger Pan, Simultaneous 2-Finger Pan and Pinch Zoom, Left-Edge Drawer Reveal)`() {
         // 1. 0 -> 1 pointer outside left-edge zone enters ONE_POINTER_PAN
         assertEquals(
             ViewportGestureState.ONE_POINTER_PAN,
@@ -547,7 +547,7 @@ class ExampleUnitTest {
                 activePointerCount = 2
             )
         )
-        // 4. 2 -> 1 pointer enters POST_PINCH_POINTER_SUPPRESSED so trailing finger does not pan
+        // 4. 2 -> 1 pointer enters POST_PINCH_POINTER_SUPPRESSED so trailing finger does not jump
         assertEquals(
             ViewportGestureState.POST_PINCH_POINTER_SUPPRESSED,
             ViewportGesturePolicy.transitionState(
@@ -568,57 +568,134 @@ class ExampleUnitTest {
         assertEquals(340f, panned.panScreenY, 1e-4f)
         assertEquals(vp0.pixelsPerModelUnit, panned.pixelsPerModelUnit, 1e-5f)
 
-        // 7. Two-finger pinch zoom-only keeps locked focal anchor stationary on screen
-        val anchorScreen = Offset(400f, 300f)
-        val modelAtAnchor = vp0.screenToModel(anchorScreen)
-        val zoomed = ViewportGesturePolicy.applyTwoFingerPinchZoomOnly(
+        // 7. Simultaneous Two-Finger Pan + Pinch Zoom translates by centroid delta and scales around centroid
+        val prevCentroid = Offset(400f, 300f)
+        val panDelta = Offset(25f, -15f)
+        val currentCentroid = prevCentroid + panDelta
+        val modelAtPrevCentroid = vp0.screenToModel(prevCentroid)
+        val twoFingerUpdated = ViewportGesturePolicy.applyTwoFingerTransform(
             viewport = vp0,
-            focalAnchorScreen = anchorScreen,
-            zoomFactor = 2.5f
+            centroidScreen = currentCentroid,
+            panDeltaScreen = panDelta,
+            zoomFactor = 2.0f
         )
-        val screenAfterZoom = zoomed.modelToScreen(modelAtAnchor)
-        assertEquals(anchorScreen.x, screenAfterZoom.x, 1e-2f)
-        assertEquals(anchorScreen.y, screenAfterZoom.y, 1e-2f)
+        assertEquals(8.0f, twoFingerUpdated.pixelsPerModelUnit, 1e-4f)
+        val screenAfterTwoFinger = twoFingerUpdated.modelToScreen(modelAtPrevCentroid)
+        assertEquals(currentCentroid.x, screenAfterTwoFinger.x, 1e-2f)
+        assertEquals(currentCentroid.y, screenAfterTwoFinger.y, 1e-2f)
     }
 
     @Test
-    fun `TC-TPAD-24 verify v10 TouchpadMotionEngine tap-hold zero displacement and velocity curve`() {
-        val engine = com.example.ui.components.TouchpadMotionEngine(touchSlopPx = 10f)
+    fun `TC-TPAD-24 verify v15 Reverted Direct 1-to-1 TouchpadMotionEngine without touch-slop delay or velocity acceleration`() {
+        val engine = com.example.ui.components.TouchpadMotionEngine()
         engine.onDown(Offset(100f, 100f))
-        assertEquals(com.example.ui.components.TouchpadGestureState.PRESSED_UNDECIDED, engine.state)
-
-        // Sub-slop micro-jitter produces exact 0.0 movement
-        val jitterDelta = engine.onMoveSample(Offset(104f, 103f), activePointerCount = 1, velocityPxPerSec = 50f)
-        assertEquals(0f, jitterDelta.x, 1e-5f)
-        assertEquals(0f, jitterDelta.y, 1e-5f)
-
-        // Crossing touchSlop transitions to DRAG_ACTIVE and discards threshold-crossing jump
-        val activationDelta = engine.onMoveSample(Offset(115f, 100f), activePointerCount = 1, velocityPxPerSec = 200f)
         assertEquals(com.example.ui.components.TouchpadGestureState.DRAG_ACTIVE, engine.state)
-        assertEquals(0f, activationDelta.x, 1e-5f)
-        assertEquals(0f, activationDelta.y, 1e-5f)
 
-        // Subsequent drag sample emits velocity-scaled delta
-        val activeDelta = engine.onMoveSample(Offset(125f, 100f), activePointerCount = 1, velocityPxPerSec = 400f)
-        assertTrue(activeDelta.x > 10f)
+        // Stationary tap (zero delta) produces exact 0.0 movement
+        val zeroDelta = engine.onMoveSample(Offset(100f, 100f), activePointerCount = 1)
+        assertEquals(0f, zeroDelta.x, 1e-5f)
+        assertEquals(0f, zeroDelta.y, 1e-5f)
+
+        // First non-zero sample immediately emits exact 1:1 relative delta (no touch-slop discard or velocity multiplier)
+        val firstMoveDelta = engine.onMoveSample(Offset(106f, 96f), activePointerCount = 1, velocityPxPerSec = 900f)
+        assertEquals(6f, firstMoveDelta.x, 1e-5f)
+        assertEquals(-4f, firstMoveDelta.y, 1e-5f)
+
+        // Subsequent drag sample continues direct 1:1 delta
+        val secondMoveDelta = engine.onMoveSample(Offset(118f, 90f), activePointerCount = 1, velocityPxPerSec = 1200f)
+        assertEquals(12f, secondMoveDelta.x, 1e-5f)
+        assertEquals(-6f, secondMoveDelta.y, 1e-5f)
 
         // Multi-pointer touch cancels touchpad motion and freezes cursor
-        val multiDelta = engine.onMoveSample(Offset(140f, 100f), activePointerCount = 2, velocityPxPerSec = 500f)
+        val multiDelta = engine.onMoveSample(Offset(140f, 100f), activePointerCount = 2)
         assertEquals(com.example.ui.components.TouchpadGestureState.MULTI_POINTER_CANCELLED, engine.state)
         assertEquals(0f, multiDelta.x, 1e-5f)
 
-        // Velocity gain curve is bounded and monotonically increasing
-        val gLow = com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(0f)
-        val gHigh = com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(1200f)
-        assertEquals(0.72f, gLow, 1e-3f)
-        assertTrue(gHigh > gLow)
-        assertTrue(gHigh <= com.example.ui.components.TouchpadMotionEngine.MAX_FAST_GAIN)
+        // Velocity gain is strictly 1.0f in v15 direct 1:1 mode
+        assertEquals(1.0f, com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(0f), 1e-5f)
+        assertEquals(1.0f, com.example.ui.components.TouchpadMotionEngine.computeVelocityGain(1200f), 1e-5f)
     }
 
     @Test
-    fun `TC-QDIM-31 verify v10 QDIM Local Profile Feature Classification on Concave U-Notch and Coherent Collision Relocation`() {
-        // Concave U-notch polygon from Section 31.1:
-        // (40,60)->(196,60)->(196,198)->(158,198)->(158,102)->(82,102)->(82,198)->(40,198)->close
+    fun `TC-POLAR-43 verify v15 Visual-Only Polar Tracking R, live bearing theta, acquired polar guide theta_p (90, 126, 180 deg), and PolarSnap`() {
+        val basePoint = Point2D(50.0, 50.0)
+        val config = com.example.cad.model.GridAndSnapConfig(
+            polarTrackingEnabled = true,
+            polarSnapEnabled = false,
+            polarTrackingAngleDeg = 45.0,
+            polarAdditionalAnglesDeg = listOf(126.0),
+            polarAcquisitionToleranceDeg = 5.0
+        )
+
+        // 1. Near 90 degrees (cursor at 89.2 deg, R = 40.0): live theta = 89.2 deg, acquired polarAngleDeg = 90.0 deg
+        val cursorNear90 = basePoint.polarOffset(40.0, 89.2)
+        val preview90 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePoint,
+            rawCursorPoint = cursorNear90,
+            snapConfig = config,
+            previousBasePoint = null
+        )
+        assertNotNull(preview90)
+        assertEquals(40.0, preview90!!.radialDistanceR, 1e-3)
+        assertEquals(89.2, preview90.actualAngleThetaDeg!!, 1e-2)
+        assertTrue(preview90.isPolarGuideAcquired)
+        assertEquals(90.0, preview90.activePolarAngleDeg!!, 1e-3)
+
+        // 2. Near custom additional angle 126 degrees (cursor at 124.8 deg, R = 60.0): live theta = 124.8 deg, acquired polarAngleDeg = 126.0 deg
+        val cursorNear126 = basePoint.polarOffset(60.0, 124.8)
+        val preview126 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePoint,
+            rawCursorPoint = cursorNear126,
+            snapConfig = config,
+            previousBasePoint = null
+        )
+        assertNotNull(preview126)
+        assertEquals(60.0, preview126!!.radialDistanceR, 1e-3)
+        assertEquals(124.8, preview126.actualAngleThetaDeg!!, 1e-2)
+        assertTrue(preview126.isPolarGuideAcquired)
+        assertEquals(126.0, preview126.activePolarAngleDeg!!, 1e-3)
+
+        // 3. Near 180 degrees (cursor at 181.5 deg, R = 75.0): live theta = 181.5 deg, acquired polarAngleDeg = 180.0 deg
+        val cursorNear180 = basePoint.polarOffset(75.0, 181.5)
+        val preview180 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePoint,
+            rawCursorPoint = cursorNear180,
+            snapConfig = config,
+            previousBasePoint = null
+        )
+        assertNotNull(preview180)
+        assertEquals(181.5, preview180!!.actualAngleThetaDeg!!, 1e-2)
+        assertTrue(preview180.isPolarGuideAcquired)
+        assertEquals(180.0, preview180.activePolarAngleDeg!!, 1e-3)
+
+        // 4. Outside acquisition tolerance (e.g., 108 deg is > 5 deg from 90, 126, 135): live R and theta still work, activePolarAngleDeg is null
+        val cursorFree = basePoint.polarOffset(50.0, 108.0)
+        val previewFree = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePoint,
+            rawCursorPoint = cursorFree,
+            snapConfig = config,
+            previousBasePoint = null
+        )
+        assertNotNull(previewFree)
+        assertEquals(50.0, previewFree!!.radialDistanceR, 1e-3)
+        assertEquals(108.0, previewFree.actualAngleThetaDeg!!, 1e-2)
+        assertFalse(previewFree.isPolarGuideAcquired)
+
+        // 5. Optional PolarSnap projects candidate point onto acquired polar guide ray without mutating raw cursor input
+        val (snappedWithPolar, _) = CadSnapAndCoordEngine.resolveCursorSnap(
+            rawModelCursor = cursorNear126,
+            referencePoint = basePoint,
+            entities = emptyList(),
+            snapConfig = config.copy(osnapEnabled = false, gridSnapEnabled = false, polarSnapEnabled = true),
+            viewport = ViewportTransform(pixelsPerModelUnit = 3.0f)
+        )
+        val projectedAngle = basePoint.angleToDeg(snappedWithPolar)
+        assertEquals(126.0, projectedAngle, 1e-3)
+    }
+
+    @Test
+    fun `TC-QDIM-31 verify v15 QDIM Local Profile Feature Classification on Concave U-Notch and BELOW_MINIMUM_FEATURE_LENGTH diagnostic`() {
+        // Concave U-notch polygon from Section 31.1 plus a tiny 0.5mm micro-segment to verify BELOW_MINIMUM_FEATURE_LENGTH diagnostic
         val uNotch = CadEntity.PolylineEntity(
             id = "u_notch_poly",
             vertices = listOf(
@@ -633,9 +710,14 @@ class ExampleUnitTest {
             ),
             isClosed = true
         )
+        val microLine = CadEntity.LineEntity(
+            id = "micro_edge",
+            start = Point2D(100.0, 100.0),
+            end = Point2D(100.5, 100.0)
+        )
         val (qdimEntities, report) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
-            allEntities = listOf(uNotch),
-            targetEntities = listOf(uNotch),
+            allEntities = listOf(uNotch, microLine),
+            targetEntities = listOf(uNotch, microLine),
             density = QDimDensityPolicy.BALANCED
         )
         val dims = qdimEntities.filterIsInstance<CadEntity.DimensionEntity>()
@@ -653,7 +735,12 @@ class ExampleUnitTest {
         assertTrue(horizValues.any { abs(it - 38.0) < 1e-3 })
         // Local vertical notch depth (96)
         assertTrue(vertValues.any { abs(it - 96.0) < 1e-3 })
-        assertTrue(report.edgeDiagnostics.isNotEmpty())
+        assertTrue(
+            report.edgeDiagnostics.any {
+                it.sourceEntityId == "micro_edge" &&
+                    it.status == com.example.cad.dimension.EdgeDimensionStatus.BELOW_MINIMUM_FEATURE_LENGTH
+            }
+        )
         assertTrue(report.generationCompletenessScore >= 90f)
     }
 

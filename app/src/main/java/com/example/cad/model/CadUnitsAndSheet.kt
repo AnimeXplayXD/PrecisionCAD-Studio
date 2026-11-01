@@ -181,8 +181,19 @@ data class GridAndSnapConfig(
     val enabledOsnapModes: Set<OsnapMode> = OsnapMode.defaultEnabledModes,
     val temporaryOsnapOverride: OsnapMode? = null,
     val orthoEnabled: Boolean = false,
-    val polarTrackingAngleDeg: Double = 45.0
-)
+    val polarTrackingEnabled: Boolean = true,
+    val polarSnapEnabled: Boolean = false,
+    val polarTrackingAngleDeg: Double = 45.0,
+    val polarAdditionalAnglesDeg: List<Double> = listOf(126.0),
+    val polarRelativeToLastSegment: Boolean = false,
+    val polarAcquisitionToleranceDeg: Double = 5.0
+) {
+    companion object {
+        val standardPolarIncrementPresets: List<Double> = listOf(
+            90.0, 60.0, 45.0, 30.0, 22.5, 18.0, 15.0, 10.0, 5.0
+        )
+    }
+}
 
 enum class OsnapMode(val label: String, val badgeCode: String) {
     ENDPOINT("Endpoint", "END"),

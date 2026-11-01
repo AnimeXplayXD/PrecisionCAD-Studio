@@ -20,6 +20,7 @@ import com.example.cad.kernel.CadGeometryKernel
 import com.example.cad.kernel.CadModificationEngine
 import com.example.cad.kernel.CadSnapAndCoordEngine
 import com.example.cad.kernel.FitDrawingPolicy
+import com.example.cad.kernel.PolarTrackingPreviewState
 import com.example.cad.kernel.SnapCandidate
 import com.example.cad.kernel.UsableViewportRect
 import com.example.cad.kernel.ViewportTransform
@@ -95,7 +96,8 @@ data class OverviewCardEvent(
     val id: Long,
     val title: String,
     val explanation: String,
-    val category: NotificationCategory = NotificationCategory.INFO
+    val category: NotificationCategory = NotificationCategory.INFO,
+    val isPersistentSession: Boolean = false
 )
 
 data class DocumentSnapshot(
@@ -158,6 +160,7 @@ data class CadWorkspaceUiState(
     val rawCursorModelPos: Point2D = Point2D(100.0, 150.0),
     val snappedCursorModelPos: Point2D = Point2D(100.0, 150.0),
     val activeSnapCandidate: SnapCandidate? = null,
+    val polarPreview: PolarTrackingPreviewState? = null,
     val selectionBoxDrag: SelectionBoxDragState? = null,
     val viewport: ViewportTransform = ViewportTransform(),
     val viewportWidthPx: Float = 800f,
@@ -170,7 +173,13 @@ data class CadWorkspaceUiState(
     val lastAlignmentReport: DimensionAlignmentReport? = null,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false
-)
+) {
+    val isActiveCommandSession: Boolean
+        get() = commandPanelState is CommandPanelState.Running ||
+            activeCommand != CadCommandId.SELECT ||
+            commandStepPoints.isNotEmpty() ||
+            selectionBoxDrag != null
+}
 
 /**
  * Orientation-safe StateFlow ViewModel preserving all drawing state, cursor coordinates,
@@ -233,47 +242,83 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
     }
 
-    // --- Transient Notification & Floating Overview System (Sections 4 & 30) ---
+    // --- Two-Layer Notification & Active-Session Floating Overview System (Sections 4, 30, 39.2 & 42.5) ---
 
     fun emitOverview(
         title: String,
         explanation: String,
-        category: NotificationCategory = NotificationCategory.INFO
+        category: NotificationCategory = NotificationCategory.INFO,
+        isPersistentSession: Boolean = false
     ) {
         val event = OverviewCardEvent(
             id = overviewSeq++,
             title = title.trim(),
             explanation = explanation.trim(),
-            category = category
+            category = category,
+            isPersistentSession = isPersistentSession
         )
         _uiState.update { it.copy(activeOverview = event) }
         overviewDismissJob?.cancel()
-        overviewDismissJob = viewModelScope.launch {
-            delay(2500L)
-            _uiState.update { st ->
-                if (st.activeOverview?.id == event.id) st.copy(activeOverview = null) else st
+        if (!isPersistentSession) {
+            overviewDismissJob = viewModelScope.launch {
+                delay(2500L)
+                _uiState.update { st ->
+                    if (st.activeOverview?.id == event.id && !st.isActiveCommandSession) {
+                        st.copy(activeOverview = null)
+                    } else {
+                        st
+                    }
+                }
             }
         }
     }
 
     fun dismissOverview() {
         overviewDismissJob?.cancel()
-        _uiState.update { it.copy(activeOverview = null) }
+        if (!_uiState.value.isActiveCommandSession) {
+            _uiState.update { it.copy(activeOverview = null) }
+        }
     }
 
+    /**
+     * Section 39.2 & 42.5 — Two-Layer Notification Routing:
+     * 1. When NO active command session occupies the bottom Overview (`!current.isActiveCommandSession`):
+     *    Ordinary guidance/status messages appear ONLY in the bottom floating `OverviewOverlayCard`
+     *    (fade in, hold ~2.5s, fade out), and the top notification lane stays hidden (`activeNotification = null`).
+     * 2. When the bottom Overview IS occupied by an active command/session (`current.isActiveCommandSession`):
+     *    The bottom active-session Overview persists undisturbed, and the additional event is routed to
+     *    the top notification banner (`activeNotification`) with smooth replacement and 2.5s auto-dismiss.
+     */
     fun emitTransientNotification(
         message: String,
         category: NotificationCategory = NotificationCategory.INFO,
         isPersistentError: Boolean = false
     ) {
+        val current = _uiState.value
         val parts = message.split(" • ", limit = 2)
         val overviewTitle = if (parts.size == 2) parts[0] else "CAD OPERATION"
         val overviewBody = if (parts.size == 2) parts[1] else message
-        emitOverview(overviewTitle, overviewBody, category)
 
-        val current = _uiState.value
+        if (!current.isActiveCommandSession && !isPersistentError) {
+            // Idle / Non-Session state: use ONLY the bottom floating Overview card
+            notificationDismissJob?.cancel()
+            _uiState.update { it.copy(activeNotification = null, notificationQueue = emptyList()) }
+            emitOverview(overviewTitle, overviewBody, category, isPersistentSession = false)
+            return
+        }
+
+        // Active-session state (or persistent error): keep active-session Overview intact at the bottom
+        // and route the secondary/overflow notice to the top notification banner.
+        if (current.isActiveCommandSession) {
+            emitOverview(
+                title = current.activeCommand.commandName,
+                explanation = current.commandPromptBanner,
+                category = NotificationCategory.INFO,
+                isPersistentSession = true
+            )
+        }
+
         val active = current.activeNotification
-        // Coalesce identical consecutive messages
         if (active != null && active.message == message) {
             val refreshed = active.copy(timestampMs = System.currentTimeMillis(), isPersistentError = isPersistentError)
             _uiState.update { it.copy(activeNotification = refreshed) }
@@ -290,7 +335,6 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             _uiState.update { it.copy(activeNotification = incoming) }
             scheduleNotificationAutoDismiss(incoming)
         } else if (!active.isPersistentError) {
-            // Immediately replace standard transient notice so the latest CAD operation feedback is snappy
             _uiState.update {
                 it.copy(
                     activeNotification = incoming,
@@ -299,7 +343,6 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             }
             scheduleNotificationAutoDismiss(incoming)
         } else {
-            // Queue behind persistent error (bounded to max 3 queued items)
             _uiState.update {
                 val nextQ = (it.notificationQueue.filterNot { q -> q.message == message } + incoming).takeLast(3)
                 it.copy(notificationQueue = nextQ)
@@ -442,11 +485,18 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             y = base.y + dyDisplayUnits * displayToStorage
         )
         val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
         val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
             cursorModelPos = target,
             usableRect = st.usableViewportRect,
             referencePoint = refPt,
             minSafeMarginPx = 32f
+        )
+        val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = target,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt
         )
         val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = target)
         _uiState.update {
@@ -454,6 +504,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 rawCursorModelPos = target,
                 snappedCursorModelPos = target,
                 activeSnapCandidate = null,
+                polarPreview = polarPreview,
                 viewport = trackedViewport,
                 selectionBoxDrag = updatedSelectionBox
             )
@@ -463,12 +514,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private fun updateCursorPositionInternal(newRawModel: Point2D) {
         val st = _uiState.value
         val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
         val (snapped, candidate) = CadSnapAndCoordEngine.resolveCursorSnap(
             rawModelCursor = newRawModel,
             referencePoint = refPt,
             entities = st.entities,
             snapConfig = st.gridSnapConfig,
-            viewport = st.viewport
+            viewport = st.viewport,
+            previousReferencePoint = prevRefPt
+        )
+        val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = newRawModel,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt
         )
         // Section 17: Automatically pan/adjust viewport so the cursor never disappears off-screen
         val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
@@ -483,9 +542,46 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 rawCursorModelPos = newRawModel,
                 snappedCursorModelPos = snapped,
                 activeSnapCandidate = candidate,
+                polarPreview = polarPreview,
                 viewport = trackedViewport,
                 selectionBoxDrag = updatedSelectionBox
             )
+        }
+    }
+
+    private fun syncPolarAndActiveSessionState() {
+        val st = _uiState.value
+        val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
+        val preview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = st.rawCursorModelPos,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt
+        )
+        if (st.isActiveCommandSession) {
+            overviewDismissJob?.cancel()
+            val persistentEvent = OverviewCardEvent(
+                id = st.activeOverview?.takeIf { it.isPersistentSession }?.id ?: overviewSeq++,
+                title = st.activeCommand.commandName,
+                explanation = st.commandPromptBanner,
+                category = NotificationCategory.INFO,
+                isPersistentSession = true
+            )
+            _uiState.update {
+                it.copy(
+                    polarPreview = preview,
+                    activeOverview = persistentEvent
+                )
+            }
+        } else {
+            _uiState.update {
+                val clearedOverview = if (it.activeOverview?.isPersistentSession == true) null else it.activeOverview
+                it.copy(
+                    polarPreview = preview,
+                    activeOverview = clearedOverview
+                )
+            }
         }
     }
 
@@ -608,7 +704,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun updateGridSnapConfig(newConfig: GridAndSnapConfig) {
-        _uiState.update { it.copy(gridSnapConfig = newConfig) }
+        val prev = _uiState.value.gridSnapConfig
+        val sanitized = when {
+            !prev.orthoEnabled && newConfig.orthoEnabled -> newConfig.copy(polarTrackingEnabled = false)
+            !prev.polarTrackingEnabled && newConfig.polarTrackingEnabled -> newConfig.copy(orthoEnabled = false)
+            newConfig.orthoEnabled && newConfig.polarTrackingEnabled -> newConfig.copy(orthoEnabled = false)
+            else -> newConfig
+        }
+        _uiState.update { it.copy(gridSnapConfig = sanitized) }
         updateCursorPositionInternal(_uiState.value.rawCursorModelPos)
     }
 
@@ -624,6 +727,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val next = !it.gridSnapConfig.gridSnapEnabled
             it.copy(gridSnapConfig = it.gridSnapConfig.copy(gridSnapEnabled = next))
         }
+        updateCursorPositionInternal(_uiState.value.rawCursorModelPos)
     }
 
     fun toggleOsnap() {
@@ -631,13 +735,50 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val next = !it.gridSnapConfig.osnapEnabled
             it.copy(gridSnapConfig = it.gridSnapConfig.copy(osnapEnabled = next))
         }
+        updateCursorPositionInternal(_uiState.value.rawCursorModelPos)
     }
 
+    /**
+     * Section 43.9 — ORTHO and POLAR are mutually exclusive directional aids.
+     * Enabling ORTHO automatically disables POLAR; enabling POLAR automatically disables ORTHO.
+     */
     fun toggleOrtho() {
+        val next = !_uiState.value.gridSnapConfig.orthoEnabled
         _uiState.update {
-            val next = !it.gridSnapConfig.orthoEnabled
-            it.copy(gridSnapConfig = it.gridSnapConfig.copy(orthoEnabled = next))
+            it.copy(
+                gridSnapConfig = it.gridSnapConfig.copy(
+                    orthoEnabled = next,
+                    polarTrackingEnabled = if (next) false else it.gridSnapConfig.polarTrackingEnabled
+                )
+            )
         }
+        updateCursorPositionInternal(_uiState.value.rawCursorModelPos)
+        val msg = if (next) {
+            "ORTHO (ON) • Orthogonal 0°/90° lock enabled (Polar Tracking disabled)"
+        } else {
+            "ORTHO (OFF) • Orthogonal lock disabled"
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
+    }
+
+    fun togglePolarTracking() {
+        val next = !_uiState.value.gridSnapConfig.polarTrackingEnabled
+        val inc = _uiState.value.gridSnapConfig.polarTrackingAngleDeg
+        _uiState.update {
+            it.copy(
+                gridSnapConfig = it.gridSnapConfig.copy(
+                    polarTrackingEnabled = next,
+                    orthoEnabled = if (next) false else it.gridSnapConfig.orthoEnabled
+                )
+            )
+        }
+        updateCursorPositionInternal(_uiState.value.rawCursorModelPos)
+        val msg = if (next) {
+            "POLAR (ON) • Visual Polar Tracking enabled (${fmt(inc)}° increments; ORTHO disabled)"
+        } else {
+            "POLAR (OFF) • Visual Polar Tracking disabled"
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     fun toggleWorkspaceSpace() {
@@ -1002,9 +1143,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val msg = "${mode.commandToken} (${density.label} • ${arrangementPreference.label} • ON) • Refreshed $dimCount associative dimensions"
         _uiState.update {
             it.copy(
-                activeCommand = CadCommandId.QDIM,
+                activeCommand = CadCommandId.SELECT,
                 activeCategory = CadCommandId.QDIM.category,
-                commandPanelState = CommandPanelState.Running(CadCommandId.QDIM, msg, 0),
+                commandPanelState = CommandPanelState.Hidden,
                 entities = updatedEntities,
                 isQuickDimensionEnabled = true,
                 qdimDensity = density,
@@ -1013,6 +1154,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandPromptBanner = msg
             )
         }
+        syncPolarAndActiveSessionState()
         emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
@@ -1173,6 +1315,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 recentCommands = updatedRecents
             )
         }
+        syncPolarAndActiveSessionState()
     }
 
     fun setCommandSubOption(subOption: String) {
@@ -1203,6 +1346,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, 0)
             )
         }
+        syncPolarAndActiveSessionState()
     }
 
     fun setCommandParameterValue(value: Double) {
@@ -1222,6 +1366,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandPanelState = CommandPanelState.Running(st.activeCommand, prompt, st.commandStepPoints.size)
             )
         }
+        syncPolarAndActiveSessionState()
     }
 
     /**
@@ -2323,6 +2468,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
             else -> Unit
         }
+        syncPolarAndActiveSessionState()
     }
 
     fun finishCurrentCommand(closeLoop: Boolean = false) {
@@ -2343,6 +2489,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                             entities = it.entities + closeSeg,
                             activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
+                            polarPreview = null,
                             commandPromptBanner = msg,
                             commandPanelState = CommandPanelState.Hidden
                         )
@@ -2354,6 +2501,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         it.copy(
                             activeCommand = CadCommandId.SELECT,
                             commandStepPoints = emptyList(),
+                            polarPreview = null,
                             commandPromptBanner = msg,
                             commandPanelState = CommandPanelState.Hidden
                         )
@@ -2394,11 +2542,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     it.copy(
                         activeCommand = CadCommandId.SELECT,
                         commandStepPoints = emptyList(),
+                        polarPreview = null,
                         selectionBoxDrag = null,
                         commandPromptBanner = msg,
                         commandPanelState = CommandPanelState.Hidden
                     )
                 }
+                emitTransientNotification(msg, NotificationCategory.INFO)
             }
         }
     }
@@ -2409,11 +2559,13 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             it.copy(
                 activeCommand = CadCommandId.SELECT,
                 commandStepPoints = emptyList(),
+                polarPreview = null,
                 selectionBoxDrag = null,
                 commandPromptBanner = msg,
                 commandPanelState = CommandPanelState.Hidden
             )
         }
+        emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
     // --- Selection Commands (Section 14.3 — No Sheet Taps Required) ---
@@ -2971,12 +3123,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 entities = it.entities + entity,
                 activeCommand = if (returnToIdle) CadCommandId.SELECT else it.activeCommand,
                 commandStepPoints = emptyList(),
+                polarPreview = null,
                 commandPromptBanner = bannerMessage,
                 commandPanelState = if (returnToIdle) CommandPanelState.Hidden else CommandPanelState.Running(it.activeCommand, bannerMessage, 0),
                 commandHistoryLog = (it.commandHistoryLog + bannerMessage).takeLast(30)
             )
         }
         emitTransientNotification(bannerMessage, NotificationCategory.SUCCESS)
+        if (!returnToIdle) {
+            syncPolarAndActiveSessionState()
+        }
     }
 
     private fun getUnlockedSelectedEntities(): List<CadEntity> {

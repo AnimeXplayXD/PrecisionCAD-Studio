@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
 import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.kernel.CadGeometryKernel
+import com.example.cad.kernel.PolarTrackingPreviewState
 import com.example.cad.kernel.SnapCandidate
 import com.example.cad.kernel.ViewportTransform
 import com.example.cad.model.BlockDefinition
@@ -68,15 +69,16 @@ import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Section 14.1, 18.4 & 22 — Authoritative Viewport Gesture State Machine.
+ * Sections 14.1, 18.4, 22, 39.4 & 42.3 — Authoritative Viewport Gesture State Machine.
  * The CAD sheet is strictly navigation-only:
  * - `IDLE`: No active pointers.
  * - `ONE_POINTER_PAN`: Single-finger drag outside the left-edge drawer zone pans the viewport after exceeding touch slop.
- * - `TWO_POINTER_PINCH_ZOOM`: Two-finger pinch changes zoom scale only around a stable focal anchor (zero centroid-translation pan).
- * - `POST_PINCH_POINTER_SUPPRESSED`: When a 2-pointer pinch drops to 1 pointer, remaining single-finger movement is suppressed until all pointers lift.
+ * - `TWO_POINTER_PINCH_ZOOM`: Simultaneous two-finger centroid-translation pan AND inter-pointer separation pinch zoom.
+ * - `POST_PINCH_POINTER_SUPPRESSED`: When a 2-pointer gesture drops to 1 pointer, remaining single-finger movement is suppressed until all pointers lift.
  * - `LEFT_EDGE_DRAWER_REVEAL`: Single-finger inward swipe starting in the left-edge strip opens the tool drawer without panning the sheet.
  * - `CANCELLED`: Cancelled or 3+ pointer gesture.
  */
@@ -125,7 +127,7 @@ object ViewportGesturePolicy {
     )
 
     /**
-     * Section 22.1 — Single-finger drag pans the viewport by exact screen delta.
+     * Section 22.1 & 42.3 — Single-finger drag pans the viewport by exact screen delta.
      */
     fun applyOneFingerPan(
         viewport: ViewportTransform,
@@ -138,8 +140,7 @@ object ViewportGesturePolicy {
     }
 
     /**
-     * Section 22.2 — Two-finger pinch changes zoom scale ONLY around the locked focal anchor.
-     * Pure two-finger parallel translation without span change does NOT pan the viewport.
+     * Zoom-only helper around a focal anchor when pan is zero.
      */
     fun applyTwoFingerPinchZoomOnly(
         viewport: ViewportTransform,
@@ -153,18 +154,30 @@ object ViewportGesturePolicy {
     }
 
     /**
-     * Backward-compatible entry point that delegates to zoom-only for two-finger pinch per Section 0.0 & 22.2.
+     * Section 0.0 Rule 17, 39.4 & 42.3 — Simultaneous two-finger pan + pinch zoom.
+     * Applies centroid-translation pan AND inter-pointer separation pinch zoom around the two-finger centroid
+     * in one coherent ViewportTransform update.
      */
     fun applyTwoFingerTransform(
         viewport: ViewportTransform,
         centroidScreen: Offset,
-        @Suppress("UNUSED_PARAMETER") panDeltaScreen: Offset,
+        panDeltaScreen: Offset,
         zoomFactor: Float
-    ): ViewportTransform = applyTwoFingerPinchZoomOnly(
-        viewport = viewport,
-        focalAnchorScreen = centroidScreen,
-        zoomFactor = zoomFactor
-    )
+    ): ViewportTransform {
+        var next = viewport
+        if (panDeltaScreen != Offset.Zero && panDeltaScreen.x.isFinite() && panDeltaScreen.y.isFinite()) {
+            next = next.panByScreenDelta(panDeltaScreen.x, panDeltaScreen.y)
+        }
+        if (centroidScreen != Offset.Unspecified &&
+            centroidScreen.x.isFinite() &&
+            centroidScreen.y.isFinite() &&
+            zoomFactor.isFinite() &&
+            abs(zoomFactor - 1f) > 0.001f
+        ) {
+            next = next.zoomAroundScreenPoint(centroidScreen, zoomFactor)
+        }
+        return next
+    }
 }
 
 data class SelectionBoxDragState(
@@ -184,10 +197,10 @@ data class SelectionBoxDragState(
 }
 
 /**
- * Pure 2D Technical CAD Viewport (Sections 5, 14, 18.4, 21 & 22 of Specification).
+ * Pure 2D Technical CAD Viewport (Sections 5, 14, 18.4, 21, 22, 39.4, 42.3 & 45–48 of Specification).
  * - 1-finger drag outside the left-edge drawer strip pans the viewport (`ONE_POINTER_PAN`).
  * - 1-finger inward swipe starting in the left-edge strip opens the tool drawer (`LEFT_EDGE_DRAWER_REVEAL`).
- * - 2-finger pinch changes zoom scale only (`TWO_POINTER_PINCH_ZOOM`) around a stable focal anchor.
+ * - 2-finger gesture performs simultaneous centroid-translation pan AND pinch zoom (`TWO_POINTER_PINCH_ZOOM`).
  * - Dropping from 2 pointers to 1 pointer enters `POST_PINCH_POINTER_SUPPRESSED` until all pointers lift.
  * - Stationary taps, double-taps, and long presses on the sheet perform no selection, OSNAP, or CAD edits.
  */
@@ -209,6 +222,7 @@ fun CadViewportCanvas(
     cursorModelPos: Point2D,
     activeSnapCandidate: SnapCandidate?,
     referencePoint: Point2D?,
+    polarPreview: PolarTrackingPreviewState? = null,
     selectionBoxDrag: SelectionBoxDragState?,
     viewport: ViewportTransform,
     onViewportChanged: (ViewportTransform) -> Unit,
@@ -318,13 +332,18 @@ fun CadViewportCanvas(
                             }
 
                             ViewportGestureState.TWO_POINTER_PINCH_ZOOM -> {
+                                val panChange = event.calculatePan()
                                 val zoomChange = event.calculateZoom()
-                                if (lockedPinchFocalAnchor == Offset.Unspecified) {
-                                    lockedPinchFocalAnchor = event.calculateCentroid(useCurrent = false)
+                                val centroid = event.calculateCentroid(useCurrent = true).let { c ->
+                                    if (c != Offset.Unspecified) c else lockedPinchFocalAnchor
                                 }
-                                val updated = ViewportGesturePolicy.applyTwoFingerPinchZoomOnly(
+                                if (centroid != Offset.Unspecified) {
+                                    lockedPinchFocalAnchor = centroid
+                                }
+                                val updated = ViewportGesturePolicy.applyTwoFingerTransform(
                                     viewport = currentViewport,
-                                    focalAnchorScreen = lockedPinchFocalAnchor,
+                                    centroidScreen = centroid,
+                                    panDeltaScreen = panChange,
                                     zoomFactor = zoomChange
                                 )
                                 if (updated != currentViewport) {
@@ -427,7 +446,7 @@ fun CadViewportCanvas(
                 )
             }
 
-            // 6. Rubber-Band Tracking Line from Reference Point to Cursor
+            // 6. Rubber-Band Tracking Line from Reference Point to Cursor & Polar Tracking Visual Overlay
             if (referencePoint != null) {
                 val sRef = viewport.modelToScreen(referencePoint)
                 val sCur = viewport.modelToScreen(cursorModelPos)
@@ -437,6 +456,17 @@ fun CadViewportCanvas(
                     end = sCur,
                     strokeWidth = 1.5f,
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                )
+            }
+
+            if (polarPreview != null) {
+                drawPolarTrackingOverlay(
+                    polarPreview = polarPreview,
+                    storageUnit = storageUnit,
+                    displayUnit = displayUnit,
+                    precision = precision,
+                    viewport = viewport,
+                    textPaint = textPaint
                 )
             }
 
@@ -1376,6 +1406,169 @@ private fun DrawScope.drawCadCrosshair(
         end = Offset(c.x, c.y + armLen),
         strokeWidth = 1.4f
     )
+}
+
+/**
+ * Sections 43, 45, 46, 47 & 48 — Visual-Only Polar Tracking Overlay.
+ * Draws:
+ * 1. Dotted/dashed polar guide ray from basePoint along worldPolarAngleDeg when acquired.
+ * 2. Dotted angular arc from reference axis to worldPolarAngleDeg with read-only angle label (e.g., 90°, 126°, 180°).
+ * 3. Strictly non-interactive read-only cursor badge showing R, θ, and POLAR θp.
+ * Never persists into document entities or DXF/PDF exports.
+ */
+private fun DrawScope.drawPolarTrackingOverlay(
+    polarPreview: PolarTrackingPreviewState,
+    storageUnit: CadUnit,
+    displayUnit: CadUnit,
+    precision: PrecisionFormatConfig,
+    viewport: ViewportTransform,
+    textPaint: Paint
+) {
+    val baseScreen = viewport.modelToScreen(polarPreview.basePoint)
+    val cursorScreen = viewport.modelToScreen(polarPreview.rawCursorPoint)
+    val polarColor = Color(0xFF38BDF8)
+    val arcColor = Color(0xFFFBBF24)
+
+    // 1. Temporary Dotted Polar Guide Ray & 2. Dotted Angular Arc when polar guide is acquired
+    if (polarPreview.isPolarGuideAcquired &&
+        polarPreview.worldPolarAngleDeg != null &&
+        polarPreview.activePolarAngleDeg != null
+    ) {
+        val worldAngleRad = Math.toRadians(polarPreview.worldPolarAngleDeg)
+        val diagModel = (hypot(size.width, size.height) / viewport.pixelsPerModelUnit.coerceAtLeast(0.05f)).toDouble() * 1.8
+        val farEndModel = Point2D(
+            x = polarPreview.basePoint.x + cos(worldAngleRad) * diagModel,
+            y = polarPreview.basePoint.y + sin(worldAngleRad) * diagModel
+        )
+        val rayEndScreen = viewport.modelToScreen(farEndModel)
+        drawLine(
+            color = polarColor.copy(alpha = 0.82f),
+            start = baseScreen,
+            end = rayEndScreen,
+            strokeWidth = 1.5f,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+        )
+
+        // 2. Dotted Reference Angle Arc centered at basePoint
+        val screenDist = hypot(cursorScreen.x - baseScreen.x, cursorScreen.y - baseScreen.y)
+        val arcRadiusPx = (screenDist * 0.35f).coerceIn(28f, 68f)
+        val sweepCcwDeg = polarPreview.activePolarAngleDeg.toFloat()
+        if (sweepCcwDeg >= 0.5f && screenDist >= 16f) {
+            // In screen coordinates (+Y downward), model angle alpha maps to screen angle -alpha
+            val startAngleScreenDeg = (-polarPreview.referenceAngleDeg).toFloat()
+            val sweepAngleScreenDeg = -sweepCcwDeg
+            drawArc(
+                color = arcColor.copy(alpha = 0.85f),
+                startAngle = startAngleScreenDeg,
+                sweepAngle = sweepAngleScreenDeg,
+                useCenter = false,
+                topLeft = Offset(baseScreen.x - arcRadiusPx, baseScreen.y - arcRadiusPx),
+                size = Size(arcRadiusPx * 2f, arcRadiusPx * 2f),
+                style = Stroke(
+                    width = 1.4f,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f)
+                )
+            )
+
+            // Reference baseline tick for clarity
+            val refRad = Math.toRadians(polarPreview.referenceAngleDeg)
+            val refTipModel = Point2D(
+                x = polarPreview.basePoint.x + cos(refRad) * (arcRadiusPx * 1.15f / viewport.pixelsPerModelUnit.coerceAtLeast(0.05f)),
+                y = polarPreview.basePoint.y + sin(refRad) * (arcRadiusPx * 1.15f / viewport.pixelsPerModelUnit.coerceAtLeast(0.05f))
+            )
+            drawLine(
+                color = arcColor.copy(alpha = 0.45f),
+                start = baseScreen,
+                end = viewport.modelToScreen(refTipModel),
+                strokeWidth = 1.1f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 5f), 0f)
+            )
+
+            // Arc Angle Label (e.g., "90°", "126°", "180°")
+            val midModelDeg = polarPreview.referenceAngleDeg + polarPreview.activePolarAngleDeg * 0.5
+            val midRad = Math.toRadians(midModelDeg)
+            val labelRadiusPx = arcRadiusPx + 16f
+            val labelX = baseScreen.x + cos(midRad).toFloat() * labelRadiusPx
+            val labelY = baseScreen.y - sin(midRad).toFloat() * labelRadiusPx
+            val formattedPolarAngle = formatPolarAngleCompact(polarPreview.activePolarAngleDeg)
+
+            drawContext.canvas.nativeCanvas.apply {
+                textPaint.textSize = 21f
+                textPaint.color = android.graphics.Color.rgb(251, 191, 36)
+                textPaint.textAlign = Paint.Align.CENTER
+                drawText("${formattedPolarAngle}°", labelX, labelY + 7f, textPaint)
+            }
+        }
+    }
+
+    // 3. Read-Only Live Cursor Readout Badge (R, θ, POLAR θp)
+    val distanceText = precision.formatLinear(
+        rawModelValue = polarPreview.radialDistanceR,
+        storageUnit = storageUnit,
+        displayUnit = displayUnit
+    )
+    val actualThetaText = String.format(java.util.Locale.US, "%.1f°", polarPreview.actualAngleThetaDeg ?: 0.0)
+    val polarBadgeSuffix = if (polarPreview.isPolarGuideAcquired && polarPreview.activePolarAngleDeg != null) {
+        "  POLAR ${formatPolarAngleCompact(polarPreview.activePolarAngleDeg)}°"
+    } else {
+        ""
+    }
+    val readoutText = "R $distanceText  θ $actualThetaText$polarBadgeSuffix"
+
+    drawContext.canvas.nativeCanvas.apply {
+        textPaint.textSize = 20f
+        textPaint.textAlign = Paint.Align.LEFT
+        val textWidth = textPaint.measureText(readoutText)
+        val padH = 10f
+        val padV = 6f
+        val boxW = textWidth + padH * 2f
+        val boxH = 28f
+
+        // Quadrant-shift badge away from crosshair & viewport boundaries
+        val shiftLeft = cursorScreen.x + 26f + boxW > size.width - 12f
+        val shiftDown = cursorScreen.y - 24f - boxH < 52f
+        val boxLeft = if (shiftLeft) {
+            (cursorScreen.x - 26f - boxW).coerceAtLeast(8f)
+        } else {
+            (cursorScreen.x + 26f).coerceAtMost((size.width - boxW - 8f).coerceAtLeast(8f))
+        }
+        val boxTop = if (shiftDown) {
+            (cursorScreen.y + 24f).coerceAtMost((size.height - boxH - 8f).coerceAtLeast(8f))
+        } else {
+            (cursorScreen.y - 24f - boxH).coerceAtLeast(8f)
+        }
+
+        drawRoundRect(
+            color = Color(0xD90A0F1A),
+            topLeft = Offset(boxLeft, boxTop),
+            size = Size(boxW, boxH),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+        )
+        drawRoundRect(
+            color = if (polarPreview.isPolarGuideAcquired) polarColor.copy(alpha = 0.85f) else Color(0xFF475569),
+            topLeft = Offset(boxLeft, boxTop),
+            size = Size(boxW, boxH),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
+            style = Stroke(width = 1.2f)
+        )
+
+        textPaint.color = if (polarPreview.isPolarGuideAcquired) {
+            android.graphics.Color.rgb(186, 230, 253)
+        } else {
+            android.graphics.Color.rgb(226, 232, 240)
+        }
+        drawText(readoutText, boxLeft + padH, boxTop + boxH - padV - 2f, textPaint)
+        textPaint.textAlign = Paint.Align.CENTER
+    }
+}
+
+private fun formatPolarAngleCompact(angleDeg: Double): String {
+    val roundedInt = angleDeg.roundToInt()
+    return if (abs(angleDeg - roundedInt.toDouble()) < 0.05) {
+        roundedInt.toString()
+    } else {
+        String.format(java.util.Locale.US, "%.1f", angleDeg)
+    }
 }
 
 private fun toAndroidColor(c: Color): Int = android.graphics.Color.argb(
