@@ -1,0 +1,192 @@
+name: Build & Sign PrecisionCAD Studio APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      build_variant:
+        description: 'APK variant to build (release, debug, or both)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - release
+          - debug
+      version_name_override:
+        description: 'Optional versionName override (e.g., 1.2.0)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-signed-apk:
+    name: Build & Sign Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses & Install API 36.1
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Compute Automated Version Code & Version Name
+        run: |
+          BASE_CODE=$(grep -E '^VERSION_CODE=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "1")
+          MAJOR=$(grep -E '^VERSION_MAJOR=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "1")
+          MINOR=$(grep -E '^VERSION_MINOR=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "0")
+          PATCH=$(grep -E '^VERSION_PATCH=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "0")
+
+          COMPUTED_VERSION_CODE=$((BASE_CODE + GITHUB_RUN_NUMBER))
+          if [ -n "${{ github.event.inputs.version_name_override }}" ]; then
+            COMPUTED_VERSION_NAME="${{ github.event.inputs.version_name_override }}"
+          elif [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            COMPUTED_VERSION_NAME="${GITHUB_REF_NAME#v}"
+          else
+            COMPUTED_VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}.${GITHUB_RUN_NUMBER}"
+          fi
+
+          echo "VERSION_CODE=${COMPUTED_VERSION_CODE}" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=${COMPUTED_VERSION_NAME}" >> "$GITHUB_ENV"
+          echo "### PrecisionCAD Studio Build Version" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **versionCode**: \`${COMPUTED_VERSION_CODE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **versionName**: \`${COMPUTED_VERSION_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare .env File for Secrets Gradle Plugin
+        run: |
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
+
+      - name: Prepare Debug Keystore (debug.keystore)
+        run: |
+          if [ -f "debug.keystore.base64" ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Prepare Release Signing Keystore (my-upload-key.jks)
+        env:
+          SECRET_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$SECRET_KEYSTORE_BASE64" ] && [ -n "$SECRET_STORE_PASSWORD" ] && [ -n "$SECRET_KEY_PASSWORD" ]; then
+            echo "Using persistent repository secrets (KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD) for release signing..."
+            echo "$SECRET_KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${SECRET_STORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> "$GITHUB_ENV"
+          else
+            echo "No custom signing secrets detected; generating a fallback release keystore (alias: upload)..."
+            FALLBACK_PASS="precisioncad_release_2026"
+            keytool -genkeypair -v \
+              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+              -storetype JKS \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -alias upload \
+              -storepass "$FALLBACK_PASS" \
+              -keypass "$FALLBACK_PASS" \
+              -dname "CN=PrecisionCAD Studio, OU=Engineering, O=PrecisionCAD, L=Tokyo, S=Tokyo, C=JP"
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Signed Release APK
+        if: ${{ github.event.inputs.build_variant != 'debug' }}
+        run: |
+          gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Build Signed Debug APK
+        if: ${{ github.event.inputs.build_variant != 'release' }}
+        run: |
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK Signatures with apksigner
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+            echo "Verifying Signed Release APK:"
+            "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+            cp app/build/outputs/apk/release/app-release.apk "PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-release-signed.apk"
+            cp app/build/outputs/apk/release/app-release.apk PrecisionCAD-Studio-release-signed.apk
+          fi
+          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            echo "Verifying Signed Debug APK:"
+            "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk
+            cp app/build/outputs/apk/debug/app-debug.apk "PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-debug-signed.apk"
+            cp app/build/outputs/apk/debug/app-debug.apk PrecisionCAD-Studio-debug-signed.apk
+          fi
+
+      - name: Upload Signed Release APK Artifact
+        if: ${{ github.event.inputs.build_variant != 'debug' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrecisionCAD-Studio-Signed-Release-APK-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}
+          path: |
+            PrecisionCAD-Studio-release-signed.apk
+            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-release-signed.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Signed Debug APK Artifact
+        if: ${{ github.event.inputs.build_variant != 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrecisionCAD-Studio-Signed-Debug-APK-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}
+          path: |
+            PrecisionCAD-Studio-debug-signed.apk
+            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-debug-signed.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish Signed APKs to GitHub Release (on version tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PrecisionCAD-Studio-release-signed.apk
+            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-release-signed.apk
+            PrecisionCAD-Studio-debug-signed.apk
+          generate_release_notes: true

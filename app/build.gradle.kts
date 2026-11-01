@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -6,6 +7,56 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
+}
+
+// Automated Versioning Logic:
+// 1. Reads base version metadata from root `version.properties` (if present).
+// 2. Auto-increments `VERSION_CODE` in `version.properties` when executing a release build locally.
+// 3. In GitHub Actions / CI, automatically uses `VERSION_CODE` or `100 + GITHUB_RUN_NUMBER` so every
+//    CI release APK has a strictly increasing versionCode for seamless Android upgrade installs.
+val versionPropsFile = rootProject.file("version.properties")
+val versionProps = Properties().apply {
+  if (versionPropsFile.canRead()) {
+    versionPropsFile.inputStream().use { load(it) }
+  }
+}
+val versionMajor = versionProps.getProperty("VERSION_MAJOR", "1").toIntOrNull() ?: 1
+val versionMinor = versionProps.getProperty("VERSION_MINOR", "0").toIntOrNull() ?: 0
+val versionPatch = versionProps.getProperty("VERSION_PATCH", "0").toIntOrNull() ?: 0
+val storedVersionCode = versionProps.getProperty("VERSION_CODE", "1").toIntOrNull() ?: 1
+
+val isReleaseBuildTask = gradle.startParameter.taskNames.any { taskName ->
+  taskName.contains("Release", ignoreCase = true)
+}
+val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+val explicitEnvVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
+
+val resolvedVersionCode = when {
+  explicitEnvVersionCode != null && explicitEnvVersionCode > 0 -> explicitEnvVersionCode
+  ciRunNumber != null && ciRunNumber > 0 -> storedVersionCode + ciRunNumber
+  isReleaseBuildTask -> {
+    val nextCode = storedVersionCode + 1
+    versionProps.setProperty("VERSION_CODE", nextCode.toString())
+    runCatching {
+      versionPropsFile.outputStream().use { out ->
+        versionProps.store(out, "Auto-incremented by Gradle release build")
+      }
+    }
+    nextCode
+  }
+  else -> storedVersionCode
+}
+
+val gitTagVersion = System.getenv("GITHUB_REF_NAME")
+  ?.takeIf { it.startsWith("v") && it.length > 1 }
+  ?.removePrefix("v")
+val explicitEnvVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
+
+val resolvedVersionName = when {
+  explicitEnvVersionName != null -> explicitEnvVersionName
+  gitTagVersion != null -> gitTagVersion
+  ciRunNumber != null -> "$versionMajor.$versionMinor.$versionPatch.$ciRunNumber"
+  else -> "$versionMajor.$versionMinor.$versionPatch"
 }
 
 android {
@@ -16,8 +67,8 @@ android {
     applicationId = "com.aistudio.precisioncad.kxpqzm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = resolvedVersionCode
+    versionName = resolvedVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
