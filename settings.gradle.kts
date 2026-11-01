@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "PrecisionCAD"
+rootProject.name = "PrecisionCAD Studio"
 
 include(":app")

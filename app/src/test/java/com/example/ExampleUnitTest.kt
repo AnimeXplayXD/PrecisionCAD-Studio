@@ -668,7 +668,9 @@ class ExampleUnitTest {
         assertTrue(preview180.isPolarGuideAcquired)
         assertEquals(180.0, preview180.activePolarAngleDeg!!, 1e-3)
 
-        // 4. Outside acquisition tolerance (e.g., 108 deg is > 5 deg from 90, 126, 135): live R and theta still work, activePolarAngleDeg is null
+        // 4. Outside PolarSnap acquisition tolerance (e.g., 108 deg is > 5 deg from 90, 126, 135):
+        //    In v17 (Section 6.5), Visual Polar Tracking covers all 0°..359° whole-number bearings (108.0°),
+        //    while PolarSnap constraint remains null (activePolarSnapAngleDeg == null).
         val cursorFree = basePoint.polarOffset(50.0, 108.0)
         val previewFree = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = basePoint,
@@ -679,7 +681,9 @@ class ExampleUnitTest {
         assertNotNull(previewFree)
         assertEquals(50.0, previewFree!!.radialDistanceR, 1e-3)
         assertEquals(108.0, previewFree.actualAngleThetaDeg!!, 1e-2)
-        assertFalse(previewFree.isPolarGuideAcquired)
+        assertTrue(previewFree.isPolarGuideAcquired)
+        assertEquals(108.0, previewFree.activePolarAngleDeg!!, 1e-3)
+        assertEquals(null, previewFree.activePolarSnapAngleDeg)
 
         // 5. Optional PolarSnap projects candidate point onto acquired polar guide ray without mutating raw cursor input
         val (snappedWithPolar, _) = CadSnapAndCoordEngine.resolveCursorSnap(
@@ -944,5 +948,87 @@ class ExampleUnitTest {
         assertTrue(ellipseAlignedDims.any { abs(it.measuredModelValue() - 80.0) < 1e-3 })
         assertTrue(ellipseAlignedDims.any { abs(it.measuredModelValue() - 40.0) < 1e-3 })
     }
+
+    @Test
+    fun `TC-V17-01 verify v17 Native PCAD v2 Round-Trip Serialization, Canonical Basename, and Separated Visual Polar Tracking vs PolarSnap`() {
+        // 1. Canonical basename extraction (Section 4.6)
+        assertEquals("Geo", com.example.cad.io.CadPcadPersistence.canonicalBasename("Geo.pcad"))
+        assertEquals("Geo", com.example.cad.io.CadPcadPersistence.canonicalBasename("Geo.dxf"))
+        assertEquals("Geo", com.example.cad.io.CadPcadPersistence.canonicalBasename("Geo.pdf"))
+        assertEquals("Untitled_Drawing", com.example.cad.io.CadPcadPersistence.canonicalBasename("   "))
+
+        // 2. Native .pcad v2 round-trip serialization & deserialization (Section 4.1–4.5)
+        val baseTemplate = com.example.cad.data.CadTemplateFactory.createSixHoleMountingPlate()
+        val snapCfg = com.example.cad.model.GridAndSnapConfig(
+            polarTrackingEnabled = true,
+            polarSnapEnabled = true,
+            polarSnapPresetAnglesDeg = setOf(30.0, 45.0, 90.0),
+            polarSnapCustomAnglesDeg = listOf(126.0, 152.5),
+            polarAdditionalAnglesDeg = listOf(22.5, 126.5)
+        )
+        val pcadDoc = com.example.cad.io.PcadProjectDocument(
+            schemaVersion = com.example.cad.io.CadPcadPersistence.CURRENT_SCHEMA_VERSION,
+            projectId = "proj_geo_v17",
+            projectName = "Geo",
+            savedAtEpochMs = 1762000000000L,
+            explicitSavePath = "Documents/PrecisionCAD/Geo.pcad",
+            storageUnit = CadUnit.MM,
+            displayUnit = CadUnit.MM,
+            unitChangeMode = com.example.cad.model.UnitChangeMode.CONVERT_DISPLAY_UNITS,
+            precision = PrecisionFormatConfig(linearDecimals = 3, angularDecimals = 1),
+            workspaceSpace = com.example.cad.model.WorkspaceSpace.PAPER_SPACE,
+            sheetSetup = baseTemplate.sheetSetup.copy(
+                titleBlockTitle = "Geo"
+            ),
+            gridSnapConfig = snapCfg,
+            controllerConfig = com.example.cad.model.VirtualControllerConfig(),
+            isQuickDimensionEnabled = true,
+            qdimDensity = QDimDensityPolicy.DETAILED,
+            qdimArrangement = com.example.cad.dimension.DimensionArrangementPreference.BASELINE,
+            layers = baseTemplate.layers,
+            blocks = baseTemplate.blocks,
+            entities = baseTemplate.entities,
+            constraints = emptyList()
+        )
+        val jsonText = com.example.cad.io.CadPcadPersistence.serializeToPcadJson(pcadDoc)
+        assertTrue(jsonText.contains("\"schemaVersion\": 2"))
+        assertTrue(jsonText.contains("\"projectName\": \"Geo\""))
+
+        val restored = com.example.cad.io.CadPcadPersistence.deserializeFromPcadJson(jsonText)
+        assertNotNull(restored)
+        assertEquals(2, restored!!.schemaVersion)
+        assertEquals("Geo", restored.projectName)
+        assertEquals("Geo", restored.sheetSetup.titleBlockTitle)
+        assertEquals(pcadDoc.entities.size, restored.entities.size)
+        assertEquals(setOf(30.0, 45.0, 90.0), restored.gridSnapConfig.polarSnapPresetAnglesDeg)
+        assertEquals(listOf(126.0, 152.5), restored.gridSnapConfig.polarSnapCustomAnglesDeg)
+        assertEquals(listOf(22.5, 126.5), restored.gridSnapConfig.polarAdditionalAnglesDeg)
+
+        // 3. Separated Visual Polar Tracking (0°..359° whole numbers + fractional custom) vs PolarSnap (Section 6.5)
+        val refPt = Point2D(0.0, 0.0)
+        // Visual guide acquires any whole-number bearing (e.g. 37°) even when 37° is NOT in PolarSnap presets
+        val cursorAt37 = refPt.polarOffset(50.0, 37.0)
+        val visualPreview37 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = cursorAt37,
+            snapConfig = snapCfg.copy(polarSnapEnabled = false),
+            previousBasePoint = null
+        )
+        assertNotNull(visualPreview37)
+        assertTrue(visualPreview37!!.isPolarGuideAcquired)
+        assertEquals(37.0, visualPreview37.activePolarAngleDeg!!, 1e-3)
+
+        // When PolarSnap is enabled, cursor at 43° (within 5° of 45° PolarSnap preset) snaps to 45°, NOT 43°
+        val cursorAt43 = refPt.polarOffset(50.0, 43.0)
+        val (snappedPt, _) = CadSnapAndCoordEngine.resolveCursorSnap(
+            rawModelCursor = cursorAt43,
+            referencePoint = refPt,
+            entities = emptyList(),
+            snapConfig = snapCfg.copy(osnapEnabled = false, gridSnapEnabled = false, polarSnapEnabled = true),
+            viewport = ViewportTransform(pixelsPerModelUnit = 3.0f)
+        )
+        assertEquals(45.0, refPt.angleToDeg(snappedPt), 1e-3)
+    }
 }
+
 

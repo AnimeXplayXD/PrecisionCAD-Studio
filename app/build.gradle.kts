@@ -64,13 +64,19 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.precisioncad.kxpqzm"
+    applicationId = "com.precisioncad.studio"
     minSdk = 24
     targetSdk = 36
     versionCode = resolvedVersionCode
     versionName = resolvedVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  splits {
+    abi {
+      isEnable = false
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -80,7 +86,7 @@ android {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
+      keyAlias = System.getenv("KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {

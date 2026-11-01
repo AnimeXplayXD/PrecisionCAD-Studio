@@ -14,7 +14,9 @@ import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.dimension.QDimOperatingMode
 import com.example.cad.io.CadDxfInterchange
+import com.example.cad.io.CadPcadPersistence
 import com.example.cad.io.DxfDocumentPayload
+import com.example.cad.io.PcadProjectDocument
 import com.example.cad.kernel.CadGeometryKernel
 import com.example.cad.kernel.CadModificationEngine
 import com.example.cad.kernel.CadSnapAndCoordEngine
@@ -202,11 +204,58 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val redoStack = ArrayDeque<DocumentSnapshot>()
     private var notificationDismissJob: Job? = null
     private var overviewDismissJob: Job? = null
+    private var autoQuickSaveJob: Job? = null
     private var overviewSeq: Long = 1L
+
+    var lastQuickSaveFile: File? = null
+        private set
+    var lastExplicitSavedPcadFile: File? = null
+        private set
 
     init {
         viewModelScope.launch {
             repository.cleanupUntouchedLegacyTemplatesOnce()
+        }
+    }
+
+    fun buildCurrentPcadDocument(projectNameOverride: String? = null): PcadProjectDocument {
+        val st = _uiState.value
+        val effectiveName = (projectNameOverride ?: st.currentProjectName).trim().ifEmpty { "Untitled Drawing" }
+        val canonicalTitle = CadPcadPersistence.canonicalBasename(effectiveName)
+        return PcadProjectDocument(
+            schemaVersion = CadPcadPersistence.CURRENT_SCHEMA_VERSION,
+            projectId = st.currentProjectId,
+            projectName = canonicalTitle,
+            savedAtEpochMs = System.currentTimeMillis(),
+            storageUnit = st.storageUnit,
+            displayUnit = st.displayUnit,
+            unitChangeMode = st.unitChangeMode,
+            precision = st.precision,
+            sheetSetup = st.sheetSetup.copy(titleBlockTitle = canonicalTitle),
+            dimensionStyle = st.dimensionStyle,
+            gridSnapConfig = st.gridSnapConfig,
+            controllerConfig = st.controllerConfig,
+            activeLayerName = st.activeLayerName,
+            layers = st.layers,
+            blocks = st.blocks.values.toList(),
+            entities = st.entities,
+            isQuickDimensionEnabled = st.isQuickDimensionEnabled,
+            qdimDensity = st.qdimDensity,
+            qdimArrangementPreference = st.qdimArrangementPreference
+        )
+    }
+
+    fun triggerAutomaticQuickSave(immediate: Boolean = false) {
+        autoQuickSaveJob?.cancel()
+        if (immediate) {
+            val doc = buildCurrentPcadDocument()
+            lastQuickSaveFile = CadPcadPersistence.performAutomaticQuickSave(getApplication(), doc)
+        } else {
+            autoQuickSaveJob = viewModelScope.launch {
+                delay(250L)
+                val doc = buildCurrentPcadDocument()
+                lastQuickSaveFile = CadPcadPersistence.performAutomaticQuickSave(getApplication(), doc)
+            }
         }
     }
 
@@ -438,6 +487,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         if (undoStack.size > 80) undoStack.removeFirst()
         redoStack.clear()
         _uiState.update { it.copy(canUndo = undoStack.isNotEmpty(), canRedo = false) }
+        triggerAutomaticQuickSave()
     }
 
     fun undo() {
@@ -470,6 +520,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandPromptBanner = msg
             )
         }
+        triggerAutomaticQuickSave()
         emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
@@ -503,6 +554,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 commandPromptBanner = msg
             )
         }
+        triggerAutomaticQuickSave()
         emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
@@ -1107,6 +1159,35 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
+    /**
+     * Section 5.7: Category-First Selective Dimension Removal.
+     * Removes only the specified DimensionEntity IDs in a single undoable transaction,
+     * preserving all unselected dimensions and all non-dimension drawing geometry.
+     */
+    fun removeSelectedDimensionsConfirmed(dimensionIdsToRemove: Set<String>) {
+        if (dimensionIdsToRemove.isEmpty()) return
+        val st = _uiState.value
+        val matchingDims = st.entities.filter { it is CadEntity.DimensionEntity && it.id in dimensionIdsToRemove }
+        if (matchingDims.isEmpty()) return
+
+        recordUndoSnapshot()
+        val remainingEntities = st.entities.filterNot { entity ->
+            entity is CadEntity.DimensionEntity && entity.id in dimensionIdsToRemove
+        }
+        val remainingIds = remainingEntities.map { it.id }.toSet()
+        val anyAutoDimsRemaining = remainingEntities.any { it is CadEntity.DimensionEntity && it.isAutoGenerated }
+        val msg = "SELECTIVE CLEAR • Removed ${matchingDims.size} selected dimension(s)"
+        _uiState.update {
+            it.copy(
+                entities = remainingEntities,
+                selectedEntityIds = it.selectedEntityIds.intersect(remainingIds),
+                isQuickDimensionEnabled = it.isQuickDimensionEnabled && anyAutoDimsRemaining,
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
+    }
+
     fun refreshQuickDimensions() {
         val st = _uiState.value
         executeQuickDimension(
@@ -1395,15 +1476,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
         }
-        val actionPrompt = promptForCommand(st.activeCommand, 0, subOption)
+        // Section 2.1–2.3: Shared Live-Preview Preservation Across All Applicable Commands.
+        // Changing a command mode, sub-option, or geometric style while a command is active
+        // MUST retain all previously accepted points/operands (commandStepPoints), preserve
+        // the viewport, and immediately recalculate the temporary preview.
+        val retainedStepCount = st.commandStepPoints.size
+        val actionPrompt = promptForCommand(st.activeCommand, retainedStepCount, subOption)
         _uiState.update {
             it.copy(
                 commandSubOption = subOption,
-                commandStepPoints = emptyList(),
-                selectionBoxDrag = null,
+                commandStepPoints = it.commandStepPoints,
+                selectionBoxDrag = if (st.activeCommand == CadCommandId.SELECT) null else it.selectionBoxDrag,
                 activeActionPrompt = actionPrompt,
                 commandPromptBanner = actionPrompt,
-                commandPanelState = CommandPanelState.Running(st.activeCommand, actionPrompt, 0)
+                commandPanelState = CommandPanelState.Running(st.activeCommand, actionPrompt, retainedStepCount)
             )
         }
         syncPolarAndActiveSessionState()
@@ -1774,18 +1860,31 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
             CadCommandId.RECTANGLE -> {
                 if (pts.size >= 2) {
+                    val corner1 = pts[0]
+                    val rawCorner2 = pts[1]
+                    val corner2 = if (st.commandSubOption == "Square") {
+                        val dx = rawCorner2.x - corner1.x
+                        val dy = rawCorner2.y - corner1.y
+                        val side = maxOf(abs(dx), abs(dy)).coerceAtLeast(1.0)
+                        Point2D(
+                            x = corner1.x + if (dx >= 0.0) side else -side,
+                            y = corner1.y + if (dy >= 0.0) side else -side
+                        )
+                    } else {
+                        rawCorner2
+                    }
                     val filletR = if (st.commandSubOption == "Fillet") st.commandParameterValue else 0.0
                     val chamferD = if (st.commandSubOption == "Chamfer") st.commandParameterValue else 0.0
                     val rect = CadGeometryKernel.createRectanglePolyline(
-                        corner1 = pts[0],
-                        corner2 = pts[1],
+                        corner1 = corner1,
+                        corner2 = corner2,
                         filletRadius = filletR,
                         chamferDistance = chamferD,
                         layerName = layer
                     )
                     commitSingleEntity(rect, "RECTANGLE • Created ${fmt(rect.boundingBox().width)} × ${fmt(rect.boundingBox().height)}")
                 } else {
-                    val prompt = "RECTANGLE • Pick opposite corner point"
+                    val prompt = promptForCommand(cmd, pts.size, st.commandSubOption)
                     _uiState.update { it.copy(commandStepPoints = pts, commandPromptBanner = prompt, commandPanelState = CommandPanelState.Running(cmd, prompt, pts.size)) }
                 }
             }
@@ -2883,16 +2982,44 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val st = _uiState.value
         val pts = st.commandStepPoints
         val cur = st.snappedCursorModelPos
-        if (pts.isEmpty()) return emptyList()
+
+        // Commands that can show a preview before a point is picked (or from selection)
+        if (pts.isEmpty()) {
+            return when (st.activeCommand) {
+                CadCommandId.XLINE -> when (st.commandSubOption) {
+                    "Horizontal" -> listOf(CadEntity.XLineEntity(rootPoint = cur, angleDeg = 0.0))
+                    "Vertical" -> listOf(CadEntity.XLineEntity(rootPoint = cur, angleDeg = 90.0))
+                    else -> emptyList()
+                }
+                CadCommandId.DONUT -> {
+                    val od = st.commandParameterValue.coerceAtLeast(2.0)
+                    listOf(CadEntity.DonutEntity(center = cur, innerDiameter = od * 0.5, outerDiameter = od))
+                }
+                CadCommandId.OFFSET -> {
+                    val target = st.entities.firstOrNull { it.id in st.selectedEntityIds }
+                    if (target != null) {
+                        listOfNotNull(CadModificationEngine.offsetEntity(target, st.commandParameterValue, cur))
+                    } else emptyList()
+                }
+                else -> emptyList()
+            }
+        }
 
         return when (st.activeCommand) {
             CadCommandId.LINE -> listOf(CadEntity.LineEntity(start = pts.last(), end = cur))
-            CadCommandId.POLYLINE -> listOf(
-                CadEntity.PolylineEntity(
-                    vertices = (pts + cur).map { PolylineVertex(it) },
-                    isClosed = false
+            CadCommandId.POLYLINE -> {
+                val activeBulge = if (st.commandSubOption == "Arc") 0.45 else 0.0
+                val polyVertices = pts.mapIndexed { idx, p ->
+                    val b = if (idx == pts.lastIndex) activeBulge else 0.0
+                    PolylineVertex(p, bulge = b)
+                } + PolylineVertex(cur)
+                listOf(
+                    CadEntity.PolylineEntity(
+                        vertices = polyVertices,
+                        isClosed = st.commandSubOption == "Close" && pts.size >= 2
+                    )
                 )
-            )
+            }
             CadCommandId.CIRCLE -> when (st.commandSubOption) {
                 "2P" -> listOf(
                     CadEntity.CircleEntity(
@@ -2900,7 +3027,32 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         radius = (pts.first().distanceTo(cur) * 0.5).coerceAtLeast(0.5)
                     )
                 )
-                "3P" -> if (pts.size == 2) listOfNotNull(CadGeometryKernel.circleFrom3Points(pts[0], pts[1], cur)) else emptyList()
+                "3P" -> if (pts.size >= 2) {
+                    listOfNotNull(CadGeometryKernel.circleFrom3Points(pts[0], pts[1], cur))
+                } else {
+                    listOf(
+                        CadEntity.CircleEntity(
+                            center = pts.first().midpointTo(cur),
+                            radius = (pts.first().distanceTo(cur) * 0.5).coerceAtLeast(0.5)
+                        )
+                    )
+                }
+                "TTR" -> {
+                    val l1 = findNearestEntityOfType<CadEntity.LineEntity>(pts[0])
+                    val l2 = findNearestEntityOfType<CadEntity.LineEntity>(cur)
+                    val r = st.commandParameterValue.coerceAtLeast(1.0)
+                    if (l1 != null && l2 != null && l1.id != l2.id) {
+                        listOfNotNull(CadGeometryKernel.circleTanTanRadius(l1, l2, r, cur))
+                    } else {
+                        listOf(CadEntity.CircleEntity(center = pts.first(), radius = r))
+                    }
+                }
+                "Diameter" -> listOf(
+                    CadEntity.CircleEntity(
+                        center = pts.first(),
+                        radius = (pts.first().distanceTo(cur) * 0.5).coerceAtLeast(0.5)
+                    )
+                )
                 else -> listOf(
                     CadEntity.CircleEntity(
                         center = pts.first(),
@@ -2908,17 +3060,52 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     )
                 )
             }
-            CadCommandId.ARC -> if (pts.size == 2) {
-                listOfNotNull(CadGeometryKernel.arcFrom3Points(pts[0], pts[1], cur))
-            } else emptyList()
-            CadCommandId.RECTANGLE -> listOf(
-                CadGeometryKernel.createRectanglePolyline(
-                    corner1 = pts.first(),
-                    corner2 = cur,
-                    filletRadius = if (st.commandSubOption == "Fillet") st.commandParameterValue else 0.0,
-                    chamferDistance = if (st.commandSubOption == "Chamfer") st.commandParameterValue else 0.0
+            CadCommandId.ARC -> {
+                if (pts.size >= 2) {
+                    if (st.commandSubOption == "SCE") {
+                        val startPt = pts[0]
+                        val centerPt = pts[1]
+                        val r = centerPt.distanceTo(startPt).coerceAtLeast(0.5)
+                        val a1 = centerPt.angleToDeg(startPt)
+                        val a2 = centerPt.angleToDeg(cur)
+                        val sweep = ((a2 - a1) + 360.0) % 360.0
+                        listOf(
+                            CadEntity.ArcEntity(
+                                center = centerPt,
+                                radius = r,
+                                startAngleDeg = a1,
+                                sweepAngleDeg = sweep
+                            )
+                        )
+                    } else {
+                        listOfNotNull(CadGeometryKernel.arcFrom3Points(pts[0], pts[1], cur))
+                    }
+                } else {
+                    listOf(CadEntity.LineEntity(start = pts.first(), end = cur))
+                }
+            }
+            CadCommandId.RECTANGLE -> {
+                val corner1 = pts.first()
+                val corner2 = if (st.commandSubOption == "Square") {
+                    val dx = cur.x - corner1.x
+                    val dy = cur.y - corner1.y
+                    val side = maxOf(abs(dx), abs(dy)).coerceAtLeast(1.0)
+                    Point2D(
+                        x = corner1.x + if (dx >= 0.0) side else -side,
+                        y = corner1.y + if (dy >= 0.0) side else -side
+                    )
+                } else {
+                    cur
+                }
+                listOf(
+                    CadGeometryKernel.createRectanglePolyline(
+                        corner1 = corner1,
+                        corner2 = corner2,
+                        filletRadius = if (st.commandSubOption == "Fillet") st.commandParameterValue else 0.0,
+                        chamferDistance = if (st.commandSubOption == "Chamfer") st.commandParameterValue else 0.0
+                    )
                 )
-            )
+            }
             CadCommandId.POLYGON -> listOf(
                 CadGeometryKernel.createRegularPolygon(
                     center = pts.first(),
@@ -2928,6 +3115,64 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     rotationDeg = pts.first().angleToDeg(cur)
                 )
             )
+            CadCommandId.ELLIPSE -> if (pts.size >= 2) {
+                listOf(
+                    CadEntity.EllipseEntity(
+                        center = pts[0],
+                        majorRadius = pts[0].distanceTo(pts[1]).coerceAtLeast(1.0),
+                        minorRadius = pts[0].distanceTo(cur).coerceAtLeast(0.5),
+                        rotationAngleDeg = pts[0].angleToDeg(pts[1])
+                    )
+                )
+            } else {
+                listOf(
+                    CadEntity.CircleEntity(
+                        center = pts.first(),
+                        radius = pts.first().distanceTo(cur).coerceAtLeast(0.5)
+                    )
+                )
+            }
+            CadCommandId.RAY -> listOf(
+                CadEntity.RayEntity(basePoint = pts.first(), angleDeg = pts.first().angleToDeg(cur))
+            )
+            CadCommandId.XLINE -> listOf(
+                CadEntity.XLineEntity(rootPoint = pts.first(), angleDeg = pts.first().angleToDeg(cur))
+            )
+            CadCommandId.OFFSET -> {
+                val target = st.entities.firstOrNull { it.id in st.selectedEntityIds }
+                    ?: findNearestSelectableEntity(pts.first())
+                if (target != null) {
+                    listOfNotNull(CadModificationEngine.offsetEntity(target, st.commandParameterValue, cur))
+                } else emptyList()
+            }
+            CadCommandId.FILLET -> {
+                val pickTolerance = (48f / st.viewport.pixelsPerModelUnit.coerceAtLeast(0.1f)).toDouble().coerceAtLeast(10.0)
+                val existingIds = st.entities.map { it.id }.toSet()
+                val filleted = CadModificationEngine.filletAtPicks(
+                    entities = st.entities,
+                    pick1 = pts.first(),
+                    pick2 = cur,
+                    radius = st.commandParameterValue,
+                    pickTolerance = pickTolerance,
+                    trimSegments = true
+                )
+                filleted?.filterNot { it.id in existingIds } ?: emptyList()
+            }
+            CadCommandId.CHAMFER -> {
+                val pickTolerance = (48f / st.viewport.pixelsPerModelUnit.coerceAtLeast(0.1f)).toDouble().coerceAtLeast(10.0)
+                val existingIds = st.entities.map { it.id }.toSet()
+                val d = st.commandParameterValue.coerceAtLeast(0.5)
+                val chamfered = CadModificationEngine.chamferAtPicks(
+                    entities = st.entities,
+                    pick1 = pts.first(),
+                    pick2 = cur,
+                    distance1 = d,
+                    distance2 = d,
+                    pickTolerance = pickTolerance,
+                    trimSegments = true
+                )
+                chamfered?.filterNot { it.id in existingIds } ?: emptyList()
+            }
             CadCommandId.SPLINE -> listOf(
                 CadEntity.SplineEntity(controlPoints = pts + cur)
             )
@@ -2939,13 +3184,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     fun currentDxfPayload(): DxfDocumentPayload {
         val st = _uiState.value
+        val canonicalTitle = CadPcadPersistence.canonicalBasename(st.currentProjectName)
         return DxfDocumentPayload(
             storageUnit = st.storageUnit,
             displayUnit = st.displayUnit,
             layers = st.layers,
             entities = st.entities,
             blocks = st.blocks.values.toList(),
-            sheetSetup = st.sheetSetup,
+            sheetSetup = st.sheetSetup.copy(titleBlockTitle = canonicalTitle),
             precision = st.precision
         )
     }
@@ -2953,31 +3199,40 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     fun exportAndShareDxf(context: Context) {
         val payload = currentDxfPayload()
         val dxfString = CadDxfInterchange.exportToDxf(payload)
+        val baseName = CadPcadPersistence.canonicalBasename(_uiState.value.currentProjectName)
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "${_uiState.value.currentProjectId}.dxf")
+        val file = File(dir, "$baseName.dxf")
         file.writeText(dxfString)
-        emitTransientNotification("DXF EXPORT • Exported AC1015 DXF (${payload.entities.size} entities)", NotificationCategory.SUCCESS)
+        emitTransientNotification("DXF EXPORT • Exported AC1015 DXF '$baseName.dxf' (${payload.entities.size} entities)", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "application/dxf")
     }
 
     fun exportAndSharePdf(context: Context) {
+        val baseName = CadPcadPersistence.canonicalBasename(_uiState.value.currentProjectName)
         val payload = currentDxfPayload()
-        val file = CadDxfInterchange.exportToPdfFile(context, "${_uiState.value.currentProjectId}.pdf", payload)
-        emitTransientNotification("PDF EXPORT • Plotted ISO/ASME technical sheet PDF", NotificationCategory.SUCCESS)
+        val file = CadDxfInterchange.exportToPdfFile(context, "$baseName.pdf", payload)
+        emitTransientNotification("PDF EXPORT • Plotted '$baseName.pdf' (TITLE: $baseName)", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "application/pdf")
     }
 
     fun exportAndShareSvg(context: Context) {
         val payload = currentDxfPayload()
         val svgString = CadDxfInterchange.exportToSvg(payload)
+        val baseName = CadPcadPersistence.canonicalBasename(_uiState.value.currentProjectName)
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "${_uiState.value.currentProjectId}.svg")
+        val file = File(dir, "$baseName.svg")
         file.writeText(svgString)
-        emitTransientNotification("SVG EXPORT • Exported vector SVG sheet", NotificationCategory.SUCCESS)
+        emitTransientNotification("SVG EXPORT • Exported vector SVG '$baseName.svg'", NotificationCategory.SUCCESS)
         CadDxfInterchange.shareExportedFile(context, file, "image/svg+xml")
     }
 
     fun importDxfString(dxfText: String) {
+        // Also support opening native .pcad JSON if passed to import
+        val trimmed = dxfText.trim()
+        if (trimmed.startsWith("{") && trimmed.contains("\"format\"")) {
+            importPcadJsonString(trimmed)
+            return
+        }
         val imported = CadDxfInterchange.importFromDxf(dxfText)
         if (imported.entities.isEmpty()) {
             emitTransientNotification("DXFIN • No entities found in DXF content", NotificationCategory.WARNING)
@@ -3005,26 +3260,80 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
+    fun importPcadJsonString(pcadJson: String) {
+        val doc = CadPcadPersistence.deserializeFromPcadJson(pcadJson)
+        if (doc == null) {
+            emitTransientNotification("PCAD OPEN • Invalid or corrupted .pcad project file", NotificationCategory.ERROR)
+            return
+        }
+        recordUndoSnapshot()
+        val baseName = CadPcadPersistence.canonicalBasename(doc.projectName)
+        val msg = "OPEN (.PCAD) • Restored '$baseName.pcad' (${doc.entities.size} entities, ${doc.displayUnit.symbol})"
+        _uiState.update {
+            it.copy(
+                isHomeScreenVisible = false,
+                currentProjectId = doc.projectId,
+                currentProjectName = baseName,
+                storageUnit = doc.storageUnit,
+                displayUnit = doc.displayUnit,
+                unitChangeMode = doc.unitChangeMode,
+                precision = doc.precision,
+                sheetSetup = doc.sheetSetup.copy(titleBlockTitle = baseName),
+                dimensionStyle = doc.dimensionStyle,
+                gridSnapConfig = doc.gridSnapConfig,
+                controllerConfig = doc.controllerConfig,
+                activeLayerName = doc.activeLayerName,
+                layers = doc.layers,
+                entities = doc.entities,
+                blocks = doc.blocks.associateBy { b -> b.name },
+                selectedEntityIds = emptySet(),
+                isQuickDimensionEnabled = doc.isQuickDimensionEnabled,
+                qdimDensity = doc.qdimDensity,
+                qdimArrangementPreference = doc.qdimArrangementPreference,
+                activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
+                commandPromptBanner = msg,
+                commandPanelState = CommandPanelState.Hidden
+            )
+        }
+        fitDrawing(notify = false)
+        emitTransientNotification(msg, NotificationCategory.SUCCESS)
+    }
+
     fun saveCurrentProject(projectName: String) {
         val st = _uiState.value
-        val payload = currentDxfPayload()
+        val baseName = CadPcadPersistence.canonicalBasename(projectName)
         val saveId = if (st.currentProjectId == "untitled_drawing") {
             "proj_${UUID.randomUUID().toString().take(8)}"
         } else {
             st.currentProjectId
         }
+        val updatedSheet = st.sheetSetup.copy(titleBlockTitle = baseName)
+        _uiState.update {
+            it.copy(
+                currentProjectId = saveId,
+                currentProjectName = baseName,
+                sheetSetup = updatedSheet
+            )
+        }
+        val pcadDoc = buildCurrentPcadDocument(projectNameOverride = baseName).copy(projectId = saveId)
+        val payload = currentDxfPayload()
+        val explicitResult = CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(getApplication(), pcadDoc)
+        lastExplicitSavedPcadFile = explicitResult.localFile
+        lastQuickSaveFile = CadPcadPersistence.performAutomaticQuickSave(getApplication(), pcadDoc)
         viewModelScope.launch {
             repository.saveProjectDocument(
                 projectId = saveId,
-                name = projectName,
-                description = "2D Technical Drawing (${st.entities.size} entities, ${st.displayUnit.symbol})",
-                payload = payload
+                name = baseName,
+                description = "PrecisionCAD Project ($baseName.pcad • ${st.entities.size} entities, ${st.displayUnit.symbol})",
+                payload = payload,
+                pcadDocument = pcadDoc
             )
-            val msg = "SAVE • Saved '$projectName' to local Room & DXF store"
+            val msg = "SAVE • Saved '$baseName.pcad' to Documents/PrecisionCAD/$baseName.pcad"
             _uiState.update {
                 it.copy(
                     currentProjectId = saveId,
-                    currentProjectName = projectName,
+                    currentProjectName = baseName,
+                    sheetSetup = updatedSheet,
                     commandPromptBanner = msg
                 )
             }

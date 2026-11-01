@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">PrecisionCAD</string>
+    <string name="app_name">PrecisionCAD Studio</string>
     <string name="workspace_subtitle">Desktop-Class 2D CAD Drafting &amp; Technical Documentation</string>
     <string name="mode_model_space">MODEL</string>
     <string name="mode_paper_space">PAPER</string>

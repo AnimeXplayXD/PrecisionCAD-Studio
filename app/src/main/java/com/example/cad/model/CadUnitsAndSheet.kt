@@ -184,14 +184,20 @@ data class GridAndSnapConfig(
     val polarTrackingEnabled: Boolean = true,
     val polarSnapEnabled: Boolean = false,
     val polarTrackingAngleDeg: Double = 45.0,
-    val polarAdditionalAnglesDeg: List<Double> = listOf(126.0),
+    val polarAdditionalAnglesDeg: List<Double> = listOf(22.5, 126.0),
+    val polarSnapPresetAnglesDeg: Set<Double> = setOf(45.0, 90.0),
+    val polarSnapCustomAnglesDeg: List<Double> = listOf(126.0),
     val polarRelativeToLastSegment: Boolean = false,
     val polarAcquisitionToleranceDeg: Double = 5.0
 ) {
+    val referenceBasisLabel: String
+        get() = if (polarRelativeToLastSegment) "Last Segment" else "+X"
+
     companion object {
         val standardPolarIncrementPresets: List<Double> = listOf(
             90.0, 60.0, 45.0, 30.0, 22.5, 18.0, 15.0, 10.0, 5.0
         )
+        val wholeNumberVisualBearingsDeg: List<Double> = (0..359).map { it.toDouble() }
     }
 }
 
@@ -230,3 +236,6 @@ data class CursorControllerConfig(
     val availableIncrements: List<Double> = listOf(10.0, 5.0, 1.0, 0.5, 0.1, 0.01),
     val isCollapsed: Boolean = false
 )
+
+typealias VirtualControllerConfig = CursorControllerConfig
+

@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -106,6 +107,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -213,7 +215,7 @@ fun CadWorkspaceScreen(
         }
     }
 
-    // SAF Document Picker for Open Drawing (.dxf) from Home Screen (Section 62.2)
+    // SAF Document Picker for Open Drawing (.pcad / .dxf) from Home Screen
     val dxfFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -221,8 +223,13 @@ fun CadWorkspaceScreen(
             runCatching {
                 context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
             }.getOrNull()?.let { content ->
-                if (content.isNotBlank()) {
-                    viewModel.importDxfString(content)
+                val trimmed = content.trim()
+                if (trimmed.isNotEmpty()) {
+                    if (trimmed.startsWith("{") && trimmed.contains("\"schemaVersion\"")) {
+                        viewModel.importPcadJsonString(trimmed)
+                    } else {
+                        viewModel.importDxfString(content)
+                    }
                 }
             }
         }
@@ -379,17 +386,67 @@ fun CadWorkspaceScreen(
                     )
                 }
 
-                // 3. Bottom Overlay Stack: Floating Active-Session / Transient Overview Card + Persistent Bottom Control Stack
-                // Section 49: Apply Modifier.imePadding() to the bottom overlay stack so the entire bottom stack rises above the software keyboard.
+                // 3. Bottom Overlay Stack: Separated into Upper Command Region (.imePadding) + Lower Stationary Controller Region (No .imePadding)
+                // Section 3 (v17): Upper command region rises above software keyboard; lower controller deck stays anchored at screen bottom.
+                var controllerDeckHeightPx by remember { mutableFloatStateOf(with(density) { 188.dp.toPx() }) }
+                var upperCommandRegionHeightPx by remember { mutableFloatStateOf(with(density) { 92.dp.toPx() }) }
+                val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
+                val restBottomOffsetDp = with(density) {
+                    (controllerDeckHeightPx - imeBottomPx).coerceAtLeast(0f).toDp()
+                }
+
+                LaunchedEffect(controllerDeckHeightPx, upperCommandRegionHeightPx) {
+                    bottomStackHeightPx = controllerDeckHeightPx + upperCommandRegionHeightPx
+                }
+
+                // 3A. Lower Stationary Controller Region (Anchored at screen bottom — NO .imePadding())
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .zIndex(1f)
+                        .onSizeChanged { controllerDeckHeightPx = it.height.toFloat() }
+                        .testTag("lower_controller_stationary_region")
+                ) {
+                    VirtualCursorControllerDeck(
+                        config = uiState.controllerConfig,
+                        cursorModelPos = uiState.snappedCursorModelPos,
+                        referencePoint = uiState.commandStepPoints.lastOrNull(),
+                        storageUnit = uiState.storageUnit,
+                        displayUnit = uiState.displayUnit,
+                        precision = uiState.precision,
+                        pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
+                        onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
+                        onJoystickVelocityStep = viewModel::moveCursorByDelta,
+                        onStepNudge = viewModel::stepNudgeCursor,
+                        onPickAtCursor = viewModel::pickPointAtCursor,
+                        onFinishCommand = { viewModel.finishCurrentCommand() },
+                        onCancelCommand = viewModel::cancelCurrentCommand,
+                        onModeChange = viewModel::setControllerMode,
+                        onIncrementSelect = viewModel::setStepIncrement,
+                        onOpenControllerSettings = { showControllerSettingsDialog = true },
+                        onToggleCollapse = viewModel::toggleControllerCollapse,
+                        onSetCollapsed = { collapsed ->
+                            viewModel.setControllerDockState(
+                                if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
+                            )
+                        },
+                        onOpenCoordinateDialog = { showCoordinateDialog = true }
+                    )
+                }
+
+                // 3B. Upper Command Region (OverviewOverlayCard + ContextualCommandAndOptionsDock — rises with .imePadding())
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
+                        .padding(bottom = restBottomOffsetDp)
                         .imePadding()
-                        .zIndex(1f)
-                        .onSizeChanged { bottomStackHeightPx = it.height.toFloat() }
+                        .zIndex(2f)
+                        .onSizeChanged { upperCommandRegionHeightPx = it.height.toFloat() }
+                        .testTag("upper_command_ime_region")
                 ) {
-                    // Sections 30, 39.2, 42.5 & 59.2: Floating Overview Overlay above the Function Toolbar
+                    // Floating Overview Overlay above the Function Toolbar
                     // Emerges upward from behind the function/command dock (lower zIndex than the dock).
                     OverviewOverlayCard(
                         uiState = uiState,
@@ -414,74 +471,48 @@ fun CadWorkspaceScreen(
                     )
 
                     // Tier 1 & Tier 2: Function/Action Bar + Persistent Command Entry & Prompt Bar
-                    Column(modifier = Modifier.zIndex(1f)) {
+                    Box(modifier = Modifier.zIndex(1f)) {
                         ContextualCommandAndOptionsDock(
-                        uiState = uiState,
-                        commandLineInput = commandLineInput,
-                        onCommandLineInputChange = { query ->
-                            commandLineInput = query
-                            viewModel.updateCommandInputQuery(query)
-                        },
-                        onOpenCommandEditing = {
-                            viewModel.openCommandLineEditing(commandLineInput)
-                        },
-                        onCloseCommandEditing = {
-                            commandLineInput = ""
-                            viewModel.closeCommandLineEditing()
-                        },
-                        onSubmitCommandLine = {
-                            viewModel.submitCommandOrCoordinateInput(commandLineInput)
-                            commandLineInput = ""
-                        },
-                        onSelectCommand = { cmd ->
-                            commandLineInput = ""
-                            handleCommandSelection(cmd)
-                        },
-                        onSelectSubOption = viewModel::setCommandSubOption,
-                        onParameterChange = viewModel::setCommandParameterValue,
-                        onToggleQDim = viewModel::setQuickDimensionEnabled,
-                        onRefreshQDim = viewModel::refreshQuickDimensions,
-                        onSelectQDimDensity = viewModel::setQDimDensity,
-                        onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
-                        onOpenQDimDialog = { showQDimDialog = true },
-                        onOpenActionLauncher = { showActionLauncherDialog = true },
-                        onToggleToolDrawer = viewModel::toggleToolDrawer,
-                        onPickPointAtCursor = viewModel::pickPointAtCursor,
-                        onFitDrawing = { viewModel.fitDrawing() },
-                        onOpenProperties = { showPropertiesDialog = true },
-                        onDeleteSelected = viewModel::deleteSelectedEntities,
-                        onClearSelection = viewModel::clearSelection,
-                        onSelectByLayer = viewModel::selectEntitiesByLayer,
-                        onSelectByType = viewModel::selectEntitiesByType,
-                        onFinishCommand = { viewModel.finishCurrentCommand() },
-                        onCancelCommand = viewModel::cancelCurrentCommand
-                    )
-
-                    // Tier 3: Collapsible Virtual Cursor Controller Dock
-                    VirtualCursorControllerDeck(
-                        config = uiState.controllerConfig,
-                        cursorModelPos = uiState.snappedCursorModelPos,
-                        storageUnit = uiState.storageUnit,
-                        displayUnit = uiState.displayUnit,
-                        precision = uiState.precision,
-                        pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
-                        onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
-                        onJoystickVelocityStep = viewModel::moveCursorByDelta,
-                        onStepNudge = viewModel::stepNudgeCursor,
-                        onPickAtCursor = viewModel::pickPointAtCursor,
-                        onFinishCommand = { viewModel.finishCurrentCommand() },
-                        onCancelCommand = viewModel::cancelCurrentCommand,
-                        onModeChange = viewModel::setControllerMode,
-                        onIncrementSelect = viewModel::setStepIncrement,
-                        onOpenControllerSettings = { showControllerSettingsDialog = true },
-                        onToggleCollapse = viewModel::toggleControllerCollapse,
-                        onSetCollapsed = { collapsed ->
-                            viewModel.setControllerDockState(
-                                if (collapsed) ControllerDockState.COMPACT_DOCK else ControllerDockState.EXPANDED_CONTROLLER
-                            )
-                        },
-                        onOpenCoordinateDialog = { showCoordinateDialog = true }
-                    )
+                            uiState = uiState,
+                            commandLineInput = commandLineInput,
+                            onCommandLineInputChange = { query ->
+                                commandLineInput = query
+                                viewModel.updateCommandInputQuery(query)
+                            },
+                            onOpenCommandEditing = {
+                                viewModel.openCommandLineEditing(commandLineInput)
+                            },
+                            onCloseCommandEditing = {
+                                commandLineInput = ""
+                                viewModel.closeCommandLineEditing()
+                            },
+                            onSubmitCommandLine = {
+                                viewModel.submitCommandOrCoordinateInput(commandLineInput)
+                                commandLineInput = ""
+                            },
+                            onSelectCommand = { cmd ->
+                                commandLineInput = ""
+                                handleCommandSelection(cmd)
+                            },
+                            onSelectSubOption = viewModel::setCommandSubOption,
+                            onParameterChange = viewModel::setCommandParameterValue,
+                            onToggleQDim = viewModel::setQuickDimensionEnabled,
+                            onRefreshQDim = viewModel::refreshQuickDimensions,
+                            onSelectQDimDensity = viewModel::setQDimDensity,
+                            onSelectQDimArrangement = viewModel::setQDimArrangementPreference,
+                            onOpenQDimDialog = { showQDimDialog = true },
+                            onOpenActionLauncher = { showActionLauncherDialog = true },
+                            onToggleToolDrawer = viewModel::toggleToolDrawer,
+                            onPickPointAtCursor = viewModel::pickPointAtCursor,
+                            onFitDrawing = { viewModel.fitDrawing() },
+                            onOpenProperties = { showPropertiesDialog = true },
+                            onDeleteSelected = viewModel::deleteSelectedEntities,
+                            onClearSelection = viewModel::clearSelection,
+                            onSelectByLayer = viewModel::selectEntitiesByLayer,
+                            onSelectByType = viewModel::selectEntitiesByType,
+                            onFinishCommand = { viewModel.finishCurrentCommand() },
+                            onCancelCommand = viewModel::cancelCurrentCommand
+                        )
                     }
                 }
 
@@ -633,6 +664,7 @@ fun CadWorkspaceScreen(
                                 .fillMaxWidth()
                                 .imePadding()
                                 .onSizeChanged { landscapeBottomHeightPx = it.height.toFloat() }
+                                .testTag("upper_command_ime_region")
                         ) {
                             OverviewOverlayCard(
                                 uiState = uiState,
@@ -702,14 +734,14 @@ fun CadWorkspaceScreen(
                         }
                     }
 
-                    // Right-Side Opaque Inspector + Collapsible Virtual Cursor Controller
+                    // Right-Side Opaque Inspector + Stationary Collapsible Virtual Cursor Controller (NO .imePadding())
                     Column(
                         modifier = Modifier
                             .width(308.dp)
                             .fillMaxHeight()
-                            .imePadding()
                             .background(CadPanelSurface)
-                            .border(1.dp, CadBorderHairline),
+                            .border(1.dp, CadBorderHairline)
+                            .testTag("lower_controller_stationary_region"),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(
@@ -777,6 +809,7 @@ fun CadWorkspaceScreen(
                         VirtualCursorControllerDeck(
                             config = uiState.controllerConfig,
                             cursorModelPos = uiState.snappedCursorModelPos,
+                            referencePoint = uiState.commandStepPoints.lastOrNull(),
                             storageUnit = uiState.storageUnit,
                             displayUnit = uiState.displayUnit,
                             precision = uiState.precision,
@@ -864,16 +897,24 @@ fun CadWorkspaceScreen(
     }
 
     if (showQDimDialog) {
+        val currentDimEntities = remember(uiState.entities) {
+            uiState.entities.filterIsInstance<CadEntity.DimensionEntity>()
+        }
         QuickDimensionDialog(
             isQuickDimensionEnabled = uiState.isQuickDimensionEnabled,
             selectedCount = uiState.selectedEntityIds.size,
             currentDensity = uiState.qdimDensity,
             currentArrangement = uiState.qdimArrangementPreference,
             alignmentReport = uiState.lastAlignmentReport,
-            totalDimensionCount = uiState.entities.count { it is CadEntity.DimensionEntity },
+            totalDimensionCount = currentDimEntities.size,
+            dimensionEntities = currentDimEntities,
+            storageUnit = uiState.storageUnit,
+            displayUnit = uiState.displayUnit,
+            precision = uiState.precision,
             onToggleQuickDimension = viewModel::setQuickDimensionEnabled,
             onRefreshQuickDimension = viewModel::refreshQuickDimensions,
             onClearAllDimensions = viewModel::clearAllDimensionsConfirmed,
+            onRemoveSelectedDimensions = viewModel::removeSelectedDimensionsConfirmed,
             onExecuteQDim = { mode, density, replaceAuto, arrangement ->
                 viewModel.executeQuickDimension(mode, density, replaceAuto, arrangement)
             },
@@ -1438,16 +1479,17 @@ private fun ViewportFloatingStatusHud(
             tag = "hud_toggle_ortho",
             onClick = onToggleOrtho
         )
-        val polarAngleLabel = if (uiState.gridSnapConfig.polarTrackingAngleDeg % 1.0 == 0.0) {
-            uiState.gridSnapConfig.polarTrackingAngleDeg.toInt().toString()
-        } else {
-            uiState.gridSnapConfig.polarTrackingAngleDeg.toString()
-        }
+        val polarSnapSuffix = if (uiState.gridSnapConfig.polarSnapEnabled) " • SNAP" else ""
         HudToggleBadge(
             label = if (uiState.polarPreview?.isPolarGuideAcquired == true && uiState.polarPreview.activePolarAngleDeg != null) {
-                "POLAR [${uiState.polarPreview.activePolarAngleDeg.toInt()}°]"
+                val trackLabel = if (uiState.polarPreview.activePolarAngleDeg % 1.0 == 0.0) {
+                    "${uiState.polarPreview.activePolarAngleDeg.toInt()}°"
+                } else {
+                    String.format(Locale.US, "%.1f°", uiState.polarPreview.activePolarAngleDeg)
+                }
+                "POLAR [θ=${String.format(Locale.US, "%.0f°", uiState.polarPreview.actualAngleThetaDeg ?: 0.0)} • θₚ=$trackLabel$polarSnapSuffix]"
             } else {
-                "POLAR (${polarAngleLabel}°)"
+                "POLAR (0°–359°$polarSnapSuffix)"
             },
             active = uiState.gridSnapConfig.polarTrackingEnabled,
             activeBg = OpaqueCyanBadgeBg,
@@ -2123,13 +2165,36 @@ private fun ContextualCommandAndOptionsDock(
             }
 
             // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
-            // Section 61: Idle state shows only the continuous full-width text field; engaged state reveals the
-            // Stacked Send / Cancel Action-Card Compartment on the right side.
+            // Section 3.3 (v17):
+            // commandBarEngaged = commandImeVisible || commandText.isNotEmpty()
+            // commandBarIdle    = !commandImeVisible && commandText.isEmpty()
+            // A running CAD command by itself must NEVER keep the Send/Cancel action-card compartment visible.
+            val density = LocalDensity.current
+            val focusManager = LocalFocusManager.current
+            val imeBottomPx = WindowInsets.ime.getBottom(density)
             var isCommandFieldFocused by remember { mutableStateOf(false) }
-            val isCommandEntryEngaged = isCommandFieldFocused ||
-                commandLineInput.isNotEmpty() ||
-                uiState.commandPanelState is CommandPanelState.Editing ||
-                isRunningActiveCommand
+            var wasImeOpenWhileFocused by remember { mutableStateOf(false) }
+
+            LaunchedEffect(imeBottomPx, isCommandFieldFocused) {
+                if (!isCommandFieldFocused) {
+                    wasImeOpenWhileFocused = false
+                } else if (imeBottomPx > 0) {
+                    wasImeOpenWhileFocused = true
+                } else if (wasImeOpenWhileFocused && imeBottomPx == 0) {
+                    // Software keyboard was dismissed while focused
+                    wasImeOpenWhileFocused = false
+                    isCommandFieldFocused = false
+                    focusManager.clearFocus(force = true)
+                    if (commandLineInput.isEmpty()) {
+                        onCloseCommandEditing()
+                    }
+                }
+            }
+
+            val commandImeVisible = isCommandFieldFocused &&
+                (imeBottomPx > 0 || !wasImeOpenWhileFocused) &&
+                uiState.commandPanelState is CommandPanelState.Editing
+            val isCommandEntryEngaged = commandImeVisible || commandLineInput.isNotEmpty()
 
             var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
             LaunchedEffect(isCommandEntryEngaged) {
@@ -2163,6 +2228,7 @@ private fun ContextualCommandAndOptionsDock(
                         if (commandLineInput.isNotBlank()) {
                             onSubmitCommandLine()
                         }
+                        focusManager.clearFocus(force = true)
                     }),
                     textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
                     modifier = Modifier
@@ -2172,12 +2238,14 @@ private fun ContextualCommandAndOptionsDock(
                             isCommandFieldFocused = focusState.isFocused
                             if (focusState.isFocused) {
                                 onOpenCommandEditing()
+                            } else if (commandLineInput.isEmpty()) {
+                                onCloseCommandEditing()
                             }
                         }
                         .testTag("command_line_input_field")
                 )
 
-                // Section 61: Stacked Send / Cancel Action-Card Control on Right Side of Command Bar
+                // Stacked Send / Cancel Action-Card Control on Right Side of Command Bar (only when commandBarEngaged)
                 AnimatedVisibility(
                     visible = isCommandEntryEngaged,
                     enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(180)),
@@ -2278,6 +2346,8 @@ private fun ContextualCommandAndOptionsDock(
                                         if (isRunningActiveCommand) {
                                             onCancelCommand()
                                         }
+                                        isCommandFieldFocused = false
+                                        focusManager.clearFocus(force = true)
                                         onCloseCommandEditing()
                                     } else {
                                         isSendCardInFront = false
@@ -2318,6 +2388,8 @@ private fun ContextualCommandAndOptionsDock(
                                     if (isSendCardInFront) {
                                         if (commandLineInput.isNotBlank()) {
                                             onSubmitCommandLine()
+                                            isCommandFieldFocused = false
+                                            focusManager.clearFocus(force = true)
                                         }
                                     } else {
                                         isSendCardInFront = true
@@ -2353,11 +2425,11 @@ private fun ActiveCommandContextBar(
     onSelectQDimDensity: (QDimDensityPolicy) -> Unit,
     onSelectQDimArrangement: (DimensionArrangementPreference) -> Unit,
     onOpenQDimDialog: () -> Unit,
-    onOpenCommandEditing: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onOpenCommandEditing: () -> Unit,
     onSelectByLayer: (String) -> Unit,
     onSelectByType: (String) -> Unit,
     onFinishCommand: () -> Unit,
-    onCancelCommand: () -> Unit
+    @Suppress("UNUSED_PARAMETER") onCancelCommand: () -> Unit
 ) {
     val subOptions = remember(uiState.activeCommand) {
         when (uiState.activeCommand) {
@@ -2523,8 +2595,16 @@ private fun ActiveCommandContextBar(
             }
         }
 
-        // QDIM Contextual Controls
-        if (isQDimCommand) {
+        // QDIM Contextual Controls — Section 2.4 anchor-origin enter/exit transition
+        AnimatedVisibility(
+            visible = isQDimCommand,
+            enter = slideInVertically(animationSpec = tween(200)) { it / 2 } +
+                expandVertically(animationSpec = tween(200), expandFrom = Alignment.Bottom) +
+                fadeIn(animationSpec = tween(180)),
+            exit = slideOutVertically(animationSpec = tween(190)) { it / 2 } +
+                shrinkVertically(animationSpec = tween(190), shrinkTowards = Alignment.Bottom) +
+                fadeOut(animationSpec = tween(170))
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2639,8 +2719,16 @@ private fun ActiveCommandContextBar(
             }
         }
 
-        // Sub-Options & Manual Numeric Parameter Controls
-        if (subOptions.isNotEmpty() || needsNumericParam) {
+        // Sub-Options & Manual Numeric Parameter Controls — Section 2.4 anchor-origin enter/exit transition
+        AnimatedVisibility(
+            visible = subOptions.isNotEmpty() || needsNumericParam,
+            enter = slideInVertically(animationSpec = tween(200)) { it / 2 } +
+                expandVertically(animationSpec = tween(200), expandFrom = Alignment.Bottom) +
+                fadeIn(animationSpec = tween(180)),
+            exit = slideOutVertically(animationSpec = tween(190)) { it / 2 } +
+                shrinkVertically(animationSpec = tween(190), shrinkTowards = Alignment.Bottom) +
+                fadeOut(animationSpec = tween(170))
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -1041,21 +1041,73 @@ object CadDxfInterchange {
         return sb.toString()
     }
 
-    // --- Plotted Sheet PDF Export ---
+    // --- Plotted Sheet PDF Export (Section 4.6 Basename & Title-Block Synchronization) ---
+
+    private val defaultPlaceholderTitles = setOf(
+        "PRECISION MOUNTING PLATE",
+        "CNC 6-HOLE MOUNTING PLATE",
+        "UNTITLED",
+        ""
+    )
+
+    /**
+     * Section 4.6 — Resolves the authoritative title for the exported PDF sheet and title block.
+     * When a project is saved or exported as `<basename>.pcad` / `<basename>.pdf` (e.g., `Geo`),
+     * `Geo` is the authoritative title for both `<basename>.pdf` and `TITLE: Geo` inside the title block.
+     */
+    fun resolveAuthoritativeSheetTitle(fileName: String, sheetSetup: SheetSetupConfig): String {
+        val baseFromFileName = CadPcadPersistence.canonicalBasename(fileName)
+        val isGenericExportFileName = baseFromFileName.equals("precisioncad_sheet", ignoreCase = true) ||
+            baseFromFileName.equals("export", ignoreCase = true) ||
+            baseFromFileName.equals("Untitled", ignoreCase = true)
+        val currentTitle = sheetSetup.titleBlockTitle.trim()
+
+        return when {
+            !isGenericExportFileName && (currentTitle.uppercase(Locale.US) in defaultPlaceholderTitles || currentTitle.equals(baseFromFileName, ignoreCase = true)) ->
+                baseFromFileName
+            !isGenericExportFileName && baseFromFileName.isNotBlank() && currentTitle.uppercase(Locale.US) in defaultPlaceholderTitles ->
+                baseFromFileName
+            currentTitle.isNotBlank() && currentTitle.uppercase(Locale.US) !in defaultPlaceholderTitles ->
+                CadPcadPersistence.canonicalBasename(currentTitle)
+            !isGenericExportFileName && baseFromFileName.isNotBlank() ->
+                baseFromFileName
+            else -> currentTitle.ifBlank { "Untitled" }
+        }
+    }
 
     fun exportToPdfFile(context: Context, fileName: String, payload: DxfDocumentPayload): File {
         val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val outFile = File(exportDir, fileName)
+        val authoritativeTitle = resolveAuthoritativeSheetTitle(fileName, payload.sheetSetup)
+        val cleanBase = if (
+            fileName.isBlank() ||
+            CadPcadPersistence.canonicalBasename(fileName).equals("precisioncad_sheet", ignoreCase = true)
+        ) {
+            authoritativeTitle
+        } else {
+            CadPcadPersistence.canonicalBasename(fileName)
+        }
+        val normalizedPdfFileName = "$cleanBase.pdf"
+        val effectiveTitle = if (
+            payload.sheetSetup.titleBlockTitle.trim().uppercase(Locale.US) in defaultPlaceholderTitles
+        ) {
+            cleanBase
+        } else {
+            authoritativeTitle
+        }
+        val syncedPayload = payload.copy(
+            sheetSetup = payload.sheetSetup.copy(titleBlockTitle = effectiveTitle)
+        )
+        val outFile = File(exportDir, normalizedPdfFileName)
 
-        val pageW = (payload.sheetSetup.effectiveWidthMm * 2.83465).toInt().coerceAtLeast(400)
-        val pageH = (payload.sheetSetup.effectiveHeightMm * 2.83465).toInt().coerceAtLeast(300)
+        val pageW = (syncedPayload.sheetSetup.effectiveWidthMm * 2.83465).toInt().coerceAtLeast(400)
+        val pageH = (syncedPayload.sheetSetup.effectiveHeightMm * 2.83465).toInt().coerceAtLeast(300)
 
         var wroteNativePdf = false
         val pdf = PdfDocument()
         try {
             val pageInfo = PdfDocument.PageInfo.Builder(pageW, pageH, 1).create()
             val page = pdf.startPage(pageInfo)
-            renderPlottedSheetToCanvas(page.canvas, pageW, pageH, payload)
+            renderPlottedSheetToCanvas(page.canvas, pageW, pageH, syncedPayload)
             pdf.finishPage(page)
             FileOutputStream(outFile).use { pdf.writeTo(it) }
             wroteNativePdf = outFile.exists() && outFile.length() > 64L
@@ -1072,9 +1124,14 @@ object CadDxfInterchange {
         if (!wroteNativePdf) {
             val bitmap = Bitmap.createBitmap(pageW, pageH, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
-            renderPlottedSheetToCanvas(canvas, pageW, pageH, payload)
+            renderPlottedSheetToCanvas(canvas, pageW, pageH, syncedPayload)
             FileOutputStream(outFile).use { out ->
-                val header = "%PDF-1.4\n% PrecisionCAD Studio Plotted Sheet (${pageW}x${pageH})\n"
+                val header = buildString {
+                    appendLine("%PDF-1.4")
+                    appendLine("% PrecisionCAD Studio Plotted Sheet (${pageW}x${pageH})")
+                    appendLine("% TITLE: ${syncedPayload.sheetSetup.titleBlockTitle}")
+                    appendLine("% DWG NO: ${syncedPayload.sheetSetup.titleBlockDrawingNo} ${syncedPayload.sheetSetup.titleBlockRevision}")
+                }
                 out.write(header.toByteArray(Charsets.UTF_8))
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
                 out.write("\n%%EOF\n".toByteArray(Charsets.UTF_8))
@@ -1112,7 +1169,8 @@ object CadDxfInterchange {
                 textSize = 9.5f
                 typeface = Typeface.MONOSPACE
             }
-            canvas.drawText("TITLE: ${payload.sheetSetup.titleBlockTitle}", tbLeft + 8f, tbTop + 16f, tbTextPaint)
+            val cleanTitle = CadPcadPersistence.canonicalBasename(payload.sheetSetup.titleBlockTitle)
+            canvas.drawText("TITLE: $cleanTitle", tbLeft + 8f, tbTop + 16f, tbTextPaint)
             canvas.drawText("DWG NO: ${payload.sheetSetup.titleBlockDrawingNo}  ${payload.sheetSetup.titleBlockRevision}", tbLeft + 8f, tbTop + 32f, tbTextPaint)
             canvas.drawText(
                 "UNITS: ${payload.displayUnit.symbol}   SCALE: ${payload.sheetSetup.scaleLabel}   STD: ${payload.sheetSetup.draftingStandard.name}",

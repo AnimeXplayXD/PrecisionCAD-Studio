@@ -129,47 +129,102 @@ class CadProjectRepository(
         projectId: String,
         name: String,
         description: String,
-        payload: DxfDocumentPayload
+        payload: DxfDocumentPayload,
+        saveToPublicDocuments: Boolean = true,
+        pcadDocument: com.example.cad.io.PcadProjectDocument? = null
     ) = withContext(Dispatchers.IO) {
-        val dxfContent = CadDxfInterchange.exportToDxf(payload)
-        val docFile = File(projectsDir, "$projectId.dxf")
-        docFile.writeText(dxfContent)
+        val cleanName = com.example.cad.io.CadPcadPersistence.canonicalBasename(name)
+        val syncedSheet = payload.sheetSetup.copy(titleBlockTitle = cleanName)
+        val syncedPayload = payload.copy(sheetSetup = syncedSheet)
 
-        val dimCount = payload.entities.count { it is CadEntity.DimensionEntity }
+        val pcadDoc = pcadDocument?.withSynchronizedProjectName(cleanName)
+            ?: com.example.cad.io.PcadProjectDocument(
+                projectId = projectId,
+                projectName = cleanName,
+                projectDescription = description,
+                storageUnit = syncedPayload.storageUnit,
+                displayUnit = syncedPayload.displayUnit,
+                precision = syncedPayload.precision,
+                sheetSetup = syncedSheet,
+                layers = syncedPayload.layers,
+                blocks = syncedPayload.blocks,
+                entities = syncedPayload.entities
+            )
+        val pcadJson = com.example.cad.io.CadPcadPersistence.serializeToPcadJson(pcadDoc)
+        val pcadFile = File(projectsDir, "$projectId.pcad")
+        pcadFile.writeText(pcadJson, Charsets.UTF_8)
+
+        // Also keep DXF interchange cache for backwards compatibility
+        val dxfContent = CadDxfInterchange.exportToDxf(syncedPayload)
+        val docFile = File(projectsDir, "$projectId.dxf")
+        docFile.writeText(dxfContent, Charsets.UTF_8)
+
+        if (saveToPublicDocuments) {
+            runCatching {
+                com.example.cad.io.CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(
+                    context = context,
+                    document = pcadDoc,
+                    requestedName = cleanName
+                )
+            }
+        }
+
+        val dimCount = syncedPayload.entities.count { it is CadEntity.DimensionEntity }
         val meta = CadProjectMetadataEntity(
             projectId = projectId,
-            name = name,
+            name = cleanName,
             description = description,
-            workingUnitSymbol = payload.displayUnit.symbol,
-            sheetPresetName = payload.sheetSetup.preset.name,
-            entityCount = payload.entities.size,
+            workingUnitSymbol = syncedPayload.displayUnit.symbol,
+            sheetPresetName = syncedPayload.sheetSetup.preset.name,
+            entityCount = syncedPayload.entities.size,
             dimensionCount = dimCount,
-            schemaVersion = 4,
+            schemaVersion = com.example.cad.io.PcadProjectDocument.CURRENT_SCHEMA_VERSION,
             updatedAtEpochMs = System.currentTimeMillis()
         )
         dao.upsertProject(meta)
     }
 
     suspend fun renameProject(projectId: String, newName: String) = withContext(Dispatchers.IO) {
-        val trimmed = newName.trim()
-        if (trimmed.isEmpty()) return@withContext
+        val cleanName = com.example.cad.io.CadPcadPersistence.canonicalBasename(newName)
+        if (cleanName.isEmpty()) return@withContext
         val existing = dao.getAllProjectsOnce().firstOrNull { it.projectId == projectId } ?: return@withContext
         dao.upsertProject(
             existing.copy(
-                name = trimmed,
+                name = cleanName,
                 updatedAtEpochMs = System.currentTimeMillis()
             )
         )
+        val pcadFile = File(projectsDir, "$projectId.pcad")
+        if (pcadFile.exists()) {
+            runCatching {
+                val doc = com.example.cad.io.CadPcadPersistence.deserializeFromPcadJson(pcadFile.readText(Charsets.UTF_8))
+                    ?: return@runCatching
+                val updated = doc.withSynchronizedProjectName(cleanName)
+                pcadFile.writeText(com.example.cad.io.CadPcadPersistence.serializeToPcadJson(updated), Charsets.UTF_8)
+                com.example.cad.io.CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(context, updated, cleanName)
+            }
+        }
     }
 
     suspend fun loadProjectDocument(projectId: String): DxfDocumentPayload? = withContext(Dispatchers.IO) {
+        val pcadFile = File(projectsDir, "$projectId.pcad")
+        if (pcadFile.exists()) {
+            runCatching {
+                val doc = com.example.cad.io.CadPcadPersistence
+                    .deserializeFromPcadJson(pcadFile.readText(Charsets.UTF_8))
+                if (doc != null) {
+                    return@withContext doc.toDxfPayload()
+                }
+            }
+        }
         val docFile = File(projectsDir, "$projectId.dxf")
         if (!docFile.exists()) return@withContext null
-        val content = docFile.readText()
+        val content = docFile.readText(Charsets.UTF_8)
         CadDxfInterchange.importFromDxf(content)
     }
 
     suspend fun deleteProject(projectId: String) = withContext(Dispatchers.IO) {
+        File(projectsDir, "$projectId.pcad").delete()
         File(projectsDir, "$projectId.dxf").delete()
         dao.deleteProjectById(projectId)
     }

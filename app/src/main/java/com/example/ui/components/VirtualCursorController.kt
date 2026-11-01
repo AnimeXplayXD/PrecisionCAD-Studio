@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,6 +13,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -57,15 +64,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.example.cad.model.CadUnit
 import com.example.cad.model.CursorControllerConfig
 import com.example.cad.model.Point2D
@@ -85,6 +94,7 @@ import com.example.ui.theme.CadTextPrimary
 import com.example.ui.theme.CadTextSecondary
 import kotlin.math.hypot
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 enum class ControllerDockState {
     COMPACT_DOCK,
@@ -177,14 +187,15 @@ class TouchpadMotionEngine(
 }
 
 /**
- * Dedicated Virtual Cursor Controller (Sections 4, 14.4, 39.1 & 42.2 of Specification).
+ * Dedicated Virtual Cursor Controller (Sections 4, 14.4, 39.1, 42.2, v17 Sections 7.4 & 8).
  * Supports:
  * - Mode A (`RELATIVE_TOUCHPAD`): Direct relative touchpad movement using `touchpadSensitivity` and `pixelsPerModelUnit`.
- *   Hides only the directional `StepNudgePad` (4 nudge arrows & NUDGE label) and expands the touchpad surface into that
- *   reclaimed width while preserving the step-increment strip and `PICK PT` / `Enter` / `Escape` controls.
  * - Mode B (`VELOCITY_JOYSTICK`): Preserves full layout (`StepNudgePad`, step-increment strip, joystick,
  *   `PICK PT`, `Enter`, `Escape`) and 60fps frame-integrated velocity curve unchanged.
- * - Collapsible Compact Dock (`COMPACT_DOCK`) showing Touchpad, Joystick, X, Y, and Settings.
+ * - Vertical-Peek Two-Card Mode Selector (`controller_mode_card_selector`): Active mode in foreground,
+ *   alternate mode peeking from above (`offsetY < 0`), Touchpad in restrained blue, Joystick in restrained gold,
+ *   tap-only with animation-in-flight lock.
+ * - Coordinate HUD (`cursor_coordinate_hud_button`): Displays live `X`, `Y`, and current bearing `θ (°)`.
  */
 @Composable
 fun VirtualCursorControllerDeck(
@@ -206,6 +217,7 @@ fun VirtualCursorControllerDeck(
     onToggleCollapse: () -> Unit,
     onSetCollapsed: ((Boolean) -> Unit)? = null,
     onOpenCoordinateDialog: () -> Unit,
+    referencePoint: Point2D? = null,
     modifier: Modifier = Modifier
 ) {
     // Normalized joystick deflection vector in [-1f, +1f]. Reset to Offset.Zero immediately on release.
@@ -240,6 +252,13 @@ fun VirtualCursorControllerDeck(
                 onJoystickVelocityStep(dx, dy)
             }
         }
+    }
+
+    val refPt = referencePoint ?: Point2D(0.0, 0.0)
+    val cursorBearingDeg = if (refPt.distanceTo(cursorModelPos) > 1e-6) {
+        ((refPt.angleToDeg(cursorModelPos) % 360.0) + 360.0) % 360.0
+    } else {
+        0.0
     }
 
     Surface(
@@ -287,7 +306,7 @@ fun VirtualCursorControllerDeck(
             }
 
             // Top Header / Compact Dock Row:
-            // [1. Touchpad Mode] [2. Joystick Mode] [3. X Coordinate] [4. Y Coordinate] [5. Controller Settings + Chevron]
+            // [1. Vertical-Peek Two-Card Mode Selector] [2. X, Y & θ Coordinate HUD] [3. Controller Settings + Chevron]
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -308,110 +327,60 @@ fun VirtualCursorControllerDeck(
                         )
                     },
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Touchpad vs Joystick Mode Pill (Opaque dark surfaces)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(CadPanelElevated)
-                        .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
-                        .padding(2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val isTouchpad = config.mode == VirtualControllerMode.RELATIVE_TOUCHPAD
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (isTouchpad) CadSurfaceCard else CadPanelElevated)
-                            .border(
-                                width = 1.dp,
-                                color = if (isTouchpad) CadCyanPrimary else Color.Transparent,
-                                shape = RoundedCornerShape(6.dp)
-                            )
-                            .clickable {
-                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
-                            }
-                            .padding(horizontal = 8.dp, vertical = 5.dp)
-                            .testTag("controller_mode_touchpad")
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.TouchApp,
-                                contentDescription = "Relative Touchpad Mode",
-                                tint = if (isTouchpad) CadCyanPrimary else CadTextSecondary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "TOUCHPAD",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isTouchpad) CadTextPrimary else CadTextSecondary,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (!isTouchpad) CadSurfaceCard else CadPanelElevated)
-                            .border(
-                                width = 1.dp,
-                                color = if (!isTouchpad) CadAmberSnap else Color.Transparent,
-                                shape = RoundedCornerShape(6.dp)
-                            )
-                            .clickable {
-                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
-                            }
-                            .padding(horizontal = 8.dp, vertical = 5.dp)
-                            .testTag("controller_mode_joystick")
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Gamepad,
-                                contentDescription = "Velocity Joystick Mode",
-                                tint = if (!isTouchpad) CadAmberSnap else CadTextSecondary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "JOYSTICK",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (!isTouchpad) CadTextPrimary else CadTextSecondary,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
+                // Section 8 — Vertical-Peek Two-Card Controller Mode Selector (Tap-only, animation lock)
+                ControllerModeVerticalPeekCardSelector(
+                    activeMode = config.mode,
+                    onModeChange = onModeChange
+                )
 
-                // Tappable Live Cursor X & Y Readout -> Opens Direct Coordinate Input
+                // Section 7.4 — Tappable Live Cursor X, Y & Bearing θ (°) Readout -> Opens Direct Coordinate Input
+                // Settings button remains a separate control outside this coordinate tap target.
                 Row(
                     modifier = Modifier
+                        .weight(1f)
                         .clip(RoundedCornerShape(6.dp))
                         .background(CadPanelElevated)
                         .border(1.dp, CadBorderStrong, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .clickable { onOpenCoordinateDialog() }
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
                         .testTag("cursor_coordinate_hud_button"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
                         text = "X: ${precision.formatCoord(cursorModelPos.x, storageUnit, displayUnit)}",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = CadTextPrimary,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             .clickable { onOpenCoordinateDialog() }
                             .testTag("cursor_coord_x_text")
                     )
                     Text(
                         text = "Y: ${precision.formatCoord(cursorModelPos.y, storageUnit, displayUnit)}",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         color = CadTextPrimary,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             .clickable { onOpenCoordinateDialog() }
                             .testTag("cursor_coord_y_text")
+                    )
+                    Text(
+                        text = "θ: ${precision.formatAngle(cursorBearingDeg)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CadAmberSnap,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clickable { onOpenCoordinateDialog() }
+                            .testTag("cursor_coord_theta_text")
                     )
                 }
 
@@ -888,3 +857,184 @@ private fun NudgeButton(
         )
     }
 }
+
+/**
+ * Section 8 — Touchpad / Joystick Vertical-Peek Two-Card Selector.
+ * - Replaces the two adjacent mode tabs with a single vertical-peek two-card selector.
+ * - Active mode card is in front (`zIndex = 1f`, `offsetY = 2.dp`); alternate mode card peeks from above (`zIndex = 0f`, `offsetY = (-3).dp`).
+ * - Touchpad card uses restrained PrecisionCAD blue (`Color(0xFF0C2330)` + `CadCyanPrimary`).
+ * - Joystick card uses restrained PrecisionCAD gold (`Color(0xFF282010)` + `CadAmberSnap`).
+ * - Tap-only interaction with animation-in-flight lock (`transition.currentState != transition.targetState`); no swipe gesture.
+ */
+@Composable
+fun ControllerModeVerticalPeekCardSelector(
+    activeMode: VirtualControllerMode,
+    onModeChange: (VirtualControllerMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isTouchpad = activeMode == VirtualControllerMode.RELATIVE_TOUCHPAD
+    val transition = updateTransition(targetState = isTouchpad, label = "ControllerModePeekTransition")
+    val isAnimating = transition.currentState != transition.targetState
+    val interactionSource = remember { MutableInteractionSource() }
+
+    val touchpadOffsetY by transition.animateDp(
+        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+        label = "TouchpadOffsetY"
+    ) { tp -> if (tp) 2.dp else (-3).dp }
+
+    val touchpadScale by transition.animateFloat(
+        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+        label = "TouchpadScale"
+    ) { tp -> if (tp) 1.0f else 0.94f }
+
+    val joystickOffsetY by transition.animateDp(
+        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+        label = "JoystickOffsetY"
+    ) { tp -> if (!tp) 2.dp else (-3).dp }
+
+    val joystickScale by transition.animateFloat(
+        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+        label = "JoystickScale"
+    ) { tp -> if (!tp) 1.0f else 0.94f }
+
+    val toggleMode: () -> Unit = {
+        if (!isAnimating) {
+            val next = if (isTouchpad) {
+                VirtualControllerMode.VELOCITY_JOYSTICK
+            } else {
+                VirtualControllerMode.RELATIVE_TOUCHPAD
+            }
+            onModeChange(next)
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .width(98.dp)
+            .height(34.dp)
+            .semantics {
+                contentDescription = if (isTouchpad) {
+                    "Controller Mode: Touchpad active (Joystick peeking above)"
+                } else {
+                    "Controller Mode: Joystick active (Touchpad peeking above)"
+                }
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = !isAnimating,
+                onClick = toggleMode
+            )
+            .testTag("controller_mode_card_selector"),
+        contentAlignment = Alignment.Center
+    ) {
+        // Touchpad Card (Restrained Blue)
+        Box(
+            modifier = Modifier
+                .zIndex(if (isTouchpad) 1f else 0f)
+                .offset { IntOffset(x = 0, y = touchpadOffsetY.roundToPx()) }
+                .graphicsLayer {
+                    scaleX = touchpadScale
+                    scaleY = touchpadScale
+                    alpha = if (isTouchpad) 1f else 0.85f
+                }
+                .fillMaxWidth()
+                .height(27.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (isTouchpad) Color(0xFF0C2330) else Color(0xFF091822))
+                .border(
+                    width = 1.dp,
+                    color = if (isTouchpad) CadCyanPrimary else CadCyanPrimary.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(6.dp)
+                )
+                .clickable(
+                    enabled = !isAnimating,
+                    onClick = {
+                        if (!isAnimating) {
+                            if (isTouchpad) {
+                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
+                            } else {
+                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
+                            }
+                        }
+                    }
+                )
+                .padding(horizontal = 7.dp)
+                .testTag("controller_mode_touchpad"),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.TouchApp,
+                    contentDescription = "Relative Touchpad Mode",
+                    tint = CadCyanPrimary,
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "TOUCHPAD",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = if (isTouchpad) CadTextPrimary else CadTextSecondary,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
+        }
+
+        // Joystick Card (Restrained Gold)
+        Box(
+            modifier = Modifier
+                .zIndex(if (!isTouchpad) 1f else 0f)
+                .offset { IntOffset(x = 0, y = joystickOffsetY.roundToPx()) }
+                .graphicsLayer {
+                    scaleX = joystickScale
+                    scaleY = joystickScale
+                    alpha = if (!isTouchpad) 1f else 0.85f
+                }
+                .fillMaxWidth()
+                .height(27.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (!isTouchpad) Color(0xFF282010) else Color(0xFF1E180C))
+                .border(
+                    width = 1.dp,
+                    color = if (!isTouchpad) CadAmberSnap else CadAmberSnap.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(6.dp)
+                )
+                .clickable(
+                    enabled = !isAnimating,
+                    onClick = {
+                        if (!isAnimating) {
+                            if (!isTouchpad) {
+                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
+                            } else {
+                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
+                            }
+                        }
+                    }
+                )
+                .padding(horizontal = 7.dp)
+                .testTag("controller_mode_joystick"),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Gamepad,
+                    contentDescription = "Velocity Joystick Mode",
+                    tint = CadAmberSnap,
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "JOYSTICK",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 10.sp,
+                    color = if (!isTouchpad) CadTextPrimary else CadTextSecondary,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+

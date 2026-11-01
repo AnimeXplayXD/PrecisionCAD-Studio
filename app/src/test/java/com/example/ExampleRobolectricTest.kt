@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
@@ -14,9 +15,18 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.test.core.app.ApplicationProvider
 import com.example.cad.data.CadTemplateFactory
 import com.example.cad.dimension.AutoDimensionEngine
+import com.example.cad.dimension.DimensionArrangementPreference
 import com.example.cad.dimension.QDimDensityPolicy
 import com.example.cad.io.CadDxfInterchange
+import com.example.cad.io.CadPcadPersistence
+import com.example.cad.io.PcadProjectDocument
+import com.example.cad.model.CadUnit
+import com.example.cad.model.PrecisionFormatConfig
+import com.example.cad.model.UnitChangeMode
+import com.example.cad.model.VirtualControllerConfig
+import com.example.cad.model.WorkspaceSpace
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -32,126 +42,167 @@ class ExampleRobolectricTest {
     val composeTestRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun `verify v16 first-run Home Screen, New Drawing entry, stacked Send Cancel command card deck, action-only marquee with fixed VAL badge, 3-part coordinate dialog, and 3-format Project Hub export deck`() {
+    fun `verify v17 PrecisionCAD Studio Workspace, IME Separation, Live-Preview Preservation, Editable Theta Coordinate Dialog, Vertical-Peek Controller Selector, QDIM Selective Removal, and Native PCAD + Geo PDF Sync`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals("PrecisionCAD", context.getString(R.string.app_name))
+        assertEquals("PrecisionCAD Studio", context.getString(R.string.app_name))
+        assertEquals("com.precisioncad.studio", context.packageName)
 
         composeTestRule.waitForIdle()
 
-        // 1. Section 62: Verify First-Run Home Screen is the initial screen with empty Saved Drawings
+        // 1. Verify First-Run Home Screen and enter workspace via New Drawing
         composeTestRule.onNodeWithTag("cad_home_screen").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("home_new_drawing_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("home_open_drawing_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("home_empty_saved_drawings").performScrollTo().assertIsDisplayed()
-
-        // Start a New Blank Drawing to enter the 2D CAD Workspace
         composeTestRule.onNodeWithTag("home_new_drawing_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
-        // 2. Verify 2D Technical Viewport, Virtual Cursor Controller Deck, Polar HUD badge, and live X/Y readouts
+        // 2. Verify Separated Upper Command Region vs Stationary Lower Controller Region & Live X, Y, Theta HUD
         composeTestRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("upper_command_ime_region").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("lower_controller_stationary_region").assertIsDisplayed()
         composeTestRule.onNodeWithTag("virtual_cursor_controller_deck").assertIsDisplayed()
         composeTestRule.onNodeWithTag("cursor_coord_x_text").assertIsDisplayed()
         composeTestRule.onNodeWithTag("cursor_coord_y_text").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("hud_toggle_polar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cursor_coord_theta_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("controller_mode_card_selector").assertIsDisplayed()
 
-        // 3. Section 61: Verify Persistent Command Entry Bar is idle-clean (only text field, no CMD: prefix button)
-        composeTestRule.onNodeWithTag("persistent_command_entry_bar").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("command_line_input_field").assertIsDisplayed()
-        assertTrue(composeTestRule.onAllNodesWithTag("cmd_activate_button").fetchSemanticsNodes().isEmpty())
-
-        // 4. Verify Tool Browser translucent closed handle, 5 category tiles, and single-category content pane
-        composeTestRule.onNodeWithTag("tool_drawer_handle").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("bottom_tools_toggle_button").performClick()
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("tool_drawer_panel").assertIsDisplayed()
-        assertTrue(composeTestRule.onAllNodesWithTag("tool_drawer_handle").fetchSemanticsNodes().isEmpty())
-        composeTestRule.onNodeWithTag("category_tile_DRAW").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("category_tile_MODIFY").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("active_category_content_pane").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cmd_button_LINE").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cmd_button_POLYGON").assertIsDisplayed()
-        assertTrue(composeTestRule.onAllNodesWithTag("cmd_button_FILLET").fetchSemanticsNodes().isEmpty())
-        composeTestRule.onNodeWithTag("category_tile_MODIFY").performClick()
-        composeTestRule.waitForIdle()
-        assertTrue(composeTestRule.onAllNodesWithTag("cmd_button_LINE").fetchSemanticsNodes().isEmpty())
-        composeTestRule.onNodeWithTag("cmd_button_FILLET").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("tool_drawer_panel").performTouchInput { swipeLeft() }
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("tool_drawer_handle").assertIsDisplayed()
-
-        // 5. Verify Controller Mode-Specific Layouts
+        // 3. Verify Vertical-Peek Two-Card Controller Mode Selector (Joystick <-> Touchpad)
         composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("nudge_up_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("cursor_pick_point_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("controller_mode_touchpad").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("controller_touchpad_surface").assertIsDisplayed()
-        assertTrue(composeTestRule.onAllNodesWithTag("nudge_up_button").fetchSemanticsNodes().isEmpty())
-        composeTestRule.onNodeWithTag("cursor_pick_point_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("controller_mode_joystick").performClick()
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
 
-        // 6. Sections 51, 55.2 & 61: Verify Prefix Autocomplete, Active-Session Overview with fixed badge + action-only marquee,
-        // and Stacked Send / Cancel Action-Card Compartment (downward swipe swaps Send <-> Cancel)
+        // 4. Section 3.3 & Section 2: Verify activating a CAD command from the Tool Drawer does NOT force
+        // command_action_card_stack open while commandLineInput is empty and keyboard is closed, AND
+        // verify sub-option switching preserves picked step points and live preview!
+        composeTestRule.onNodeWithTag("bottom_tools_toggle_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("cmd_button_RECTANGLE").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Running RECTANGLE command shows OverviewOverlayCard, while command_action_card_stack stays idle-hidden!
+        composeTestRule.onNodeWithTag("overview_overlay_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("active_command_name_badge").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("command_action_card_stack").fetchSemanticsNodes().isEmpty())
+
+        // Pick first rectangle corner at cursor, then switch Sharp -> Fillet -> Chamfer without losing step point
+        composeTestRule.onNodeWithTag("cursor_pick_point_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("active_cmd_finish_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("suboption_Fillet").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("active_cmd_finish_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("active_command_fixed_val_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("suboption_Chamfer").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("active_cmd_finish_button").assertIsDisplayed()
+
+        // Engage command bar by typing text -> command_action_card_stack appears; swipe down & cancel
         composeTestRule.onNodeWithTag("command_line_input_field").performTextInput("F")
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_action_card_stack").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("command_card_send").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("command_suggestion_strip").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("suggestion_chip_FILLET").performClick()
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("overview_overlay_card").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("active_command_name_badge").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("active_command_fixed_val_badge").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("active_command_marquee_text").assertIsDisplayed()
-
-        // Swipe downward on command_action_card_stack to bring Cancel card to front, then tap Cancel
         composeTestRule.onNodeWithTag("command_action_card_stack").performTouchInput { swipeDown() }
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_card_cancel").performClick()
         composeTestRule.waitForIdle()
 
-        // 7. Section 50: Verify Structured 3-Part Direct Coordinate & Polar Expression Dialog
-        composeTestRule.onNodeWithTag("cursor_coord_x_text").performClick()
+        // 5. Section 7: Verify Direct Coordinate Input Dialog with Editable Polar Bearing θ (°)
+        composeTestRule.onNodeWithTag("cursor_coord_theta_text").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("coord_mode_cartesian").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("coord_mode_polar").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_input_x_field").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_input_y_field").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("coord_input_theta_field").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_input_polar_field").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("coord_input_theta_field").performTextReplacement("45")
+        composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("coord_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 8. Sections 63, 65 & 66: Verify Project Hub Three-Format (DXF -> PDF -> SVG) Stacked Export Card Deck
-        composeTestRule.onNodeWithTag("top_project_hub_button").performScrollTo().performClick()
+        // 6. Section 6 & Section 9: Verify Controller & OSNAP Settings Dialog with hoisted scroll & CadBinaryToggleCard
+        composeTestRule.onNodeWithTag("controller_settings_button").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("project_hub_title").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("project_hub_export_subtitle").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("project_hub_export_card_deck").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("project_hub_export_card_dxf").assertIsDisplayed()
-        // Swipe downward on the export card deck to cycle DXF -> PDF -> SVG -> DXF
-        composeTestRule.onNodeWithTag("project_hub_export_card_deck").performTouchInput { swipeDown() }
+        composeTestRule.onNodeWithTag("controller_snap_settings_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("osnap_toggle_ENDPOINT").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("osnap_toggle_ENDPOINT").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("project_hub_export_card_pdf").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("project_hub_export_card_deck").performTouchInput { swipeDown() }
+        composeTestRule.onNodeWithTag("osnap_toggle_ENDPOINT").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("controller_settings_close_button").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("project_hub_export_card_svg").assertIsDisplayed()
 
-        // 9. Verify Plotted PDF Export produces a valid PDF file
+        // 7. Section 5: Verify Quick Dimension (QDIM) Dialog Rotary Wheels, Two-Card Footer Deck, and Selective Dimension Removal
+        composeTestRule.onNodeWithTag("top_qdim_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("qdim_scroll_header").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_scroll_footer").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_wheel_mode").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_wheel_arrangement").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_wheel_density").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_footer_action_deck").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("execute_qdim_confirm_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Re-open QDIM dialog after generating dimensions to verify Selective Dimension Removal dialog
+        composeTestRule.onNodeWithTag("top_qdim_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("qdim_open_selective_clear_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("qdim_selective_clear_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("selective_dim_cancel_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // 8. Section 4: Verify Automatic Quick Save (.pcad), Explicit Save (Documents/PrecisionCAD/Geo.pcad), and Geo.pdf Title Sync
         val basePayload = CadTemplateFactory.createSixHoleMountingPlate()
         val qdimEntities = AutoDimensionEngine.generateQuickDimensions(
             allEntities = basePayload.entities,
             targetEntities = basePayload.entities,
             density = QDimDensityPolicy.BALANCED
         )
+        val geoDoc = PcadProjectDocument(
+            projectId = "geo_id",
+            projectName = "Geo.pcad",
+            savedAtEpochMs = System.currentTimeMillis(),
+            storageUnit = CadUnit.MM,
+            displayUnit = CadUnit.MM,
+            unitChangeMode = UnitChangeMode.CONVERT_DISPLAY_UNITS,
+            precision = PrecisionFormatConfig(),
+            workspaceSpace = WorkspaceSpace.MODEL_SPACE,
+            sheetSetup = basePayload.sheetSetup.copy(
+                titleBlockTitle = "Geo"
+            ),
+            gridSnapConfig = com.example.cad.model.GridAndSnapConfig(),
+            controllerConfig = VirtualControllerConfig(),
+            isQuickDimensionEnabled = true,
+            qdimDensity = QDimDensityPolicy.BALANCED,
+            qdimArrangement = DimensionArrangementPreference.AUTO_CHAIN,
+            layers = basePayload.layers,
+            blocks = basePayload.blocks,
+            entities = qdimEntities,
+            constraints = emptyList()
+        )
+        val quickSavedFile = CadPcadPersistence.performAutomaticQuickSave(context, geoDoc)
+        assertNotNull(quickSavedFile)
+        assertTrue(quickSavedFile.exists())
+        val loadedQuickSave = CadPcadPersistence.loadLatestQuickSave(context)
+        assertNotNull(loadedQuickSave)
+        assertEquals("Geo", loadedQuickSave!!.projectName)
+
+        val explicitResult = CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(
+            context = context,
+            projectName = "Geo.pcad",
+            document = geoDoc
+        )
+        assertEquals("Geo", explicitResult.basename)
+        assertEquals("Geo.pcad", explicitResult.fileName)
+        assertTrue(explicitResult.displayPath.contains("PrecisionCAD/Geo.pcad"))
+
         val pdfFile = CadDxfInterchange.exportToPdfFile(
             context = context,
-            fileName = "test_plotted_sheet.pdf",
+            fileName = "Geo.pcad",
             payload = basePayload.copy(entities = qdimEntities)
         )
+        assertEquals("Geo.pdf", pdfFile.name)
         assertTrue(pdfFile.exists())
         assertTrue(pdfFile.length() > 1024L)
     }
 }
-

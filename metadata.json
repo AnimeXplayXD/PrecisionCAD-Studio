@@ -1,6 +1,6 @@
 {
-  "name": "PrecisionCAD",
-  "description": "Desktop-class 2D CAD drafting, velocity-sensitive virtual cursor control, Quick Dimension (QDIM), and DXF/PDF/SVG interoperability for Android.",
+  "name": "PrecisionCAD Studio",
+  "description": "Desktop-class 2D CAD drafting, velocity-sensitive virtual cursor control, Quick Dimension (QDIM), native .pcad persistence, and DXF/PDF/SVG interoperability for Android.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -273,18 +273,18 @@ data class SnapCandidate(
 )
 
 /**
- * Sections 45, 46, 47 & 48 — Read-Only Visual Polar Tracking & Live Measurement State.
- * Strictly visual/read-only: never mutates the raw stored virtual cursor coordinate,
- * never creates editable near-cursor text fields, and never enters document entities or exports.
+ * Sections 9.4–9.7 — Read-Only Visual Polar Tracking & Independent PolarSnap State.
  *
  * - [basePoint]: Accepted command base point B = (Bx, By).
  * - [rawCursorPoint]: Live raw virtual cursor position P = (Px, Py).
- * - [radialDistanceR]: Live raw radial distance R = hypot(Px - Bx, Py - By) in model units.
- * - [actualAngleThetaDeg]: Live unrounded cursor bearing θ in [0, 360) degrees (null if R is degenerate ~ 0).
+ * - [radialDistanceR]: Live radial distance R = hypot(Px - Bx, Py - By) in model units.
+ * - [actualAngleThetaDeg]: Live unrounded Cursor Bearing θ in [0, 360) degrees (null if R is degenerate ~ 0).
  * - [referenceAngleDeg]: Reference zero-angle direction (0° absolute +X, or previous segment angle when relative mode is active).
- * - [activePolarAngleDeg]: Acquired configured polar angle θp in [0, 360) degrees when |θ - θp| <= tolerance and polarTrackingEnabled is true; null otherwise.
- * - [worldPolarAngleDeg]: Active polar direction in absolute world degrees [0, 360) for ray rendering and projection.
- * - [projectedPolarPoint]: Point B + R * (cos θp, sin θp) along the active polar ray (used only as candidate point if polarSnapEnabled is true).
+ * - [referenceBasisLabel]: Explicit reference basis label ("+X" or "Last Segment").
+ * - [activePolarAngleDeg]: Active Track Bearing θp in [0, 360) degrees when polarTrackingEnabled is true (supports all 360 whole-number bearings 0°–359° plus custom fractional visual angles).
+ * - [worldPolarAngleDeg]: Active visual polar direction in absolute world degrees [0, 360) for guide ray rendering.
+ * - [activePolarSnapAngleDeg]: Active PolarSnap ray angle in [0, 360) when within tolerance of a selected PolarSnap preset/custom angle.
+ * - [projectedPolarPoint]: Point B + R * (cos θ_snap, sin θ_snap) along the nearest active PolarSnap ray (used to project candidate ONLY when polarSnapEnabled is true).
  */
 data class PolarTrackingPreviewState(
     val basePoint: Point2D,
@@ -292,12 +292,15 @@ data class PolarTrackingPreviewState(
     val radialDistanceR: Double,
     val actualAngleThetaDeg: Double?,
     val referenceAngleDeg: Double = 0.0,
+    val referenceBasisLabel: String = "+X",
     val activePolarAngleDeg: Double? = null,
     val worldPolarAngleDeg: Double? = null,
+    val activePolarSnapAngleDeg: Double? = null,
     val projectedPolarPoint: Point2D? = null
 ) {
     val hasValidDirection: Boolean get() = actualAngleThetaDeg != null && radialDistanceR > 1e-5
     val isPolarGuideAcquired: Boolean get() = activePolarAngleDeg != null && worldPolarAngleDeg != null && hasValidDirection
+    val isPolarSnapRayAcquired: Boolean get() = activePolarSnapAngleDeg != null && projectedPolarPoint != null && hasValidDirection
 }
 
 object CadSnapAndCoordEngine {
@@ -315,9 +318,63 @@ object CadSnapAndCoordEngine {
     }
 
     /**
-     * Sections 45–48: Computes the live read-only Polar Tracking preview (R, θ, θp, guide ray & arc)
-     * from the accepted command [basePoint] to [rawCursorPoint] in model space.
-     * Returns null when [basePoint] is null (e.g. before the first point of LINE/POLYLINE is accepted).
+     * Section 9.5 — Builds the complete Visual Polar Tracking angle set:
+     * all 360 whole-number bearings (0°..359°) plus custom fractional visual angles.
+     */
+    fun buildVisualPolarGuideAngles(snapConfig: GridAndSnapConfig): List<Double> {
+        val angles = ArrayList<Double>(360 + snapConfig.polarAdditionalAnglesDeg.size)
+        for (whole in 0..359) {
+            angles.add(whole.toDouble())
+        }
+        for (custom in snapConfig.polarAdditionalAnglesDeg) {
+            if (custom.isFinite()) {
+                val norm = normalizeAngle360(custom)
+                if (angles.none { abs(it - norm) < 1e-4 }) {
+                    angles.add(norm)
+                }
+            }
+        }
+        return angles.sorted()
+    }
+
+    /**
+     * Section 9.6 — Builds the independent PolarSnap angle collection from the multi-select
+     * PolarSnap presets (`polarSnapPresetAnglesDeg`) plus custom PolarSnap angles (`polarSnapCustomAnglesDeg`).
+     */
+    fun buildPolarSnapAngles(snapConfig: GridAndSnapConfig): List<Double> {
+        val angles = mutableListOf<Double>()
+        val presets = if (snapConfig.polarSnapPresetAnglesDeg.isNotEmpty()) {
+            snapConfig.polarSnapPresetAnglesDeg
+        } else {
+            setOf(snapConfig.polarTrackingAngleDeg.coerceIn(1.0, 180.0))
+        }
+        for (incRaw in presets) {
+            val inc = incRaw.coerceIn(1.0, 180.0)
+            var deg = 0.0
+            while (deg < 360.0 - 1e-5) {
+                val norm = normalizeAngle360(deg)
+                if (angles.none { abs(it - norm) < 1e-4 }) {
+                    angles.add(norm)
+                }
+                deg += inc
+            }
+        }
+        for (custom in snapConfig.polarSnapCustomAnglesDeg + snapConfig.polarAdditionalAnglesDeg) {
+            if (custom.isFinite()) {
+                val norm = normalizeAngle360(custom)
+                if (angles.none { abs(it - norm) < 1e-4 }) {
+                    angles.add(norm)
+                }
+            }
+        }
+        return angles.sorted()
+    }
+
+    /**
+     * Sections 9.4–9.7: Computes the live read-only Polar Tracking preview (R, Cursor Bearing θ,
+     * Track Bearing θp, reference basis, and independent PolarSnap projection) from the accepted
+     * command [basePoint] to [rawCursorPoint] in model space.
+     * Returns null when [basePoint] is null.
      */
     fun computePolarTrackingPreview(
         basePoint: Point2D?,
@@ -330,15 +387,15 @@ object CadSnapAndCoordEngine {
         val dy = rawCursorPoint.y - basePoint.y
         val r = hypot(dx, dy)
 
-        val refDeg = if (
-            snapConfig.polarRelativeToLastSegment &&
+        val useLastSegment = snapConfig.polarRelativeToLastSegment &&
             previousBasePoint != null &&
             previousBasePoint.distanceTo(basePoint) > 1e-5
-        ) {
+        val refDeg = if (useLastSegment && previousBasePoint != null) {
             normalizeAngle360(previousBasePoint.angleToDeg(basePoint))
         } else {
             0.0
         }
+        val basisLabel = if (useLastSegment) "Last Segment" else "+X"
 
         if (!r.isFinite() || r <= 1e-5) {
             return PolarTrackingPreviewState(
@@ -347,14 +404,30 @@ object CadSnapAndCoordEngine {
                 radialDistanceR = 0.0,
                 actualAngleThetaDeg = null,
                 referenceAngleDeg = refDeg,
+                referenceBasisLabel = basisLabel,
                 activePolarAngleDeg = null,
                 worldPolarAngleDeg = null,
+                activePolarSnapAngleDeg = null,
                 projectedPolarPoint = null
             )
         }
 
         val rawWorldDeg = normalizeAngle360(Math.toDegrees(kotlin.math.atan2(dy, dx)))
         val relativeThetaDeg = normalizeAngle360(rawWorldDeg - refDeg)
+        val tolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
+
+        // Evaluate independent PolarSnap ray acquisition against PolarSnap multi-select presets + custom angles
+        val polarSnapCandidates = buildPolarSnapAngles(snapConfig)
+        val bestSnapDeg = polarSnapCandidates.minByOrNull { cand ->
+            wrappedAngularDiffDeg(relativeThetaDeg, cand)
+        }
+        val snapDiff = if (bestSnapDeg != null) wrappedAngularDiffDeg(relativeThetaDeg, bestSnapDeg) else Double.MAX_VALUE
+        val acquiredSnapDeg = if (bestSnapDeg != null && snapDiff <= tolerance) bestSnapDeg else null
+        val projectedSnapPt = if (acquiredSnapDeg != null) {
+            basePoint.polarOffset(r, normalizeAngle360(refDeg + acquiredSnapDeg))
+        } else {
+            null
+        }
 
         if (!snapConfig.polarTrackingEnabled) {
             return PolarTrackingPreviewState(
@@ -363,60 +436,50 @@ object CadSnapAndCoordEngine {
                 radialDistanceR = r,
                 actualAngleThetaDeg = relativeThetaDeg,
                 referenceAngleDeg = refDeg,
+                referenceBasisLabel = basisLabel,
                 activePolarAngleDeg = null,
                 worldPolarAngleDeg = null,
-                projectedPolarPoint = null
+                activePolarSnapAngleDeg = acquiredSnapDeg,
+                projectedPolarPoint = projectedSnapPt
             )
         }
 
-        // Build configured polar angle set A = { multiples of increment } U { additionalAngles }
-        val inc = snapConfig.polarTrackingAngleDeg.coerceIn(1.0, 180.0)
-        val configuredAngles = mutableListOf<Double>()
-        var deg = 0.0
-        while (deg < 360.0 - 1e-5) {
-            configuredAngles.add(normalizeAngle360(deg))
-            deg += inc
-        }
-        snapConfig.polarAdditionalAnglesDeg.forEach { addAngle ->
-            if (addAngle.isFinite()) {
-                val norm = normalizeAngle360(addAngle)
-                if (configuredAngles.none { abs(it - norm) < 1e-4 }) {
-                    configuredAngles.add(norm)
-                }
+        // Visual Polar Tracking (Section 9.5): all 360 whole-number bearings (0°..359°) + custom fractional angles.
+        // Priority:
+        // 1. Custom fractional angle in polarAdditionalAnglesDeg within 0.45°
+        // 2. Acquired PolarSnap / major increment ray within tolerance
+        // 3. Nearest whole-number bearing in 0°..359° (or custom fractional angle)
+        val fractionalCustom = snapConfig.polarAdditionalAnglesDeg
+            .filter { it.isFinite() }
+            .map { normalizeAngle360(it) }
+        val nearFractional = fractionalCustom
+            .filter { abs(it - kotlin.math.round(it)) > 1e-3 }
+            .minByOrNull { wrappedAngularDiffDeg(relativeThetaDeg, it) }
+            ?.takeIf { wrappedAngularDiffDeg(relativeThetaDeg, it) <= 0.48 }
+
+        val visualGuideDeg: Double = when {
+            nearFractional != null -> nearFractional
+            acquiredSnapDeg != null -> acquiredSnapDeg
+            else -> {
+                val allVisual = buildVisualPolarGuideAngles(snapConfig)
+                allVisual.minByOrNull { wrappedAngularDiffDeg(relativeThetaDeg, it) }
+                    ?: normalizeAngle360(kotlin.math.round(relativeThetaDeg))
             }
         }
 
-        val tolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
-        val bestPolarDeg = configuredAngles.minByOrNull { cand ->
-            wrappedAngularDiffDeg(relativeThetaDeg, cand)
-        }
-        val minDiff = if (bestPolarDeg != null) wrappedAngularDiffDeg(relativeThetaDeg, bestPolarDeg) else Double.MAX_VALUE
-
-        return if (bestPolarDeg != null && minDiff <= tolerance) {
-            val worldPolar = normalizeAngle360(refDeg + bestPolarDeg)
-            val projectedPt = basePoint.polarOffset(r, worldPolar)
-            PolarTrackingPreviewState(
-                basePoint = basePoint,
-                rawCursorPoint = rawCursorPoint,
-                radialDistanceR = r,
-                actualAngleThetaDeg = relativeThetaDeg,
-                referenceAngleDeg = refDeg,
-                activePolarAngleDeg = bestPolarDeg,
-                worldPolarAngleDeg = worldPolar,
-                projectedPolarPoint = projectedPt
-            )
-        } else {
-            PolarTrackingPreviewState(
-                basePoint = basePoint,
-                rawCursorPoint = rawCursorPoint,
-                radialDistanceR = r,
-                actualAngleThetaDeg = relativeThetaDeg,
-                referenceAngleDeg = refDeg,
-                activePolarAngleDeg = null,
-                worldPolarAngleDeg = null,
-                projectedPolarPoint = null
-            )
-        }
+        val worldPolar = normalizeAngle360(refDeg + visualGuideDeg)
+        return PolarTrackingPreviewState(
+            basePoint = basePoint,
+            rawCursorPoint = rawCursorPoint,
+            radialDistanceR = r,
+            actualAngleThetaDeg = relativeThetaDeg,
+            referenceAngleDeg = refDeg,
+            referenceBasisLabel = basisLabel,
+            activePolarAngleDeg = visualGuideDeg,
+            worldPolarAngleDeg = worldPolar,
+            activePolarSnapAngleDeg = acquiredSnapDeg,
+            projectedPolarPoint = projectedSnapPt
+        )
     }
 
     /**
@@ -550,7 +613,7 @@ object CadSnapAndCoordEngine {
         var working = rawModelCursor
         if (snapConfig.orthoEnabled && referencePoint != null) {
             working = applyOrthoLock(working, referencePoint)
-        } else if (snapConfig.polarTrackingEnabled && snapConfig.polarSnapEnabled && referencePoint != null) {
+        } else if (snapConfig.polarSnapEnabled && referencePoint != null) {
             val polarPreview = computePolarTrackingPreview(
                 basePoint = referencePoint,
                 rawCursorPoint = working,
