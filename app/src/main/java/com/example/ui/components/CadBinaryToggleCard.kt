@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -528,7 +529,7 @@ fun CadBinaryToggleCard(
             Surface(
                 modifier = Modifier
                     .matchParentSize()
-                    .offset(x = peekOffsetX, y = peekOffsetY)
+                    .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                     .scale(rearScale)
                     .zIndex(0f),
                 color = rearSurfaceColor,
@@ -585,7 +586,7 @@ fun CadBinaryToggleCard(
             Surface(
                 modifier = Modifier
                     .matchParentSize()
-                    .offset(x = peekOffsetX, y = peekOffsetY)
+                    .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                     .scale(rearScale)
                     .zIndex(0f),
                 color = rearSurfaceColor,
@@ -827,9 +828,9 @@ fun <T> CadHorizontalOptionCardDeck(
     selectedOption: T,
     onOptionSelected: (T) -> Unit,
     optionLabel: (T) -> String,
+    modifier: Modifier = Modifier,
     optionBadge: ((T) -> String)? = null,
     onForegroundTapped: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
     testTag: String? = null
 ) {
     if (options.isEmpty()) return
@@ -918,7 +919,7 @@ fun <T> CadHorizontalOptionCardDeck(
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .offset(x = peekOffsetX, y = peekOffsetY)
+                .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                 .scale(rearScale)
                 .zIndex(0f),
             color = CadToggleDisabledSurface,
@@ -1058,12 +1059,12 @@ fun CadExchangeableDualActionDeck(
     secondaryLabel: String,
     onPrimaryTap: () -> Unit,
     onSecondaryTap: () -> Unit,
+    modifier: Modifier = Modifier,
     onSecondaryLongPress: (() -> Unit)? = null,
     allowDownwardSwipeExchange: Boolean = true,
     peekDirection: CardPeekDirection = CardPeekDirection.SIDE,
     isVisible: Boolean = true,
     isEnabled: Boolean = true,
-    modifier: Modifier = Modifier,
     primaryTestTag: String? = null,
     secondaryTestTag: String? = null,
     deckTestTag: String? = null
@@ -1122,7 +1123,7 @@ fun CadExchangeableDualActionDeck(
         Surface(
             modifier = Modifier
                 .matchParentSize()
-                .offset(x = peekOffsetX, y = peekOffsetY)
+                .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                 .scale(rearScale)
                 .zIndex(0f),
             color = rearSurface,

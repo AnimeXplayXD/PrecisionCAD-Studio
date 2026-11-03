@@ -11,50 +11,60 @@ permissions:
 jobs:
   lint-release:
     name: Run Gradle lintRelease
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6.1.0
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v4.0.4
         with:
           packages: 'platform-tools'
 
-      - name: Install required Android SDK packages (API 37.2 & Build-Tools 37.0.0)
+      - name: Verify & Install Stable Android SDK Packages (API 37.2 & Build-Tools 37.0.0)
         shell: bash
         run: |
+          set -euo pipefail
           set +o pipefail
           yes | sdkmanager --licenses > /dev/null
           set -o pipefail
-          sdkmanager --install \
+          sdkmanager --channel=0 --install \
             "platform-tools" \
             "platforms;android-37.2" \
             "build-tools;37.0.0"
 
-      - name: Setup Gradle Wrapper
-        uses: gradle/actions/setup-gradle@v4
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6.4.1
 
-      - name: Ensure gradlew is executable
-        run: chmod +x ./gradlew
+      - name: Ensure gradlew is executable & verify Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --version
 
       - name: Prepare .env File for Secrets Gradle Plugin
+        shell: bash
         run: |
+          set -euo pipefail
           if [ ! -f ".env" ]; then
             cp .env.example .env
           fi
 
-      - name: Prepare Disposable Non-Production Keystores for Lint Variant Evaluation Only
+      - name: Run Android Lint (./gradlew :app:lintRelease) with Scoped Non-Production Variant Placeholder
+        shell: bash
         run: |
-          # Note: Used exclusively so AGP can evaluate variant signingConfig file paths during lintRelease.
-          # Never used to sign or publish any Release APK.
+          set -euo pipefail
+          # Used exclusively inside this lint-only step so AGP can evaluate variant signingConfigs
+          # during lintRelease without requiring production signing secrets. Never used to assemble
+          # or publish any APK, and deleted immediately upon step completion.
           if [ -f "debug.keystore.base64" ]; then
             base64 --decode debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
@@ -69,8 +79,9 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          THROW_KEY="${RUNNER_TEMP}/lint-throwaway-nonprod.jks"
+          THROW_KEY="${RUNNER_TEMP}/lint-throwaway-nonprod-${GITHUB_RUN_ID:-local}.jks"
           THROW_PASS="lint_only_nonprod_throwaway"
+          trap 'rm -f "$THROW_KEY"' EXIT
           keytool -genkeypair -v \
             -keystore "$THROW_KEY" \
             -storetype JKS \
@@ -81,18 +92,16 @@ jobs:
             -storepass "$THROW_PASS" \
             -keypass "$THROW_PASS" \
             -dname "CN=Lint Throwaway Non-Production, OU=CI, O=NonProd, L=Local, S=NA, C=US"
-          echo "KEYSTORE_PATH=${THROW_KEY}" >> "$GITHUB_ENV"
-          echo "STORE_PASSWORD=${THROW_PASS}" >> "$GITHUB_ENV"
-          echo "KEY_ALIAS=upload" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=${THROW_PASS}" >> "$GITHUB_ENV"
 
-      - name: Run Android Lint (./gradlew :app:lintRelease)
-        run: |
+          KEYSTORE_PATH="$THROW_KEY" \
+          STORE_PASSWORD="$THROW_PASS" \
+          KEY_ALIAS="upload" \
+          KEY_PASSWORD="$THROW_PASS" \
           ./gradlew :app:lintRelease --no-daemon --stacktrace
 
-      - name: Upload Lint Report Artifacts
+      - name: Upload Lint Report Artifacts (HTML, XML & TXT)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: android-lint-release-reports
           path: |

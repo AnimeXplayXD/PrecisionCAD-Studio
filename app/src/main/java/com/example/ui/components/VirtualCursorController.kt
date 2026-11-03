@@ -220,10 +220,10 @@ fun VirtualCursorControllerDeck(
     onIncrementSelect: (Double) -> Unit,
     onOpenControllerSettings: () -> Unit,
     onToggleCollapse: () -> Unit,
-    onSetCollapsed: ((Boolean) -> Unit)? = null,
     onOpenCoordinateDialog: () -> Unit,
-    referencePoint: Point2D? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onSetCollapsed: ((Boolean) -> Unit)? = null,
+    referencePoint: Point2D? = null
 ) {
     // Normalized joystick deflection vector in [-1f, +1f]. Reset to Offset.Zero immediately on release.
     var joystickDeflection by remember { mutableStateOf(Offset.Zero) }

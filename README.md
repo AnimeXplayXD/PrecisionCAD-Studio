@@ -7,15 +7,15 @@
 ## Build, SDK & Toolchain Summary
 
 - **Android SDK Levels**:
-  - `compileSdk`: Android API `37` (`minorApiLevel = 2`, `platforms;android-37.2`)
+  - `compileSdk`: Android API `37` (`minorApiLevel = 2`, `platforms;android-37.2`, `build-tools;37.0.0`)
   - `targetSdk`: `37` (Android 17)
   - `minSdk`: `24` (Android 7.0+)
 - **Toolchain Versions**:
-  - Gradle Wrapper: `9.3.1` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`)
+  - Gradle Wrapper: `9.3.1` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with pinned `distributionSha256Sum` (`b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06`)
   - Android Gradle Plugin (AGP): `9.1.1`
   - Kotlin Compose Compiler Plugin: `2.2.10`
   - KSP (Room & Moshi codegen): `2.3.5`
-  - Java Bytecode Target: `11` (CI runner JDK `21`)
+  - Java Bytecode Target: `11` (CI runner JDK `21` on `ubuntu-26.04`)
 - **Gradle Wrapper Commands**:
   ```bash
   ./gradlew --version
@@ -45,10 +45,11 @@
   - Splits Paper Space rendering into a sheet base pass (drawn before the grid) and an opaque title-block pass (drawn after the grid) so grid lines never bleed through the title block, with zoom-independent screen-space title-block typography.
 - **Shared Card Component & Section-Local Idle Motion System**:
   - Concealed rear card at rest, `2.4s` post-exchange reveal, and strictly isolated `75s` section-local idle peek (`CadDeckIdleTimerState`).
+  - Layout-phase lambda `Modifier.offset { IntOffset(...) }` animations across all card decks so animated cards do not trigger unnecessary Compose recomposition.
   - Green `ENABLE` and neutral-grey `DISABLE` binary cards across Cursor Control, Grid & OSNAP settings, with 3-region OSNAP cards (`[END]` badge left, horizontal marquee full label middle, `ENABLE`/`DISABLE` right).
   - Unbordered translucent floating command dock, single-source IME positioning, and animated controller collapse/expand.
 - **Quick Dimension (`QDIM`) & Selective Dimension Removal**:
-  - Horizontal swipeable multi-option card decks for Scope, Arrangement, and Density Policy (decoupled from vertical dialog scrolling) with non-layout-shifting delayed callout overlays.
+  - Horizontal swipeable multi-option card decks for Scope, Arrangement, and Density Policy (decoupled from vertical dialog scrolling) with non-layout-shifting delayed callout overlays driven by `scrollState.isScrollInProgress`.
   - Category-First Selective Dimension Removal with stable scroll-offset preservation, header `SELECT ALL` / `DESELECT ALL` action, and non-layout-shifting transient marquee count notification.
 - **Native `.pcad` Persistence & DXF / PDF / SVG Interchange**:
   - Atomic crash-safe Quick Save (`pcad_autosave/quick_save_working.pcad`) and Explicit Save (`Documents/PrecisionCAD/<basename>.pcad`), distinct from ASCII DXF (`AC1015`), plotted vector PDF, and SVG export.
@@ -60,7 +61,7 @@
 ## Current Scope Limitations
 
 - Strictly 2D drafting and annotation (no 3D solid modeling, 3D meshes, or Z-axis extrusion).
-- Production Release APK signing in CI fails closed when repository signing secrets (`KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_PASSWORD`) are not configured.
+- Production Release APK signing in CI fails closed unless all five canonical repository signing secrets (`KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`, `RELEASE_CERT_SHA256`) are configured and pass SHA-256 certificate verification.
 
 ---
 
@@ -73,5 +74,5 @@
 | [`docs/COMMANDS_AND_PREVIEWS.md`](docs/COMMANDS_AND_PREVIEWS.md) | Interactive CAD command state machine, live-preview preservation, and temporary polar guide rendering |
 | [`docs/DIMENSION_SYSTEM.md`](docs/DIMENSION_SYSTEM.md) | QDIM horizontal card selectors, non-shifting callout overlays, and Selective Dimension Removal scroll stability |
 | [`docs/STORAGE_AND_FORMATS.md`](docs/STORAGE_AND_FORMATS.md) | Native `.pcad` v2 JSON schema, atomic quick-save, `Documents/PrecisionCAD/` storage, and updater APK staging |
-| [`docs/BUILD_AND_RELEASE.md`](docs/BUILD_AND_RELEASE.md) | API 37.2 toolchain, Gradle Wrapper, fail-closed signing, single-APK artifacts, and release metadata |
-| [`docs/LICENSING_INVENTORY.md`](docs/LICENSING_INVENTORY.md) | Non-blocking informational source and dependency licensing inventory workflow |
+| [`docs/BUILD_AND_RELEASE.md`](docs/BUILD_AND_RELEASE.md) | API 37.2 toolchain, Gradle Wrapper, fail-closed 5-secret signing, Node 24 Actions, single-APK artifacts, and release metadata |
+| [`docs/LICENSING_INVENTORY.md`](docs/LICENSING_INVENTORY.md) | Non-blocking informational source and dependency licensing inventory workflow (ScanCode v32.5.0 & per-GAV POM metadata) |

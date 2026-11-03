@@ -225,19 +225,19 @@ fun CadViewportCanvas(
     cursorModelPos: Point2D,
     activeSnapCandidate: SnapCandidate?,
     referencePoint: Point2D?,
-    polarPreview: PolarTrackingPreviewState? = null,
     selectionBoxDrag: SelectionBoxDragState?,
     viewport: ViewportTransform,
     onViewportChanged: (ViewportTransform) -> Unit,
     onViewportSizeChanged: (widthPx: Float, heightPx: Float) -> Unit,
+    modifier: Modifier = Modifier,
+    polarPreview: PolarTrackingPreviewState? = null,
     onGestureStateChanged: (ViewportGestureState) -> Unit = {},
     isToolDrawerOpen: Boolean = false,
     onRevealToolDrawer: () -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onDirectTapModelPoint: (Point2D) -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onSelectionDragStart: (Point2D) -> Unit = {},
     @Suppress("UNUSED_PARAMETER") onSelectionDragUpdate: (Point2D) -> Unit = {},
-    @Suppress("UNUSED_PARAMETER") onSelectionDragEnd: () -> Unit = {},
-    modifier: Modifier = Modifier
+    @Suppress("UNUSED_PARAMETER") onSelectionDragEnd: () -> Unit = {}
 ) {
     val layerMap = remember(layers) { layers.associateBy { it.name } }
     val currentViewport by rememberUpdatedState(viewport)

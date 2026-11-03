@@ -115,6 +115,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -2426,7 +2427,10 @@ private fun ContextualCommandAndOptionsDock(
                     Surface(
                         modifier = Modifier
                             .size(38.dp)
-                            .offset(x = cancelOffsetX, y = if (!isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp)
+                            .offset {
+                                val yDp = if (!isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp
+                                IntOffset(cancelOffsetX.roundToPx(), yDp.roundToPx())
+                            }
                             .zIndex(if (!isSendCardInFront) 2f else 1f)
                             .graphicsLayer {
                                 rotationZ = cancelRotation
@@ -2471,7 +2475,10 @@ private fun ContextualCommandAndOptionsDock(
                     Surface(
                         modifier = Modifier
                             .size(38.dp)
-                            .offset(x = sendOffsetX, y = if (isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp)
+                            .offset {
+                                val yDp = if (isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp
+                                IntOffset(sendOffsetX.roundToPx(), yDp.roundToPx())
+                            }
                             .zIndex(if (isSendCardInFront) 2f else 1f)
                             .graphicsLayer {
                                 rotationZ = sendRotation

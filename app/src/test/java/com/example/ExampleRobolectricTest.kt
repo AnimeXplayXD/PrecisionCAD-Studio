@@ -222,5 +222,19 @@ class ExampleRobolectricTest {
         assertEquals("Geo.pdf", pdfFile.name)
         assertTrue(pdfFile.exists())
         assertTrue(pdfFile.length() > 1024L)
+
+        // 9. Verify V18.1 CadGitHubUpdateRepository.createManageUnknownAppSourcesIntent() KTX String.toUri() behavior
+        val updater = com.example.cad.update.CadGitHubUpdateRepository(
+            context = context,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        )
+        val unknownSourcesIntent = updater.createManageUnknownAppSourcesIntent()
+        assertNotNull(unknownSourcesIntent)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            assertEquals(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, unknownSourcesIntent.action)
+            assertEquals("package:com.precisioncad.studio", unknownSourcesIntent.data?.toString())
+        }
     }
 }
+
+

@@ -87,6 +87,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -848,7 +849,7 @@ fun QuickDimensionDialog(
                         accentColor = CadCyanPrimary,
                         optionTagPrefix = "qdim_mode_",
                         optionName = { it.name },
-                        scrollActivitySignal = scrollState.value,
+                        isParentScrolling = scrollState.isScrollInProgress,
                         onSelect = { mode = it }
                     )
 
@@ -863,7 +864,7 @@ fun QuickDimensionDialog(
                         accentColor = CadEmeraldCrossing,
                         optionTagPrefix = "qdim_arrangement_",
                         optionName = { it.name },
-                        scrollActivitySignal = scrollState.value,
+                        isParentScrolling = scrollState.isScrollInProgress,
                         onSelect = { arrangement = it }
                     )
 
@@ -878,7 +879,7 @@ fun QuickDimensionDialog(
                         accentColor = CadAmberSnap,
                         optionTagPrefix = "qdim_density_",
                         optionName = { it.name },
-                        scrollActivitySignal = scrollState.value,
+                        isParentScrolling = scrollState.isScrollInProgress,
                         onSelect = { density = it }
                     )
 
@@ -1042,7 +1043,7 @@ fun QuickDimensionDialog(
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .zIndex(if (!isClearCardInFront) 1f else 0f)
-                                .offset(y = enableOffsetY)
+                                .offset { IntOffset(0, enableOffsetY.roundToPx()) }
                                 .graphicsLayer {
                                     scaleX = enableScale
                                     scaleY = enableScale
@@ -1103,7 +1104,7 @@ fun QuickDimensionDialog(
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .zIndex(if (isClearCardInFront) 1f else 0f)
-                                .offset(y = clearOffsetY)
+                                .offset { IntOffset(0, clearOffsetY.roundToPx()) }
                                 .graphicsLayer {
                                     scaleX = clearScale
                                     scaleY = clearScale
@@ -1185,18 +1186,21 @@ private fun <T> QDimHorizontalCardSelector(
     accentColor: Color,
     optionTagPrefix: String,
     optionName: (T) -> String,
-    scrollActivitySignal: Int,
+    isParentScrolling: Boolean,
     onSelect: (T) -> Unit
 ) {
     val currentIndex = items.indexOf(selectedItem).coerceAtLeast(0)
     var interactionTick by remember { mutableIntStateOf(0) }
     var showDelayedCallout by remember { mutableStateOf(false) }
 
-    // 2-second delayed speech-bubble callout after resting on a selection without scrolling or card exchange
-    LaunchedEffect(selectedItem, interactionTick, scrollActivitySignal) {
+    // 2-second delayed speech-bubble callout after resting on a selection without scrolling or card exchange.
+    // While parent scroll is in progress, hide the callout and wait until scrolling stops to begin the 2s timer.
+    LaunchedEffect(selectedItem, interactionTick, isParentScrolling) {
         showDelayedCallout = false
-        delay(2000L)
-        showDelayedCallout = true
+        if (!isParentScrolling) {
+            delay(2000L)
+            showDelayedCallout = true
+        }
     }
 
     val cardOptions = remember(items, accentColor) {
@@ -3336,7 +3340,7 @@ fun DxfAndProjectHubDialog(
                                 .fillMaxWidth()
                                 .height(66.dp)
                                 .zIndex((formats.size - depth).toFloat())
-                                .offset(x = animOffsetX, y = animOffsetY)
+                                .offset { IntOffset(animOffsetX.roundToPx(), animOffsetY.roundToPx()) }
                                 .graphicsLayer {
                                     rotationZ = animRotation
                                     alpha = animAlpha

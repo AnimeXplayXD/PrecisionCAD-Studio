@@ -10,11 +10,13 @@ The workflow `.github/workflows/licensing-inventory.yml` and generator script `s
 
 1. **First-Party & Bundled Repository Files**:
    - Scans source files, Gradle scripts, XML resources, documentation, and bundled binary assets (including `design-assets/icons/`).
+   - Uses the official ScanCode Toolkit `v32.5.0` standalone Python 3.12 Linux archive (`scancode-toolkit-v32.5.0_py3.12-linux.tar.gz`, verified against SHA-256 `638adcd0af576d1f4d5b64dde228724b3ca4fdee2c4de20d88e4356be353f027`) in CI alongside the built-in deterministic repository file inspector (`repository-file-inspector.json`).
    - Records observed `SPDX-License-Identifier` headers, copyright notices, file SHA-256 digests, and line ranges.
    - Binary/image assets without embedded licence text are recorded as `NOT_DETECTED` (never inferred from appearance or filename).
-2. **Resolved Gradle Dependency Graphs**:
-   - Captures `releaseRuntimeClasspath`, `releaseCompileClasspath`, `debugRuntimeClasspath`, `debugCompileClasspath`, unit-test configurations, KSP processor configurations, and `buildEnvironment` (Gradle plugins/buildscript classpath).
-   - Preserves direct vs. transitive relationship and configuration scope.
+2. **Resolved Gradle Dependency Graphs & Exact POM Metadata**:
+   - Captures `releaseRuntimeClasspath`, `releaseCompileClasspath`, `debugRuntimeClasspath`, `debugCompileClasspath`, `debugUnitTestRuntimeClasspath`, `debugUnitTestCompileClasspath`, `releaseUnitTestRuntimeClasspath`, `releaseUnitTestCompileClasspath`, `debugAndroidTestRuntimeClasspath`, `debugAndroidTestCompileClasspath`, `kspReleaseKotlinProcessorClasspath`, `kspDebugKotlinProcessorClasspath`, and `buildEnvironment` (Gradle plugins/buildscript classpath).
+   - Extracts declared `<licenses>` directly from each component's exact resolved Maven `.pom` (and parent `.pom` chain when inherited) in the local Gradle cache (`files-2.1`).
+   - Group-prefix or vendor-prefix heuristics are **never** used; if a component's POM is absent or lacks `<licenses>`, `licenseEvidenceSource` is recorded as `NONE` and `observedLicenseExpression` is `UNKNOWN`.
 
 **Explicit Non-Goals**:
 - Does **not** select, grant, or modify a root `LICENSE` file for PrecisionCAD Studio.
@@ -27,11 +29,14 @@ The workflow `.github/workflows/licensing-inventory.yml` and generator script `s
 
 Running `python3 scripts/generate_licensing_inventory.py --output-dir reports/licensing` produces:
 
-1. `dependency-bom.cdx.json` — Aggregate CycloneDX 1.5 JSON SBOM.
+1. `dependency-bom.cdx.json` — Aggregate CycloneDX 1.5 JSON SBOM with per-GAV POM license evidence and dynamic application `versionName (b<versionCode>)`.
 2. `dependency-bom.cdx.xml` — Aggregate CycloneDX 1.5 XML SBOM.
-3. `scancode-source-inventory.json` — Raw file-level JSON inventory.
-4. `scancode-source-inventory.csv` — Combined tabular CSV inventory.
-5. `licensing-inventory.html` — Human-readable combined HTML report.
-6. `licensing-inventory-summary.md` — Concise Markdown summary published to `$GITHUB_STEP_SUMMARY`.
-7. `licensing-inventory-status.json` — Scan provenance, tool versions, omitted inputs, and completeness status (`COMPLETE` or `INCOMPLETE`).
-8. `gradle-build-logic-dependencies.txt` — Resolved Gradle plugin/buildscript dependency tree.
+3. `scancode-raw.json` — Raw ScanCode Toolkit JSON output when ScanCode CLI is invoked.
+4. `repository-file-inspector.json` — Deterministic repository file header/copyright/SHA-256 inventory.
+5. `scancode-source-inventory.json` — Combined file-level JSON inventory linking both `repository-file-inspector.json` and `scancode-raw.json`.
+6. `scancode-source-inventory.csv` — Combined tabular CSV inventory of dependencies and repository files.
+7. `licensing-inventory.html` — Human-readable combined HTML report.
+8. `licensing-inventory-summary.md` — Concise Markdown summary published to `$GITHUB_STEP_SUMMARY`.
+9. `licensing-inventory-status.json` — Scan provenance, tool versions, configuration resolution status, POM coverage metrics, and completeness status (`COMPLETE` or `INCOMPLETE`).
+10. `gradle-build-logic-dependencies.txt` — Resolved Gradle plugin/buildscript dependency tree (`buildEnvironment`).
+11. `diagnostics/` — Full untruncated stdout/stderr logs for every Gradle configuration query and ScanCode invocation.
