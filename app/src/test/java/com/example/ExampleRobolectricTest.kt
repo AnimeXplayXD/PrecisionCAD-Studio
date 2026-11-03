@@ -113,7 +113,7 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("active_cmd_finish_button").assertIsDisplayed()
 
-        // Engage command bar by typing text -> command_action_card_stack appears with rear card 100% concealed at rest (Requirement A); swipe down & cancel
+        // Engage command bar by typing text -> command_action_card_stack appears with rear card 100% concealed at rest; swipe down triggers 4.0s post-exchange peek & cancel
         composeTestRule.onNodeWithTag("command_line_input_field").performTextInput("F")
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_action_card_stack").assertIsDisplayed()
@@ -122,19 +122,30 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("command_action_card_stack").performTouchInput { swipeDown() }
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_card_cancel").assertIsDisplayed()
-        assertTrue(composeTestRule.onAllNodesWithTag("command_card_send").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("command_card_send").assertIsDisplayed()
         composeTestRule.onNodeWithTag("command_card_cancel").performClick()
         composeTestRule.waitForIdle()
 
-        // 5. Verify Direct Coordinate Input Dialog with Editable Polar Bearing θ (°)
+        // 5. Verify Direct Coordinate Input Dialog: mutually exclusive Cartesian vs Polar subtrees, ABS/REL deck, and two-stage Move Cursor -> Pick flow
         composeTestRule.onNodeWithTag("cursor_coord_theta_text").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("coord_input_x_field").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_input_y_field").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_input_theta_field").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("coord_input_polar_field").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("coord_mode_polar").performClick()
+        composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("coord_input_polar_field").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("coord_input_x_field").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("coord_mode_cartesian").performClick()
+        composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("coord_input_theta_field").performTextReplacement("45")
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("coord_move_cursor_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("coord_move_cursor_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("coord_dialog_preview_state").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("coord_pick_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("coord_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
@@ -149,11 +160,13 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("controller_settings_close_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 7. Section 10 & 11: Verify Quick Dimension (QDIM) Horizontal Card Selectors, Two-Card Footer Deck, and Selective Dimension Removal
+        // 7. Section 9 & 10: Verify Quick Dimension (QDIM) Horizontal Card Selectors, Stage Badges, Two-Card Footer Deck, and Selective Dimension Removal
         composeTestRule.onNodeWithTag("top_qdim_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("qdim_scroll_header").assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_scroll_footer").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("qdim_help_callout_STAGE_1").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("qdim_stage_badge_mode").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_wheel_mode").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_wheel_arrangement").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_wheel_density").performScrollTo().assertIsDisplayed()

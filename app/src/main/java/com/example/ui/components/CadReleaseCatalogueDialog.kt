@@ -386,7 +386,7 @@ fun CadReleaseCatalogueDialog(
                 // with an explicit tap-to-exchange affordance, 2.4s post-exchange reveal, and 75s 1s idle peek.
                 val actionDeckTimer = rememberCadDeckIdleTimerState(
                     deckId = "release_catalogue_action_deck",
-                    peekDirection = CardPeekDirection.SIDE,
+                    peekDirection = CardPeekDirection.ABOVE,
                     isVisible = true,
                     isEnabled = true
                 )

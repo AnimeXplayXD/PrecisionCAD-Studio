@@ -140,7 +140,9 @@ data class DimensionAlignmentReport(
     val densityPolicy: QDimDensityPolicy,
     val edgeDiagnostics: List<EdgeDimensionDiagnostic> = emptyList(),
     val generationCompletenessScore: Double = 100.0,
-    val layoutQualityScore: Double = layoutScore
+    val layoutQualityScore: Double = layoutScore,
+    val geometryClassification: QDimGeometryClassification? = null,
+    val dimensionPlan: QDimDimensionPlan? = null
 ) {
     val resolvedDimensions: List<CadEntity.DimensionEntity>
         get() = placements.map { it.dimension }

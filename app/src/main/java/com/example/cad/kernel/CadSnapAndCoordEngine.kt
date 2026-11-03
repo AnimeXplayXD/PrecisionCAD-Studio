@@ -13,6 +13,7 @@ import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.log10
 import kotlin.math.pow
+import kotlin.math.round
 import kotlin.math.roundToLong
 import kotlin.math.sin
 
@@ -308,7 +309,9 @@ data class PolarTrackingPreviewState(
     val activePolarAngleDeg: Double? = null,
     val worldPolarAngleDeg: Double? = null,
     val activePolarSnapAngleDeg: Double? = null,
-    val projectedPolarPoint: Point2D? = null
+    val worldPolarSnapAngleDeg: Double? = null,
+    val projectedPolarPoint: Point2D? = null,
+    val isPolarSnapRayVisibleForDisplay: Boolean = false
 ) {
     val hasValidDirection: Boolean get() = actualAngleThetaDeg != null && radialDistanceR > 1e-5
     val isPolarGuideAcquired: Boolean get() = activePolarAngleDeg != null && worldPolarAngleDeg != null && hasValidDirection
@@ -323,6 +326,13 @@ object CadSnapAndCoordEngine {
 
     /** Dedicated visual polar guide release hysteresis tolerance (Section 8.4). */
     const val VISUAL_POLAR_RELEASE_TOLERANCE_DEG = 0.55
+
+    /**
+     * V19 §13.2 — Strict angular match epsilon for displaying the blue dashed PolarSnap ray:
+     * The blue dashed PolarSnap ray is shown ONLY when `polarSnapEnabled == true` AND
+     * `|θ_effective - θ_polarSnap| <= POLAR_SNAP_RAY_DISPLAY_EPSILON_DEG` (0.01°).
+     */
+    const val POLAR_SNAP_RAY_DISPLAY_EPSILON_DEG = 0.01
 
     /** Angular deduplication epsilon for polar guide and snap collections (Section 8.3). */
     const val ANGLE_DEDUP_EPSILON_DEG = 1e-4
@@ -348,6 +358,22 @@ object CadSnapAndCoordEngine {
     fun wrappedAngularDiffDeg(a: Double, b: Double): Double {
         val d = abs(normalizeAngle360(a) - normalizeAngle360(b)) % 360.0
         return if (d > 180.0) 360.0 - d else d
+    }
+
+    /**
+     * V19 §11.3 & §11.4 — Phase-Preserving Step Lattice Alignment on Touchpad Release:
+     * Aligns [raw] to the nearest step lattice offset from [phase] by integer multiples of [step]:
+     *   aligned(raw, phase, step) = phase + round((raw - phase) / step) * step
+     */
+    fun alignCoordinateToStepPhase(raw: Double, phase: Double, step: Double): Double {
+        if (!raw.isFinite() || !phase.isFinite() || !step.isFinite() || step <= 0.0) return raw
+        return phase + round((raw - phase) / step) * step
+    }
+
+    fun captureStepPhase(coord: Double, step: Double): Double {
+        if (!coord.isFinite() || !step.isFinite() || step <= 0.0) return 0.0
+        val rem = coord % step
+        return if (abs(rem) < 1e-9 || abs(abs(rem) - step) < 1e-9) 0.0 else rem
     }
 
     /**
@@ -489,12 +515,29 @@ object CadSnapAndCoordEngine {
      * It is NEVER assigned from an acquired PolarSnap ray and NEVER falls back unconditionally to the
      * nearest whole degree when outside visual tolerance.
      */
+    fun evaluatePolarTracking(
+        basePoint: Point2D?,
+        rawCursorPoint: Point2D,
+        snapConfig: GridAndSnapConfig,
+        previousBasePoint: Point2D? = null,
+        previouslyAcquiredVisualAngleDeg: Double? = null,
+        effectiveCursorPoint: Point2D = rawCursorPoint
+    ): PolarTrackingPreviewState? = computePolarTrackingPreview(
+        basePoint = basePoint,
+        rawCursorPoint = rawCursorPoint,
+        snapConfig = snapConfig,
+        previousBasePoint = previousBasePoint,
+        previouslyAcquiredVisualAngleDeg = previouslyAcquiredVisualAngleDeg,
+        effectiveCursorPoint = effectiveCursorPoint
+    )
+
     fun computePolarTrackingPreview(
         basePoint: Point2D?,
         rawCursorPoint: Point2D,
         snapConfig: GridAndSnapConfig,
         previousBasePoint: Point2D? = null,
-        previouslyAcquiredVisualAngleDeg: Double? = null
+        previouslyAcquiredVisualAngleDeg: Double? = null,
+        effectiveCursorPoint: Point2D = rawCursorPoint
     ): PolarTrackingPreviewState? {
         if (basePoint == null) return null
         if (!basePoint.x.isFinite() || !basePoint.y.isFinite() ||
@@ -528,13 +571,26 @@ object CadSnapAndCoordEngine {
                 activePolarAngleDeg = null,
                 worldPolarAngleDeg = null,
                 activePolarSnapAngleDeg = null,
-                projectedPolarPoint = null
+                worldPolarSnapAngleDeg = null,
+                projectedPolarPoint = null,
+                isPolarSnapRayVisibleForDisplay = false
             )
         }
 
         val rawWorldDeg = normalizeAngle360(Math.toDegrees(atan2(dy, dx)))
         val relativeThetaDeg = normalizeAngle360(rawWorldDeg - refDeg)
         val snapTolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
+
+        // Effective cursor angle (used for V19 §13.2 strict 0.01° blue PolarSnap ray display gate)
+        val effDx = effectiveCursorPoint.x - basePoint.x
+        val effDy = effectiveCursorPoint.y - basePoint.y
+        val effR = hypot(effDx, effDy)
+        val effectiveRelativeThetaDeg = if (effR.isFinite() && effR > 1e-5) {
+            val effWorldDeg = normalizeAngle360(Math.toDegrees(atan2(effDy, effDx)))
+            normalizeAngle360(effWorldDeg - refDeg)
+        } else {
+            relativeThetaDeg
+        }
 
         // 1. Evaluate independent PolarSnap ray acquisition against PolarSnap presets + custom snap angles only
         val polarSnapCandidates = buildPolarSnapAngles(snapConfig)
@@ -543,11 +599,15 @@ object CadSnapAndCoordEngine {
         }
         val snapDiff = if (bestSnapDeg != null) wrappedAngularDiffDeg(relativeThetaDeg, bestSnapDeg) else Double.MAX_VALUE
         val acquiredSnapDeg = if (bestSnapDeg != null && snapDiff <= snapTolerance) bestSnapDeg else null
-        val projectedSnapPt = if (acquiredSnapDeg != null) {
-            basePoint.polarOffset(r, normalizeAngle360(refDeg + acquiredSnapDeg))
+        val worldSnapDeg = acquiredSnapDeg?.let { normalizeAngle360(refDeg + it) }
+        val projectedSnapPt = if (acquiredSnapDeg != null && worldSnapDeg != null) {
+            basePoint.polarOffset(r, worldSnapDeg)
         } else {
             null
         }
+        val showBluePolarSnapRay = snapConfig.polarSnapEnabled &&
+            acquiredSnapDeg != null &&
+            wrappedAngularDiffDeg(effectiveRelativeThetaDeg, acquiredSnapDeg) <= POLAR_SNAP_RAY_DISPLAY_EPSILON_DEG
 
         // 2. If Visual Polar Tracking is disabled, never acquire or draw a visual guide ray
         if (!snapConfig.polarTrackingEnabled) {
@@ -561,7 +621,9 @@ object CadSnapAndCoordEngine {
                 activePolarAngleDeg = null,
                 worldPolarAngleDeg = null,
                 activePolarSnapAngleDeg = acquiredSnapDeg,
-                projectedPolarPoint = projectedSnapPt
+                worldPolarSnapAngleDeg = worldSnapDeg,
+                projectedPolarPoint = projectedSnapPt,
+                isPolarSnapRayVisibleForDisplay = showBluePolarSnapRay
             )
         }
 
@@ -601,7 +663,9 @@ object CadSnapAndCoordEngine {
             activePolarAngleDeg = acquiredVisualDeg,
             worldPolarAngleDeg = worldPolar,
             activePolarSnapAngleDeg = acquiredSnapDeg,
-            projectedPolarPoint = projectedSnapPt
+            worldPolarSnapAngleDeg = worldSnapDeg,
+            projectedPolarPoint = projectedSnapPt,
+            isPolarSnapRayVisibleForDisplay = showBluePolarSnapRay
         )
     }
 

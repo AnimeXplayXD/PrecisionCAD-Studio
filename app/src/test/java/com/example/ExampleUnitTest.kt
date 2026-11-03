@@ -892,7 +892,8 @@ class ExampleUnitTest {
         )
         val detailedAngularDims = detailedTriEntities.filterIsInstance<CadEntity.DimensionEntity>()
             .filter { it.dimensionType == DimensionType.ANGULAR }
-        assertEquals(3, detailedAngularDims.size)
+        // V19 §14.3.7: Triangle in Detailed mode caps interior angles at 2 so the 3rd is never redundant (A+B+C=180°)
+        assertEquals(2, detailedAngularDims.size)
         assertTrue(detailedAngularDims.all { abs(it.measuredModelValue() - 60.0) < 0.2 })
 
         // 2. Scalene 3-4-5 right triangle from 3 connected LineEntity segments -> emits 3 distinct interior angles (90°, ~36.87°, ~53.13°)
@@ -1222,9 +1223,9 @@ class ExampleUnitTest {
         val deckA = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_a")
         val deckB = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_b")
 
-        assertEquals(75_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_INTERVAL_MS)
-        assertEquals(1_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_HOLD_MS)
-        assertEquals(2_400L, com.example.ui.components.CadDeckIdleTimerState.POST_EXCHANGE_REVEAL_MS)
+        assertEquals(60_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_INTERVAL_MS)
+        assertEquals(4_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_HOLD_MS)
+        assertEquals(4_000L, com.example.ui.components.CadDeckIdleTimerState.POST_EXCHANGE_REVEAL_MS)
 
         // Initially at rest: rear card is completely concealed on both decks
         assertFalse(deckA.isRearCardVisible)
@@ -1400,12 +1401,12 @@ class ExampleUnitTest {
         assertFalse(commandDeck.isRearCardRevealed)
         assertTrue(commandDeck.interactionGeneration > gen0)
 
-        // When 75s idle timer triggers a 1000ms peek, rear card is revealed only during the peek window
-        commandDeck.advanceTimeBy(75_000L)
+        // When 60s idle timer triggers a 4000ms peek, rear card is revealed only during the peek window
+        commandDeck.advanceTimeBy(60_000L)
         assertTrue(commandDeck.isIdlePeeking)
         assertTrue(commandDeck.isRearCardVisible)
         assertTrue(commandDeck.isRearCardRevealed)
-        commandDeck.advanceTimeBy(1_000L)
+        commandDeck.advanceTimeBy(4_000L)
         assertFalse(commandDeck.isIdlePeeking)
         assertFalse(commandDeck.isRearCardVisible)
         assertFalse(commandDeck.isRearCardRevealed)
@@ -1526,8 +1527,8 @@ class ExampleUnitTest {
         deckA.detachLifecycleObserver()
         assertEquals(0, deckA.activeLifecycleObserverCount)
 
-        // Verify 74,999 ms does not reveal rear card; +1 ms starts peek; +1,000 ms conceals it; deckB clock is independent
-        deckA.advanceTimeBy(74_999L)
+        // Verify 59,999 ms does not reveal rear card; +1 ms starts peek; +4,000 ms conceals it; deckB clock is independent
+        deckA.advanceTimeBy(59_999L)
         assertFalse(deckA.isIdlePeeking)
         assertFalse(deckA.isRearCardRevealed)
         assertEquals(0L, deckB.elapsedIdleMs)
@@ -1564,6 +1565,181 @@ class ExampleUnitTest {
         if (releaseDialogSource.exists()) {
             assertFalse(releaseDialogSource.readText().contains("BindCadDeckIdleTimerEffect"))
         }
+    }
+
+    @Test
+    fun `TC-V19-01 verify V19 Card Shape Peek Geometry, 60s_4s_4s Deck State Machine, Step-Phase Touchpad Release Alignment, PolarSnap Ray Separation, and Shape-Aware QDIM`() {
+        // 1. V19 §5 & §6: CardShapeClass classification, peek direction, 60s/4s/4s state machine, and 3-card depth visibility
+        assertEquals(
+            com.example.ui.components.CardShapeClass.SQUARE,
+            com.example.ui.components.CadDeckIdleTimerState.classifyCardShape(40f, 40f)
+        )
+        assertEquals(
+            com.example.ui.components.CardPeekDirection.SIDE,
+            com.example.ui.components.CadDeckIdleTimerState.peekDirectionForShape(40f, 40f)
+        )
+        assertEquals(
+            com.example.ui.components.CardShapeClass.RECTANGULAR,
+            com.example.ui.components.CadDeckIdleTimerState.classifyCardShape(180f, 48f)
+        )
+        assertEquals(
+            com.example.ui.components.CardPeekDirection.ABOVE,
+            com.example.ui.components.CadDeckIdleTimerState.peekDirectionForShape(180f, 48f)
+        )
+
+        val exportDeck = com.example.ui.components.CadDeckIdleTimerState(deckId = "project_hub_export_card_deck")
+        assertEquals(com.example.ui.components.CardDeckPhase.IDLE_WAIT, exportDeck.phase)
+        assertFalse(exportDeck.isRearCardVisibleForDepth(1))
+        assertFalse(exportDeck.isRearCardVisibleForDepth(2))
+
+        // Card exchange -> 4,000ms post-exchange peek where depth==1 is visible and depth==2 remains occluded
+        exportDeck.onCardExchanged()
+        assertEquals(com.example.ui.components.CardDeckPhase.POST_EXCHANGE_PEEK, exportDeck.phase)
+        assertTrue(exportDeck.isRearCardVisibleForDepth(1))
+        assertFalse(exportDeck.isRearCardVisibleForDepth(2))
+        assertTrue(exportDeck.sequentialConcealDelayMsForDepth(1, 3) > exportDeck.sequentialConcealDelayMsForDepth(2, 3))
+
+        exportDeck.advanceTimeBy(3_999L)
+        assertTrue(exportDeck.isPostExchangeRevealActive)
+        exportDeck.advanceTimeBy(1L)
+        assertFalse(exportDeck.isPostExchangeRevealActive)
+        assertEquals(com.example.ui.components.CardDeckPhase.IDLE_WAIT, exportDeck.phase)
+
+        // 2. V19 §11.3 & §11.4: Step-phase quantization on touchpad release
+        val phaseX = CadSnapAndCoordEngine.captureStepPhase(12.34, 5.0)
+        assertEquals(2.34, phaseX, 1e-6)
+        // Dragging from 12.34 to 26.9 -> nearest phase-aligned coordinate is 2.34 + 5 * 5 = 27.34
+        val alignedX = CadSnapAndCoordEngine.alignCoordinateToStepPhase(26.9, phaseX, 5.0)
+        assertEquals(27.34, alignedX, 1e-6)
+
+        // 3. V19 §13: Blue dashed PolarSnap ray visibility vs yellow Visual Polar Tracking arc
+        val basePt = Point2D(0.0, 0.0)
+        val snapCfg = com.example.cad.model.GridAndSnapConfig(
+            polarTrackingEnabled = true,
+            polarSnapEnabled = true,
+            polarSnapPresetAnglesDeg = setOf(45.0, 90.0),
+            polarAcquisitionToleranceDeg = 5.0
+        )
+        // At 37.0 deg: Visual Polar Tracking is acquired (whole-number bearing 37°), but PolarSnap is NOT acquired -> blue ray hidden
+        val prevAt37 = CadSnapAndCoordEngine.evaluatePolarTracking(
+            basePoint = basePt,
+            rawCursorPoint = basePt.polarOffset(50.0, 37.0),
+            snapConfig = snapCfg
+        )
+        assertNotNull(prevAt37)
+        assertTrue(prevAt37!!.isPolarGuideAcquired)
+        assertEquals(37.0, prevAt37.activePolarAngleDeg!!, 1e-3)
+        assertFalse(prevAt37.isPolarSnapRayVisibleForDisplay)
+
+        // At 45.0 deg (after PolarSnap projection onto 45° ray): PolarSnap is acquired AND cursor lies on 45° within 0.01° -> blue ray visible
+        val prevAt45 = CadSnapAndCoordEngine.evaluatePolarTracking(
+            basePoint = basePt,
+            rawCursorPoint = basePt.polarOffset(50.0, 45.0),
+            snapConfig = snapCfg
+        )
+        assertNotNull(prevAt45)
+        assertEquals(45.0, prevAt45!!.activePolarSnapAngleDeg!!, 1e-3)
+        assertTrue(prevAt45.isPolarSnapRayVisibleForDisplay)
+
+        // At 43.5 deg raw (within 5° PolarSnap acquisition corridor, but cursor itself is at 43.5°, not on 45.0° within 0.01°): blue ray hidden until projected
+        val prevAt43_5 = CadSnapAndCoordEngine.evaluatePolarTracking(
+            basePoint = basePt,
+            rawCursorPoint = basePt.polarOffset(50.0, 43.5),
+            snapConfig = snapCfg
+        )
+        assertNotNull(prevAt43_5)
+        assertEquals(45.0, prevAt43_5!!.activePolarSnapAngleDeg!!, 1e-3)
+        assertFalse(prevAt43_5.isPolarSnapRayVisibleForDisplay)
+
+        // 4. V19 §14.3.1: Standalone Complete Circle (R = 181.10, Ø = 362.20)
+        //    - Sparse & Balanced: 1 Diameter (Ø362.20), 0 Radius, 0 Linear Horizontal/Vertical (no bounding box or half-radius 90.55!)
+        //    - Detailed: 1 Diameter (Ø362.20 at 38°) + 1 Radius (R181.10 at 142°), 0 Linear Horizontal/Vertical
+        val standaloneCircle = CadEntity.CircleEntity(
+            id = "standalone_circle",
+            center = Point2D(200.0, 200.0),
+            radius = 181.10
+        )
+        for (policy in listOf(QDimDensityPolicy.SPARSE, QDimDensityPolicy.BALANCED)) {
+            val (circleEntities, circleReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+                allEntities = listOf(standaloneCircle),
+                targetEntities = listOf(standaloneCircle),
+                density = policy
+            )
+            assertEquals(
+                com.example.cad.dimension.QDimShapeFamily.STANDALONE_CIRCLE,
+                circleReport.geometryClassification?.shapeFamily
+            )
+            val cDims = circleEntities.filterIsInstance<CadEntity.DimensionEntity>()
+            assertEquals("Expected exactly 1 Diameter dimension for standalone circle in $policy", 1, cDims.size)
+            assertEquals(DimensionType.DIAMETER, cDims.single().dimensionType)
+            assertEquals(362.20, cDims.single().measuredModelValue(), 1e-2)
+            assertTrue(cDims.none { it.dimensionType == DimensionType.LINEAR_HORIZONTAL || it.dimensionType == DimensionType.LINEAR_VERTICAL })
+        }
+
+        val (detailedCircleEntities, detailedCircleReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+            allEntities = listOf(standaloneCircle),
+            targetEntities = listOf(standaloneCircle),
+            density = QDimDensityPolicy.DETAILED
+        )
+        assertEquals(
+            com.example.cad.dimension.QDimShapeFamily.STANDALONE_CIRCLE,
+            detailedCircleReport.geometryClassification?.shapeFamily
+        )
+        val detailedCircleDims = detailedCircleEntities.filterIsInstance<CadEntity.DimensionEntity>()
+        assertEquals(2, detailedCircleDims.size)
+        assertEquals(1, detailedCircleDims.count { it.dimensionType == DimensionType.DIAMETER })
+        assertEquals(1, detailedCircleDims.count { it.dimensionType == DimensionType.RADIUS })
+        assertTrue(detailedCircleDims.none { it.dimensionType == DimensionType.LINEAR_HORIZONTAL || it.dimensionType == DimensionType.LINEAR_VERTICAL })
+
+        // 5. V19 §14.3.2: Concentric Circles -> Diameter callouts only, zero linear bounding-box or half-span dimensions
+        val concentricCircles = listOf(
+            CadEntity.CircleEntity(id = "cc1", center = Point2D(100.0, 100.0), radius = 20.0),
+            CadEntity.CircleEntity(id = "cc2", center = Point2D(100.0, 100.0), radius = 45.0)
+        )
+        val (concentricOut, concentricReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+            allEntities = concentricCircles,
+            targetEntities = concentricCircles,
+            density = QDimDensityPolicy.BALANCED
+        )
+        assertEquals(
+            com.example.cad.dimension.QDimShapeFamily.CONCENTRIC_CIRCLES,
+            concentricReport.geometryClassification?.shapeFamily
+        )
+        val concentricDims = concentricOut.filterIsInstance<CadEntity.DimensionEntity>()
+        assertEquals(2, concentricDims.size)
+        assertTrue(concentricDims.all { it.dimensionType == DimensionType.DIAMETER })
+
+        // 6. V19 §14.3.3: Standalone Partial Arc -> Radius in Sparse; Radius + Included Angle in Balanced/Detailed; zero linear bounding box
+        val partialArc = CadEntity.ArcEntity(
+            id = "arc_1",
+            center = Point2D(100.0, 100.0),
+            radius = 50.0,
+            startAngleDeg = 0.0,
+            sweepAngleDeg = 120.0
+        )
+        val (sparseArcOut, sparseArcReport) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+            allEntities = listOf(partialArc),
+            targetEntities = listOf(partialArc),
+            density = QDimDensityPolicy.SPARSE
+        )
+        assertEquals(
+            com.example.cad.dimension.QDimShapeFamily.PARTIAL_ARC,
+            sparseArcReport.geometryClassification?.shapeFamily
+        )
+        val sparseArcDims = sparseArcOut.filterIsInstance<CadEntity.DimensionEntity>()
+        assertEquals(1, sparseArcDims.size)
+        assertEquals(DimensionType.RADIUS, sparseArcDims.single().dimensionType)
+
+        val (balancedArcOut, _) = AutoDimensionEngine.generateQuickDimensionsWithAlignmentReport(
+            allEntities = listOf(partialArc),
+            targetEntities = listOf(partialArc),
+            density = QDimDensityPolicy.BALANCED
+        )
+        val balancedArcDims = balancedArcOut.filterIsInstance<CadEntity.DimensionEntity>()
+        assertEquals(2, balancedArcDims.size)
+        assertEquals(1, balancedArcDims.count { it.dimensionType == DimensionType.RADIUS })
+        assertEquals(1, balancedArcDims.count { it.dimensionType == DimensionType.ANGULAR })
+        assertTrue(balancedArcDims.none { it.dimensionType == DimensionType.LINEAR_HORIZONTAL || it.dimensionType == DimensionType.LINEAR_VERTICAL })
     }
 }
 

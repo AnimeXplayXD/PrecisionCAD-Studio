@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -102,14 +105,45 @@ enum class CardPeekDirection {
 }
 
 /**
- * Section 9.5–9.8 — Section-local card deck inactivity & transient reveal state machine.
+ * V19 §5.3 — Formal State Machine per Card Deck.
+ */
+enum class CardDeckPhase {
+    INACTIVE,
+    IDLE_WAIT,
+    EXCHANGE_ANIMATION,
+    POST_EXCHANGE_PEEK,
+    POST_EXCHANGE_RETRACT,
+    IDLE_PEEK,
+    IDLE_RETRACT
+}
+
+/**
+ * V19 §5.4 — Shape-Based Peek Direction Rule.
+ */
+enum class CardShapeClass {
+    RECTANGULAR,
+    SQUARE
+}
+
+fun classifyCardShape(widthPx: Float, heightPx: Float): CardShapeClass {
+    val ratio = widthPx / heightPx.coerceAtLeast(1f)
+    return if (ratio in 0.90f..1.10f) CardShapeClass.SQUARE else CardShapeClass.RECTANGULAR
+}
+
+fun peekDirectionForShape(shapeClass: CardShapeClass): CardPeekDirection = when (shapeClass) {
+    CardShapeClass.RECTANGULAR -> CardPeekDirection.ABOVE
+    CardShapeClass.SQUARE -> CardPeekDirection.SIDE
+}
+
+/**
+ * V19 §5.2–5.7 — Section-local card deck inactivity & transient reveal state machine.
  *
  * Each card deck owns its own independent instance. Events outside the deck never reset its timer.
  * - After a user-initiated card exchange, the new rear card remains slightly visible for
- *   [POST_EXCHANGE_REVEAL_MS] (2,400 ms) and then smoothly retracts completely behind the foreground card.
+ *   [POST_EXCHANGE_REVEAL_MS] (4,000 ms) and then smoothly retracts completely behind the foreground card.
  * - While eligible (parent screen/dialog open, visible, enabled, window resumed, not animating),
- *   an isolated [IDLE_PEEK_INTERVAL_MS] (75,000 ms) timer runs. When it expires, the rear card
- *   peeks subtly for [IDLE_PEEK_HOLD_MS] (1,000 ms) and then retracts completely without changing
+ *   an isolated [IDLE_PEEK_INTERVAL_MS] (60,000 ms) timer runs. When it expires, the rear card
+ *   peeks subtly for [IDLE_PEEK_HOLD_MS] (4,000 ms) and then retracts completely without changing
  *   any state or triggering any action.
  */
 @Stable
@@ -125,13 +159,14 @@ class CadDeckIdleTimerState(
         deckId: String = "command_deck",
         peekDirection: CardPeekDirection = CardPeekDirection.SIDE
     ) : this(deckId = deckId, peekDirection = peekDirection)
+
     companion object {
-        const val IDLE_PEEK_INTERVAL_MS = 75_000L
-        const val IDLE_PEEK_HOLD_MS = 1_000L
-        const val POST_EXCHANGE_REVEAL_MS = 2_400L
+        const val IDLE_PEEK_INTERVAL_MS = 60_000L
+        const val IDLE_PEEK_HOLD_MS = 4_000L
+        const val POST_EXCHANGE_REVEAL_MS = 4_000L
 
         /**
-         * Section 9.8 & 13.2 — Command Send/Cancel deck visibility rule:
+         * V19 §4.2 — Command Send/Cancel deck visibility rule:
          * CommandDeckVisible = KeyboardVisible OR CommandTextNotEmpty
          */
         fun isCommandDeckVisible(keyboardVisible: Boolean, commandText: String): Boolean {
@@ -143,13 +178,24 @@ class CadDeckIdleTimerState(
         }
 
         /**
-         * Normalizes any legacy binary status text ("ON", "OFF", "POLAR", "PSNAP", "REL SEG")
-         * to the authoritative V18 labels "ENABLE" and "DISABLE" (Section 9.3 & 12.1).
+         * Normalizes any binary status text ("ON", "OFF", "POLAR", "PSNAP", "REL SEG")
+         * to the authoritative labels "ENABLE" and "DISABLE" (V19 §7.1).
          */
         fun normalizeBinaryStateLabel(checked: Boolean, candidate: String? = null): String {
             if (candidate == "ENABLE" || candidate == "DISABLE") return candidate
             return if (checked) "ENABLE" else "DISABLE"
         }
+
+        fun classifyCardShape(widthPx: Float, heightPx: Float): CardShapeClass =
+            com.example.ui.components.classifyCardShape(widthPx, heightPx)
+
+        fun peekDirectionForShape(shapeClass: CardShapeClass): CardPeekDirection =
+            com.example.ui.components.peekDirectionForShape(shapeClass)
+
+        fun peekDirectionForShape(widthPx: Float, heightPx: Float): CardPeekDirection =
+            com.example.ui.components.peekDirectionForShape(
+                com.example.ui.components.classifyCardShape(widthPx, heightPx)
+            )
     }
 
     var isParentVisible: Boolean by mutableStateOf(true)
@@ -206,6 +252,16 @@ class CadDeckIdleTimerState(
         get() = (isPostExchangeRevealing || (isIdlePeeking && !isReducedMotionEnabled)) &&
             isParentVisible && isWindowResumed
 
+    val currentPhase: CardDeckPhase
+        get() = when {
+            !isParentVisible || !isDeckEnabled || !isWindowResumed -> CardDeckPhase.INACTIVE
+            isTransitionRunning -> CardDeckPhase.EXCHANGE_ANIMATION
+            isPostExchangeRevealing -> CardDeckPhase.POST_EXCHANGE_PEEK
+            isIdlePeeking && !isReducedMotionEnabled -> CardDeckPhase.IDLE_PEEK
+            else -> CardDeckPhase.IDLE_WAIT
+        }
+
+    val phase: CardDeckPhase get() = currentPhase
     val isRearCardVisible: Boolean get() = isRearCardPeeking
     val isRearCardRevealed: Boolean get() = isRearCardPeeking
     val isPostExchangeRevealActive: Boolean get() = isPostExchangeRevealing
@@ -213,6 +269,26 @@ class CadDeckIdleTimerState(
 
     val isRearCardConcealed: Boolean
         get() = !isRearCardPeeking
+
+    /**
+     * V19 §5.5 — Multi-Card Deck Rule (>2 Cards):
+     * During post-exchange reveal (4s) or idle peek (4s after 60s), ONLY the nearest rear card
+     * (depth == 1) peeks from the shape-appropriate edge. Deeper rear cards (depth >= 2) remain
+     * occluded behind the stack.
+     */
+    fun isRearCardVisibleForDepth(depth: Int): Boolean {
+        return depth == 1 && isRearCardPeeking
+    }
+
+    /**
+     * V19 §5.5 — Sequential deepest-first conceal delay when retracting a multi-card stack:
+     * Deeper rear cards conceal first (delay 0ms), while the nearest rear card (depth == 1)
+     * conceals after deeper rear cards when more than 2 cards exist.
+     */
+    fun sequentialConcealDelayMsForDepth(depth: Int, totalCards: Int): Int {
+        if (totalCards <= 2 || depth <= 0) return 0
+        return ((totalCards - 1 - depth).coerceAtLeast(0)) * 140
+    }
 
     fun updateEligibility(
         parentVisible: Boolean = this.isParentVisible,
@@ -229,7 +305,6 @@ class CadDeckIdleTimerState(
         isReducedMotionEnabled = reducedMotion
 
         if (!isEligibleForTimer) {
-            // Immediately cancel pending timer and idle peek when hidden/disabled/suspended (Section 9.6)
             elapsedIdleMs = 0L
             isIdlePeeking = false
             if (!parentVisible || !windowResumed) {
@@ -237,7 +312,7 @@ class CadDeckIdleTimerState(
                 elapsedPostExchangeMs = 0L
             }
         } else if (!wasEligible) {
-            // Start a fresh 75-second interval when becoming eligible again
+            // Start a fresh 60-second interval when becoming eligible again
             elapsedIdleMs = 0L
             isIdlePeeking = false
         }
@@ -261,12 +336,18 @@ class CadDeckIdleTimerState(
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun onCardExchanged(isCommandPromptOrDeck: Boolean = false) =
-        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
+        onDirectDeckInteraction(didExchangeCards = postExchangeRevealMs > 0L)
+
+    @Suppress("UNUSED_PARAMETER")
     fun onCardExchange(isCommandPromptOrDeck: Boolean = false) =
-        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
+        onDirectDeckInteraction(didExchangeCards = postExchangeRevealMs > 0L)
+
+    @Suppress("UNUSED_PARAMETER")
     fun onOrderExchanged(isCommandPromptOrDeck: Boolean = false) =
-        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
+        onDirectDeckInteraction(didExchangeCards = postExchangeRevealMs > 0L)
+
     fun onDirectInteraction() = onDirectDeckInteraction(didExchangeCards = false)
     fun onUserInteraction() = onDirectDeckInteraction(didExchangeCards = false)
     fun cancelAllVisualPeeks() = updateEligibility(parentVisible = false)
@@ -274,7 +355,7 @@ class CadDeckIdleTimerState(
     fun startOrReset() = updateEligibility(parentVisible = true, deckEnabled = true)
 
     /**
-     * Deterministic virtual clock step for unit tests (Section 9.9) and coroutine loop driver.
+     * Deterministic virtual clock step for unit tests (V19 §5) and coroutine loop driver.
      */
     fun advanceTimeBy(deltaMs: Long) {
         if (deltaMs <= 0L) return
@@ -290,10 +371,14 @@ class CadDeckIdleTimerState(
             if (elapsedPostExchangeMs >= postExchangeRevealMs) {
                 isPostExchangeRevealing = false
                 elapsedPostExchangeMs = 0L
+                // Restart fresh 60s idle wait after post-exchange reveal completes
+                elapsedIdleMs = 0L
+                isIdlePeeking = false
+                return
             }
         }
 
-        if (!isEligibleForTimer) {
+        if (!isEligibleForTimer || isPostExchangeRevealing) {
             elapsedIdleMs = 0L
             isIdlePeeking = false
             return
@@ -360,8 +445,8 @@ fun rememberCadDeckIdleTimerState(
         )
     }
 
-    // Sole timer driver for this CadDeckIdleTimerState instance (V18.3 §3.2):
-    // Drives post-exchange 2.4s reveal retraction and 75s section-local idle peek.
+    // Sole timer driver for this CadDeckIdleTimerState instance (V18.3 §3.2 & V19 §5.2):
+    // Drives post-exchange 4.0s reveal retraction and 60s section-local 4.0s idle peek.
     LaunchedEffect(
         state.isEligibleForTimer,
         state.isPostExchangeRevealing,
@@ -416,14 +501,15 @@ fun rememberCadDeckIdleTimerState(
 )
 
 /**
- * Section 9 & Section 12 — Application-Wide Binary Toggle-Card Component.
+ * V19 §5, §6 & §7 — Application-Wide Binary Toggle-Card Component.
  *
  * - **ENABLE state**: Green foreground card; grey DISABLE card concealed behind at rest,
- *   briefly revealed for 2.4s after a toggle and during 75s section-local idle peeks.
+ *   briefly revealed for 4.0s after a toggle and during 60s section-local 4.0s idle peeks.
  * - **DISABLE state**: Neutral grey foreground card; green ENABLE card concealed behind at rest.
- * - **Interaction**: Single tap exchanges the cards and toggles the authoritative Boolean once.
- *   No swipe gestures are attached; input is locked while the card-exchange animation is running.
- * - **State label**: Always `ENABLE` or `DISABLE` (never `ON`, `OFF`, `POLAR`, or `PSNAP`).
+ * - **Non-Duplicate State Rule (§7.3)**: When [showLabelText] is false or [label] duplicates
+ *   `"ENABLE"` / `"DISABLE"`, only a single state label (`ENABLE` or `DISABLE`) is rendered.
+ * - **OSNAP 3-Region Layout (§6.2)**: Left fixed `[END]` badge, middle `clipToBounds()` +
+ *   `basicMarquee()` viewport, right fixed single-state pill (`ENABLE` or `DISABLE`).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -438,12 +524,13 @@ fun CadBinaryToggleCard(
     compact: Boolean = false,
     fixedHeight: Dp? = null,
     useMarqueeLabel: Boolean = false,
+    showLabelText: Boolean = true,
     enabledStatusText: String = "ENABLE",
     disabledStatusText: String = "DISABLE",
     deckId: String? = null,
     testTag: String? = null
 ) {
-    val peekDirection = if (compact) CardPeekDirection.SIDE else CardPeekDirection.ABOVE
+    val peekDirection = CardPeekDirection.ABOVE
     val deckState = rememberCadDeckIdleTimerState(
         deckId = deckId ?: testTag ?: "binary_toggle_$label",
         peekDirection = peekDirection,
@@ -458,16 +545,8 @@ fun CadBinaryToggleCard(
     }
 
     val isPeeking = deckState.isRearCardPeeking || isAnimating
-    val targetOffsetX = when {
-        !isPeeking -> 0.dp
-        peekDirection == CardPeekDirection.SIDE -> if (checked) 4.dp else (-4).dp
-        else -> if (checked) 3.dp else (-3).dp
-    }
-    val targetOffsetY = when {
-        !isPeeking -> 0.dp
-        peekDirection == CardPeekDirection.ABOVE -> (-4).dp
-        else -> (-2).dp
-    }
+    val targetOffsetX = if (!isPeeking) 0.dp else if (checked) 3.dp else (-3).dp
+    val targetOffsetY = if (!isPeeking) 0.dp else (-4).dp
     val targetRearScale = if (isPeeking) 0.99f else 0.94f
 
     val peekOffsetX by animateDpAsState(
@@ -484,6 +563,11 @@ fun CadBinaryToggleCard(
         targetValue = targetRearScale,
         animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
         label = "RearScale"
+    )
+    val rearAlpha by animateFloatAsState(
+        targetValue = if (isPeeking) 0.85f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "RearAlpha"
     )
 
     val frontSurfaceColor by animateColorAsState(
@@ -526,17 +610,29 @@ fun CadBinaryToggleCard(
         checked = !checked,
         candidate = if (!checked) enabledStatusText else disabledStatusText
     )
+
+    // V19 §7.3: Suppress duplicate label when external row already provides the label or label duplicates ENABLE/DISABLE
+    val trimmedLabel = label.trim()
+    val effectiveShowLabel = showLabelText &&
+        trimmedLabel.isNotEmpty() &&
+        !trimmedLabel.equals(activeStatusLabel, ignoreCase = true) &&
+        !trimmedLabel.equals(oppositeStatusLabel, ignoreCase = true) &&
+        !trimmedLabel.equals("ENABLE", ignoreCase = true) &&
+        !trimmedLabel.equals("DISABLE", ignoreCase = true)
+
     val a11yDescription = buildString {
         if (!badgeText.isNullOrBlank()) append("[$badgeText] ")
-        append(label)
-        append(": ")
+        if (effectiveShowLabel) {
+            append(trimmedLabel)
+            append(": ")
+        }
         append(activeStatusLabel)
     }
     val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
 
     val rootModifier = modifier
         .let { if (testTag != null) it.testTag(testTag) else it }
-        .let { if (fixedHeight != null) it.height(fixedHeight) else it.heightIn(min = if (compact) 36.dp else 48.dp) }
+        .let { if (fixedHeight != null) it.height(fixedHeight) else it.heightIn(min = if (compact) 36.dp else 52.dp) }
         .alpha(contentAlpha)
         .semantics(mergeDescendants = true) {
             role = Role.Switch
@@ -558,12 +654,13 @@ fun CadBinaryToggleCard(
             modifier = rootModifier.padding(top = 4.dp, start = 2.dp, end = 2.dp),
             contentAlignment = Alignment.Center
         ) {
-            // Rear card — concealed behind foreground at rest, peeks transiently after toggle or on 75s idle timer
+            // Rear card — 100% concealed at rest (alpha = 0f), peeks from above for 4s after toggle or after 60s idle
             Surface(
                 modifier = Modifier
                     .matchParentSize()
                     .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                     .scale(rearScale)
+                    .alpha(rearAlpha)
                     .zIndex(0f),
                 color = rearSurfaceColor,
                 shape = shape,
@@ -587,25 +684,28 @@ fun CadBinaryToggleCard(
                             .size(6.dp)
                             .background(statusDotColor, CircleShape)
                     )
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 10.sp,
-                            fontWeight = if (checked) FontWeight.Bold else FontWeight.Medium
-                        ),
-                        color = if (checked) CadToggleEnabledText else CadToggleDisabledText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (effectiveShowLabel) {
+                        Text(
+                            text = trimmedLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.sp,
+                                fontWeight = if (checked) FontWeight.Bold else FontWeight.Medium
+                            ),
+                            color = if (checked) CadToggleEnabledText else CadToggleDisabledText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     Text(
                         text = activeStatusLabel,
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 8.5.sp,
+                            fontSize = if (effectiveShowLabel) 8.5.sp else 9.5.sp,
                             fontWeight = FontWeight.Bold
                         ),
                         color = if (checked) CadEmeraldCrossing else CadTextMuted,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -615,12 +715,13 @@ fun CadBinaryToggleCard(
             modifier = rootModifier.padding(top = 4.dp, end = 4.dp),
             contentAlignment = Alignment.CenterStart
         ) {
-            // Rear card — concealed behind foreground at rest, peeks transiently after toggle or on 75s idle timer
+            // Rear card — 100% concealed behind foreground at rest (alpha = 0f), peeks from above for 4s
             Surface(
                 modifier = Modifier
                     .matchParentSize()
                     .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                     .scale(rearScale)
+                    .alpha(rearAlpha)
                     .zIndex(0f),
                 color = rearSurfaceColor,
                 shape = shape,
@@ -641,133 +742,132 @@ fun CadBinaryToggleCard(
                         .fillMaxWidth()
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = if (effectiveShowLabel || !badgeText.isNullOrBlank()) {
+                        Arrangement.SpaceBetween
+                    } else {
+                        Arrangement.Center
+                    }
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        // Region 1: Fixed short identifier on the left (e.g. [END])
-                        if (!badgeText.isNullOrBlank()) {
-                            Surface(
-                                color = if (checked) CadEmeraldCrossing.copy(alpha = 0.22f) else CadPanelElevated,
-                                shape = RoundedCornerShape(4.dp),
-                                border = BorderStroke(
-                                    0.8.dp,
-                                    if (checked) CadToggleEnabledBorder else CadBorderHairline
-                                )
-                            ) {
-                                Text(
-                                    text = if (badgeText.startsWith("[")) badgeText else "[$badgeText]",
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 9.5.sp
-                                    ),
-                                    color = if (checked) CadToggleEnabledText else CadTextMuted,
-                                    maxLines = 1
-                                )
+                    if (effectiveShowLabel || !badgeText.isNullOrBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .widthIn(min = 0.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Region 1: Fixed-width short identifier on the left (e.g. [END])
+                            if (!badgeText.isNullOrBlank()) {
+                                Surface(
+                                    modifier = Modifier.widthIn(min = 38.dp),
+                                    color = if (checked) CadEmeraldCrossing.copy(alpha = 0.22f) else CadPanelElevated,
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = BorderStroke(
+                                        0.8.dp,
+                                        if (checked) CadToggleEnabledBorder else CadBorderHairline
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (badgeText.startsWith("[")) badgeText else "[$badgeText]",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 9.5.sp
+                                            ),
+                                            color = if (checked) CadToggleEnabledText else CadTextMuted,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Region 2: Clipped middle marquee viewport (V19 §6.2 & §6.3)
+                            if (effectiveShowLabel) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .widthIn(min = 0.dp)
+                                        .padding(horizontal = 2.dp)
+                                        .clipToBounds()
+                                ) {
+                                    Text(
+                                        text = trimmedLabel,
+                                        modifier = if (useMarqueeLabel) {
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .basicMarquee(
+                                                    iterations = Int.MAX_VALUE,
+                                                    initialDelayMillis = 0,
+                                                    repeatDelayMillis = 0,
+                                                    velocity = 26.dp
+                                                )
+                                        } else {
+                                            Modifier.fillMaxWidth()
+                                        },
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 11.5.sp
+                                        ),
+                                        color = if (checked) CadTextPrimary else CadTextSecondary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = if (useMarqueeLabel) TextOverflow.Clip else TextOverflow.Ellipsis
+                                    )
+                                    if (!subtitle.isNullOrBlank()) {
+                                        Text(
+                                            text = subtitle,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                            color = if (checked) CadToggleEnabledText.copy(alpha = 0.8f) else CadTextMuted,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
                         }
 
-                        // Region 2: Full descriptive name (uses horizontal marquee when useMarqueeLabel is true)
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = label,
-                                modifier = if (useMarqueeLabel) {
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .basicMarquee(
-                                            iterations = Int.MAX_VALUE,
-                                            initialDelayMillis = 1200,
-                                            repeatDelayMillis = 1400
-                                        )
-                                } else {
-                                    Modifier.fillMaxWidth()
-                                },
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontWeight = FontWeight.SemiBold
-                                ),
-                                color = if (checked) CadTextPrimary else CadTextSecondary,
-                                maxLines = 1,
-                                overflow = if (useMarqueeLabel) TextOverflow.Clip else TextOverflow.Ellipsis
-                            )
-                            if (!subtitle.isNullOrBlank()) {
-                                Text(
-                                    text = subtitle,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                    color = if (checked) CadToggleEnabledText.copy(alpha = 0.8f) else CadTextMuted,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // Region 3: Fixed ENABLE/DISABLE state pill on the right (conceals rear state at rest)
-                    Box(contentAlignment = Alignment.Center) {
-                        Surface(
-                            modifier = Modifier
-                                .offset(
-                                    x = if (isPeeking) (if (checked) 2.5.dp else (-2.5).dp) else 0.dp,
-                                    y = if (isPeeking) (-2.5).dp else 0.dp
-                                )
-                                .scale(if (isPeeking) 0.98f else 0.90f)
-                                .zIndex(0f),
-                            color = if (checked) CadToggleDisabledSurface else CadToggleEnabledSurface,
-                            shape = RoundedCornerShape(5.dp),
-                            border = BorderStroke(
-                                0.8.dp,
-                                if (checked) CadToggleDisabledBorder else CadToggleEnabledBorder.copy(alpha = 0.75f)
-                            )
+                    // Region 3: Fixed single-state pill on the right (shows ONLY active front state)
+                    Surface(
+                        modifier = Modifier
+                            .widthIn(min = 60.dp)
+                            .zIndex(1f),
+                        color = if (checked) CadEmeraldCrossing.copy(alpha = 0.24f) else CadSurfaceCard,
+                        shape = RoundedCornerShape(5.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (checked) CadToggleEnabledBorder else CadBorderStrong
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
                         ) {
-                            Text(
-                                text = oppositeStatusLabel,
+                            Box(
                                 modifier = Modifier
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    .alpha(if (isPeeking) 0.35f else 0f),
+                                    .size(5.dp)
+                                    .background(statusDotColor, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = activeStatusLabel,
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontFamily = FontFamily.Monospace,
-                                    fontSize = 8.5.sp,
+                                    fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold
                                 ),
-                                color = CadTextMuted
+                                color = if (checked) CadToggleEnabledText else CadToggleDisabledText,
+                                maxLines = 1,
+                                softWrap = false
                             )
-                        }
-                        Surface(
-                            modifier = Modifier.zIndex(1f),
-                            color = if (checked) CadEmeraldCrossing.copy(alpha = 0.24f) else CadSurfaceCard,
-                            shape = RoundedCornerShape(5.dp),
-                            border = BorderStroke(
-                                1.dp,
-                                if (checked) CadToggleEnabledBorder else CadBorderStrong
-                            )
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(5.dp)
-                                        .background(statusDotColor, CircleShape)
-                                )
-                                Text(
-                                    text = activeStatusLabel,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold
-                                    ),
-                                    color = if (checked) CadToggleEnabledText else CadToggleDisabledText,
-                                    maxLines = 1
-                                )
-                            }
                         }
                     }
                 }
@@ -789,6 +889,7 @@ fun CadBinaryToggleCard(
     compact: Boolean = false,
     fixedHeight: Dp? = null,
     useMarqueeLabel: Boolean = false,
+    showLabelText: Boolean = true,
     deckId: String? = null,
     testTag: String? = null
 ) {
@@ -803,6 +904,7 @@ fun CadBinaryToggleCard(
         compact = compact,
         fixedHeight = fixedHeight,
         useMarqueeLabel = useMarqueeLabel,
+        showLabelText = showLabelText,
         enabledStatusText = enabledStatusText,
         disabledStatusText = disabledStatusText,
         deckId = deckId,
@@ -837,8 +939,8 @@ fun <T> CadHorizontalOptionCardDeck(
         optionLabel = { it.title },
         optionBadge = { opt ->
             val idx = options.indexOf(opt).coerceAtLeast(0)
-            if (opt.shortBadge.isNotBlank()) "${opt.shortBadge} • ${idx + 1}/${options.size}"
-            else "${idx + 1} / ${options.size} • Swipe ⇄"
+            if (opt.shortBadge.isNotBlank()) "${opt.shortBadge} • %02d / %02d".format(idx + 1, options.size)
+            else "%02d / %02d".format(idx + 1, options.size)
         },
         modifier = modifier,
         testTag = testTag
@@ -846,13 +948,15 @@ fun <T> CadHorizontalOptionCardDeck(
 }
 
 /**
- * Section 10.3 & 10.4 — Horizontal Card-Based Multi-Option Selector for QDIM.
+ * V19 §8.1, §8.2 & §10.2 — Horizontal Card-Based Multi-Option Selector.
  *
  * - Current option is the centered foreground card.
- * - Rear card is completely concealed behind it at rest, briefly revealed for 2.4s after a change
- *   and during 75s section-local idle peeks.
+ * - Rear card is completely concealed behind it at rest, briefly revealed from above for 4.0s
+ *   after a change and during 60s section-local 4.0s idle peeks.
  * - Swipe left moves forward one option; swipe right moves backward one option.
- * - Vertical drag is NOT consumed by this selector so parent dialog scrolling works without conflict.
+ * - No static left/right arrow buttons (`‹` / `›`) on the card face; instead, a subtle
+ *   swipe-direction-aware chevron trail (`«` or `»`) animates inside the card background
+ *   matching the user's horizontal drag/swipe direction and fades to 0 at rest.
  */
 @Composable
 fun <T> CadHorizontalOptionCardDeck(
@@ -874,6 +978,19 @@ fun <T> CadHorizontalOptionCardDeck(
         isVisible = true,
         isEnabled = options.size > 1
     )
+
+    // Swipe-direction background chevron trail state (-1 = right-to-left «, +1 = left-to-right », 0 = idle)
+    var swipeDirectionSign by remember { mutableIntStateOf(0) }
+    var swipeTrailTriggerId by remember { mutableIntStateOf(0) }
+    var activeDragFraction by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(swipeTrailTriggerId) {
+        if (swipeTrailTriggerId > 0) {
+            delay(320L)
+            activeDragFraction = 0f
+            swipeDirectionSign = 0
+        }
+    }
 
     val transition = updateTransition(targetState = currentIndex, label = "HorizontalOptionDeck_$deckId")
     val isAnimating = transition.currentState != transition.targetState
@@ -897,6 +1014,25 @@ fun <T> CadHorizontalOptionCardDeck(
         animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
         label = "OptionDeckRearScale"
     )
+    val rearAlpha by animateFloatAsState(
+        targetValue = if (isPeeking) 0.85f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "OptionDeckRearAlpha"
+    )
+    val trailAlpha by animateFloatAsState(
+        targetValue = if (swipeDirectionSign != 0) 0.22f else 0f,
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+        label = "OptionDeckSwipeTrailAlpha"
+    )
+    val trailShiftDp by animateDpAsState(
+        targetValue = when (swipeDirectionSign) {
+            -1 -> (-12).dp
+            1 -> 12.dp
+            else -> 0.dp
+        },
+        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+        label = "OptionDeckSwipeTrailShift"
+    )
 
     val nextIndex = (currentIndex + 1) % options.size
     val prevIndex = if (currentIndex - 1 < 0) options.lastIndex else currentIndex - 1
@@ -916,20 +1052,36 @@ fun <T> CadHorizontalOptionCardDeck(
                         dragAccumX = 0f
                         changedInGesture = false
                     },
+                    onDragEnd = {
+                        if (!changedInGesture) {
+                            activeDragFraction = 0f
+                            swipeDirectionSign = 0
+                        }
+                    },
+                    onDragCancel = {
+                        activeDragFraction = 0f
+                        swipeDirectionSign = 0
+                    },
                     onHorizontalDrag = { change, dragAmount ->
                         if (isAnimating || changedInGesture || options.size <= 1) return@detectHorizontalDragGestures
                         dragAccumX += dragAmount
                         val thresholdPx = 28.dp.toPx()
+                        swipeDirectionSign = if (dragAccumX < 0f) -1 else if (dragAccumX > 0f) 1 else 0
+                        activeDragFraction = (kotlin.math.abs(dragAccumX) / thresholdPx).coerceIn(0f, 1f)
                         if (dragAccumX <= -thresholdPx) {
-                            // Swipe left -> forward one option
+                            // Swipe right-to-left -> forward one option
                             change.consume()
                             changedInGesture = true
+                            swipeDirectionSign = -1
+                            swipeTrailTriggerId++
                             deckState.onDirectDeckInteraction(didExchangeCards = true)
                             onOptionSelected(options[nextIndex])
                         } else if (dragAccumX >= thresholdPx) {
-                            // Swipe right -> backward one option
+                            // Swipe left-to-right -> backward one option
                             change.consume()
                             changedInGesture = true
+                            swipeDirectionSign = 1
+                            swipeTrailTriggerId++
                             deckState.onDirectDeckInteraction(didExchangeCards = true)
                             onOptionSelected(options[prevIndex])
                         }
@@ -948,12 +1100,13 @@ fun <T> CadHorizontalOptionCardDeck(
             },
         contentAlignment = Alignment.Center
     ) {
-        // Rear card (next option in deck, completely concealed behind foreground card at rest)
+        // Nearest rear card (depth == 1) — completely concealed at rest (alpha = 0f), peeks from above for 4s
         Surface(
             modifier = Modifier
                 .fillMaxSize()
                 .offset { IntOffset(peekOffsetX.roundToPx(), peekOffsetY.roundToPx()) }
                 .scale(rearScale)
+                .alpha(rearAlpha)
                 .zIndex(0f),
             color = CadToggleDisabledSurface,
             shape = RoundedCornerShape(8.dp),
@@ -987,32 +1140,28 @@ fun <T> CadHorizontalOptionCardDeck(
             shape = RoundedCornerShape(8.dp),
             border = BorderStroke(1.4.dp, CadToggleEnabledBorder)
         ) {
-            Row(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center
             ) {
-                // Step backward button (also allows deterministic tap navigation in tests/accessibility)
-                Surface(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .let { if (testTag != null) it.testTag("${testTag}_prev") else it }
-                        .clickable(enabled = !isAnimating && options.size > 1) {
-                            deckState.onDirectDeckInteraction(didExchangeCards = true)
-                            onOptionSelected(options[prevIndex])
-                        },
-                    color = CadPanelElevated,
-                    shape = RoundedCornerShape(6.dp),
-                    border = BorderStroke(0.8.dp, CadBorderStrong)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
+                // Background swipe-direction chevron trail (V19 §8.2) — visible only during/after swipe
+                if (trailAlpha > 0.01f) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .offset { IntOffset(trailShiftDp.roundToPx(), 0) }
+                            .alpha(trailAlpha),
+                        horizontalArrangement = if (swipeDirectionSign < 0) Arrangement.End else Arrangement.Start,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = "‹",
+                            text = if (swipeDirectionSign < 0) "«  «  «" else "»  »  »",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
                             ),
                             color = CadCyanPrimary
                         )
@@ -1020,9 +1169,7 @@ fun <T> CadHorizontalOptionCardDeck(
                 }
 
                 Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 10.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
@@ -1037,38 +1184,15 @@ fun <T> CadHorizontalOptionCardDeck(
                     )
                     val badge = optionBadge?.invoke(selectedOption)
                     Text(
-                        text = badge ?: "${currentIndex + 1} / ${options.size} • Swipe ⇄",
+                        text = badge ?: "%02d / %02d".format(currentIndex + 1, options.size),
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 9.5.sp
                         ),
-                        color = CadEmeraldCrossing
+                        color = CadEmeraldCrossing,
+                        maxLines = 1,
+                        softWrap = false
                     )
-                }
-
-                // Step forward button
-                Surface(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .let { if (testTag != null) it.testTag("${testTag}_next") else it }
-                        .clickable(enabled = !isAnimating && options.size > 1) {
-                            deckState.onDirectDeckInteraction(didExchangeCards = true)
-                            onOptionSelected(options[nextIndex])
-                        },
-                    color = CadPanelElevated,
-                    shape = RoundedCornerShape(6.dp),
-                    border = BorderStroke(0.8.dp, CadBorderStrong)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "›",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            color = CadCyanPrimary
-                        )
-                    }
                 }
             }
         }

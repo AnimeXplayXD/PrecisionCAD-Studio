@@ -790,7 +790,273 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         emitTransientNotification(msg, NotificationCategory.INFO)
     }
 
-    // --- Cursor Controller, Automatic Boundary Tracking (Section 17) & Coordinate Input ---
+    // --- Cursor Controller, Touchpad Raw-Drag / Release Alignment (V19 §11) & Coordinate Preview (V19 §12) ---
+
+    private data class CoordinatePreviewSessionSnapshot(
+        val initialRawCursor: Point2D,
+        val initialSnappedCursor: Point2D,
+        val initialSnapCandidate: SnapCandidate?,
+        val initialPolarPreview: PolarTrackingPreviewState?,
+        val initialViewport: ViewportTransform,
+        val initialSelectionBoxDrag: SelectionBoxDragState?,
+        val latestPreviewCursor: Point2D
+    )
+
+    private var touchpadStartPhaseX: Double = 0.0
+    private var touchpadStartPhaseY: Double = 0.0
+    private var isTouchpadDragging: Boolean = false
+    private var coordinatePreviewSnapshot: CoordinatePreviewSessionSnapshot? = null
+
+    /**
+     * V19 §11.2 & §11.4 — Captures the cursor's current step-lattice phase at the start of a
+     * Relative Touchpad drag gesture so intentional non-integer coordinate phases are preserved.
+     */
+    fun beginTouchpadCursorGesture() {
+        val st = _uiState.value
+        val displayToStorage = st.displayUnit.toMillimetersFactor / st.storageUnit.toMillimetersFactor
+        val stepStorage = (st.controllerConfig.stepIncrement * displayToStorage).coerceAtLeast(1e-6)
+        touchpadStartPhaseX = CadSnapAndCoordEngine.captureStepPhase(st.snappedCursorModelPos.x, stepStorage)
+        touchpadStartPhaseY = CadSnapAndCoordEngine.captureStepPhase(st.snappedCursorModelPos.y, stepStorage)
+        isTouchpadDragging = true
+    }
+
+    /**
+     * V19 §11.2 — Raw Continuous Motion During Touchpad Drag:
+     * Accumulates unquantized model-space delta without step quantization, grid snap, or OSNAP jumps.
+     */
+    fun moveTouchpadCursorRaw(dxModel: Double, dyModel: Double) {
+        if (!isTouchpadDragging) {
+            beginTouchpadCursorGesture()
+        }
+        val st = _uiState.value
+        val newRaw = Point2D(
+            x = (st.rawCursorModelPos.x + dxModel).coerceIn(-50000.0, 50000.0),
+            y = (st.rawCursorModelPos.y + dyModel).coerceIn(-50000.0, 50000.0)
+        )
+        val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
+        val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = newRaw,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg,
+            effectiveCursorPoint = newRaw
+        )
+        val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+            cursorModelPos = newRaw,
+            usableRect = st.usableViewportRect,
+            referencePoint = refPt,
+            minSafeMarginPx = 32f
+        )
+        val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = newRaw)
+        _uiState.update {
+            it.copy(
+                rawCursorModelPos = newRaw,
+                snappedCursorModelPos = newRaw,
+                activeSnapCandidate = null,
+                polarPreview = polarPreview,
+                viewport = trackedViewport,
+                selectionBoxDrag = updatedSelectionBox
+            )
+        }
+    }
+
+    /**
+     * V19 §11.3 & §11.6 — Single Release Alignment on Touchpad Pointer Up:
+     * When [cancelled] is true (e.g. second pointer pressed or gesture cancelled), leaves the cursor
+     * at its current raw coordinate without release snapping.
+     * When [cancelled] is false, resolves once with priority:
+     * 1. Active OSNAP candidate within aperture
+     * 2. Active PolarSnap / ORTHO projection
+     * 3. Phase-preserving controller step lattice (`alignCoordinateToStepPhase`)
+     */
+    fun finishTouchpadCursorGesture(cancelled: Boolean = false) {
+        isTouchpadDragging = false
+        if (cancelled) return
+
+        val st = _uiState.value
+        val rawPt = st.rawCursorModelPos
+        val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
+        val effectiveGridInterval = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseGridInterval = st.gridSnapConfig.gridSnapInterval,
+            currentPixelsPerModelUnit = st.viewport.pixelsPerModelUnit.toDouble(),
+            referencePixelsPerModelUnit = st.referencePixelsPerModelUnit,
+            previousEffectiveInterval = st.effectiveGridSnapInterval
+        )
+
+        // Check OSNAP and PolarSnap/ORTHO first (with gridSnap disabled so step lattice phase is preserved unless gridSnap overrides)
+        val (snapWithoutGrid, osnapCandidate) = CadSnapAndCoordEngine.resolveCursorSnap(
+            rawModelCursor = rawPt,
+            referencePoint = refPt,
+            entities = st.entities,
+            snapConfig = st.gridSnapConfig.copy(gridSnapEnabled = false),
+            viewport = st.viewport,
+            previousReferencePoint = prevRefPt,
+            usableViewportRect = st.usableViewportRect,
+            referencePixelsPerModelUnit = st.referencePixelsPerModelUnit,
+            previousEffectiveGridInterval = effectiveGridInterval,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
+        )
+
+        val displayToStorage = st.displayUnit.toMillimetersFactor / st.storageUnit.toMillimetersFactor
+        val stepStorage = (st.controllerConfig.stepIncrement * displayToStorage).coerceAtLeast(1e-6)
+
+        val finalTarget = when {
+            osnapCandidate != null -> osnapCandidate.point
+            st.gridSnapConfig.orthoEnabled && refPt != null -> snapWithoutGrid
+            st.gridSnapConfig.polarSnapEnabled && snapWithoutGrid != rawPt -> snapWithoutGrid
+            else -> Point2D(
+                x = CadSnapAndCoordEngine.alignCoordinateToStepPhase(rawPt.x, touchpadStartPhaseX, stepStorage),
+                y = CadSnapAndCoordEngine.alignCoordinateToStepPhase(rawPt.y, touchpadStartPhaseY, stepStorage)
+            )
+        }
+
+        val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = rawPt,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg,
+            effectiveCursorPoint = finalTarget
+        )
+        val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+            cursorModelPos = finalTarget,
+            usableRect = st.usableViewportRect,
+            referencePoint = refPt,
+            minSafeMarginPx = 32f
+        )
+        val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = finalTarget)
+        _uiState.update {
+            it.copy(
+                rawCursorModelPos = finalTarget,
+                snappedCursorModelPos = finalTarget,
+                activeSnapCandidate = osnapCandidate,
+                polarPreview = polarPreview,
+                viewport = trackedViewport,
+                effectiveGridSnapInterval = effectiveGridInterval,
+                selectionBoxDrag = updatedSelectionBox
+            )
+        }
+    }
+
+    /**
+     * V19 §12.5 — Begins a reversible Direct Coordinate Preview session, snapshotting the exact
+     * pre-dialog cursor, snap, polar preview, selection-box, and viewport state.
+     */
+    fun beginCoordinatePreviewSession() {
+        if (coordinatePreviewSnapshot != null) return
+        val st = _uiState.value
+        coordinatePreviewSnapshot = CoordinatePreviewSessionSnapshot(
+            initialRawCursor = st.rawCursorModelPos,
+            initialSnappedCursor = st.snappedCursorModelPos,
+            initialSnapCandidate = st.activeSnapCandidate,
+            initialPolarPreview = st.polarPreview,
+            initialViewport = st.viewport,
+            initialSelectionBoxDrag = st.selectionBoxDrag,
+            latestPreviewCursor = st.snappedCursorModelPos
+        )
+    }
+
+    /**
+     * V19 §12.5 & §12.7 — Stage 1 -> Stage 2 (`MOVE CURSOR`) and Live Preview Updates in Stage 2:
+     * Resolves [rawText] in display units and moves the live cursor and rubber-band preview to the
+     * target coordinate without picking a command point or recording an undo snapshot.
+     */
+    fun previewCoordinateExpression(rawText: String): Boolean {
+        if (coordinatePreviewSnapshot == null) {
+            beginCoordinatePreviewSession()
+        }
+        val snap = coordinatePreviewSnapshot ?: return false
+        val st = _uiState.value
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) return false
+
+        val displayToStorage = st.displayUnit.toMillimetersFactor / st.storageUnit.toMillimetersFactor
+        val refPt = st.commandStepPoints.lastOrNull()
+        val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
+
+        val parsedDisplayPt = CadSnapAndCoordEngine.parseCoordinateInput(
+            rawInput = trimmed,
+            referencePoint = refPt?.let { Point2D(it.x / displayToStorage, it.y / displayToStorage) },
+            currentCursor = Point2D(
+                snap.initialSnappedCursor.x / displayToStorage,
+                snap.initialSnappedCursor.y / displayToStorage
+            ),
+            orthoEnabled = st.gridSnapConfig.orthoEnabled
+        ) ?: return false
+
+        val modelPt = Point2D(
+            x = parsedDisplayPt.x * displayToStorage,
+            y = parsedDisplayPt.y * displayToStorage
+        )
+        coordinatePreviewSnapshot = snap.copy(latestPreviewCursor = modelPt)
+
+        val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = refPt,
+            rawCursorPoint = modelPt,
+            snapConfig = st.gridSnapConfig,
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg,
+            effectiveCursorPoint = modelPt
+        )
+        val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
+            cursorModelPos = modelPt,
+            usableRect = st.usableViewportRect,
+            referencePoint = refPt,
+            minSafeMarginPx = 32f
+        )
+        val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = modelPt)
+        _uiState.update {
+            it.copy(
+                rawCursorModelPos = modelPt,
+                snappedCursorModelPos = modelPt,
+                activeSnapCandidate = null,
+                polarPreview = polarPreview,
+                viewport = trackedViewport,
+                selectionBoxDrag = updatedSelectionBox
+            )
+        }
+        return true
+    }
+
+    /**
+     * V19 §12.7 — Stage 2 `PICK`:
+     * Commits the already-previewed coordinate directly once via [handlePointPick] without
+     * re-parsing or re-snapping, keeping the preview viewport and closing the session.
+     */
+    fun commitCoordinatePreviewPick(fallbackRawExpression: String? = null): Boolean {
+        if (coordinatePreviewSnapshot == null && !fallbackRawExpression.isNullOrBlank()) {
+            if (!previewCoordinateExpression(fallbackRawExpression)) return false
+        } else if (!fallbackRawExpression.isNullOrBlank()) {
+            previewCoordinateExpression(fallbackRawExpression)
+        }
+        val targetPt = coordinatePreviewSnapshot?.latestPreviewCursor ?: _uiState.value.snappedCursorModelPos
+        coordinatePreviewSnapshot = null
+        handlePointPick(targetPt)
+        return true
+    }
+
+    /**
+     * V19 §12.6 — `CANCEL` / Dismiss Rollback:
+     * Restores the exact pre-dialog cursor position, snap state, polar preview, selection-box drag,
+     * and viewport pan/zoom.
+     */
+    fun cancelCoordinatePreviewSession() {
+        val snap = coordinatePreviewSnapshot ?: return
+        coordinatePreviewSnapshot = null
+        _uiState.update {
+            it.copy(
+                rawCursorModelPos = snap.initialRawCursor,
+                snappedCursorModelPos = snap.initialSnappedCursor,
+                activeSnapCandidate = snap.initialSnapCandidate,
+                polarPreview = snap.initialPolarPreview,
+                viewport = snap.initialViewport,
+                selectionBoxDrag = snap.initialSelectionBoxDrag
+            )
+        }
+    }
 
     fun moveCursorByDelta(dxModel: Double, dyModel: Double) {
         val st = _uiState.value
@@ -822,7 +1088,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             rawCursorPoint = target,
             snapConfig = st.gridSnapConfig,
             previousBasePoint = prevRefPt,
-            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg,
+            effectiveCursorPoint = target
         )
         val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = target)
         _uiState.update {
@@ -864,7 +1131,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             rawCursorPoint = newRawModel,
             snapConfig = st.gridSnapConfig,
             previousBasePoint = prevRefPt,
-            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg,
+            effectiveCursorPoint = snapped
         )
         // Section 17: Automatically pan/adjust viewport so the cursor never disappears off-screen
         val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(

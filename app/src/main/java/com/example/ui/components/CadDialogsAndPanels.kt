@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -7,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -40,6 +43,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
@@ -80,6 +84,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
@@ -155,6 +160,11 @@ fun UnitsAndPrecisionDialog(
     onApplyUnitAndPrecision: (targetUnit: CadUnit, mode: UnitChangeMode, newPrecision: PrecisionFormatConfig) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // V19 §9.2: Hoist ScrollState outside AlertDialog body slot so selecting units, modes,
+    // decimal places, or toggle switches never resets or shifts scroll position.
+    val unitsDialogScrollState = rememberScrollState()
+    val unitsChipScrollState = rememberScrollState()
+
     var selectedUnit by rememberSaveable(currentDisplayUnit) { mutableStateOf(currentDisplayUnit) }
     var selectedMode by rememberSaveable(currentUnitChangeMode) { mutableStateOf(currentUnitChangeMode) }
     var linearDecimals by rememberSaveable(currentPrecision.linearDecimals) { mutableIntStateOf(currentPrecision.linearDecimals) }
@@ -183,7 +193,8 @@ fun UnitsAndPrecisionDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(unitsDialogScrollState)
+                    .testTag("units_dialog_scroll_column"),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
@@ -194,40 +205,47 @@ fun UnitsAndPrecisionDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                        .horizontalScroll(unitsChipScrollState),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     CadUnit.entries.forEach { unit ->
-                        val isSel = selectedUnit == unit
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSel) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
-                                .border(
-                                    if (isSel) 1.5.dp else 1.dp,
-                                    if (isSel) CadCyanPrimary else CadBorderHairline,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable { selectedUnit = unit }
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                                .testTag("unit_option_${unit.symbol}"),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            if (isSel) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = "Selected Unit",
-                                    tint = CadCyanPrimary,
-                                    modifier = Modifier.size(14.dp)
+                        key(unit.name) {
+                            val isSel = selectedUnit == unit
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSel) CadCyanPrimary.copy(alpha = 0.22f) else CadPanelElevated)
+                                    .border(
+                                        if (isSel) 1.5.dp else 1.dp,
+                                        if (isSel) CadCyanPrimary else CadBorderHairline,
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { selectedUnit = unit }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("unit_option_${unit.symbol}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier.size(14.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isSel) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Selected Unit",
+                                            tint = CadCyanPrimary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = unit.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (isSel) CadCyanPrimary else CadTextPrimary,
+                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
                                 )
                             }
-                            Text(
-                                text = unit.label,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isSel) CadCyanPrimary else CadTextPrimary,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
-                            )
                         }
                     }
                 }
@@ -240,78 +258,86 @@ fun UnitsAndPrecisionDialog(
                 )
 
                 UnitChangeMode.entries.forEach { mode ->
-                    val isSelected = selectedMode == mode
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                if (isSelected) CadAmberSnap.copy(alpha = 0.16f)
-                                else CadPanelElevated.copy(alpha = 0.5f)
-                            )
-                            .border(
-                                if (isSelected) 1.5.dp else 1.dp,
-                                if (isSelected) CadAmberSnap else CadBorderHairline,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .clickable { selectedMode = mode }
-                            .padding(10.dp)
-                            .testTag("unit_mode_${mode.name}"),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        RadioButton(
-                            selected = isSelected,
-                            onClick = { selectedMode = mode }
-                        )
-                        Column(
+                    key(mode.name) {
+                        val isSelected = selectedMode == mode
+                        Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(start = 6.dp),
-                            verticalArrangement = Arrangement.spacedBy(3.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = mode.title,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = if (isSelected) CadAmberSnap else CadTextPrimary,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    modifier = Modifier.weight(1f)
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (isSelected) CadAmberSnap.copy(alpha = 0.16f)
+                                    else CadPanelElevated.copy(alpha = 0.5f)
                                 )
-                                if (isSelected) {
-                                    Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(CadEmeraldCrossing.copy(alpha = 0.22f))
-                                            .border(1.dp, CadEmeraldCrossing, RoundedCornerShape(4.dp))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                            .testTag("unit_mode_selected_badge_${mode.name}"),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                .border(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) CadAmberSnap else CadBorderHairline,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { selectedMode = mode }
+                                .padding(10.dp)
+                                .testTag("unit_mode_${mode.name}"),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { selectedMode = mode }
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = mode.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = if (isSelected) CadAmberSnap else CadTextPrimary,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    // V19 §9.2: Fixed-width badge slot prevents any row height or scroll shift
+                                    Box(
+                                        modifier = Modifier.width(86.dp),
+                                        contentAlignment = Alignment.CenterEnd
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = "Active Mode",
-                                            tint = CadEmeraldCrossing,
-                                            modifier = Modifier.size(12.dp)
-                                        )
-                                        Text(
-                                            text = "SELECTED",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = CadEmeraldCrossing,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        if (isSelected) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(CadEmeraldCrossing.copy(alpha = 0.22f))
+                                                    .border(1.dp, CadEmeraldCrossing, RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    .testTag("unit_mode_selected_badge_${mode.name}"),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.CheckCircle,
+                                                    contentDescription = "Active Mode",
+                                                    tint = CadEmeraldCrossing,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Text(
+                                                    text = "SELECTED",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = CadEmeraldCrossing,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
                                     }
                                 }
+                                Text(
+                                    text = mode.explanation,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = CadTextSecondary
+                                )
                             }
-                            Text(
-                                text = mode.explanation,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = CadTextSecondary
-                            )
                         }
                     }
                 }
@@ -359,6 +385,7 @@ fun UnitsAndPrecisionDialog(
                         enabled = showSuffix,
                         onToggle = { showSuffix = it },
                         label = "SUFFIX",
+                        showLabelText = false,
                         testTag = "unit_show_suffix_toggle",
                         compact = true
                     )
@@ -378,6 +405,7 @@ fun UnitsAndPrecisionDialog(
                         enabled = suppressTrailing,
                         onToggle = { suppressTrailing = it },
                         label = "TRIM 0S",
+                        showLabelText = false,
                         testTag = "unit_suppress_trailing_toggle",
                         compact = true
                     )
@@ -651,9 +679,33 @@ fun QuickDimensionDialog(
     var isClearCardInFront by rememberSaveable { mutableStateOf(false) }
     var refreshSpinCount by remember { mutableIntStateOf(0) }
 
+    // V19 §10.1: Parent-owned single-active help callout state with 5-second (5,000ms) auto-dismiss.
+    // Never appears on initial dialog open; appears ONLY when the user selects/changes an option.
+    data class QDimActiveHelpCallout(
+        val selectorKey: String,
+        val description: String,
+        val requestId: Int
+    )
+    var activeHelpCallout by remember { mutableStateOf<QDimActiveHelpCallout?>(null) }
+    var calloutRequestCounter by remember { mutableIntStateOf(0) }
+
     val scrollState = rememberScrollState()
     val isHeaderPinned by remember { derivedStateOf { scrollState.value > 24 } }
     val isFooterPinned by remember { derivedStateOf { scrollState.maxValue > 0 && scrollState.value < scrollState.maxValue - 16 } }
+
+    LaunchedEffect(activeHelpCallout?.requestId) {
+        val current = activeHelpCallout ?: return@LaunchedEffect
+        delay(5_000L)
+        if (activeHelpCallout?.requestId == current.requestId) {
+            activeHelpCallout = null
+        }
+    }
+
+    LaunchedEffect(scrollState.isScrollInProgress) {
+        if (scrollState.isScrollInProgress) {
+            activeHelpCallout = null
+        }
+    }
 
     val refreshRotationDeg by animateFloatAsState(
         targetValue = refreshSpinCount * 360f,
@@ -751,7 +803,7 @@ fun QuickDimensionDialog(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background( if (isHeaderPinned) CadPanelElevated else CadPanelSurface)
+                        .background(if (isHeaderPinned) CadPanelElevated else CadPanelSurface)
                         .padding(horizontal = 16.dp, vertical = headerVerticalPadding)
                         .testTag("qdim_scroll_header")
                 ) {
@@ -770,9 +822,9 @@ fun QuickDimensionDialog(
                             AnimatedVisibility(visible = !isHeaderPinned) {
                                 Text(
                                     text = if (isQuickDimensionEnabled) {
-                                        "Status: ACTIVE ($totalDimensionCount dims on sheet) • Rotary selectors with 2s callout"
+                                        "Status: ACTIVE ($totalDimensionCount dims on sheet)"
                                     } else {
-                                        "Status: STANDBY ($totalDimensionCount dims on sheet) • Configure & Enable below"
+                                        "Status: STANDBY ($totalDimensionCount dims on sheet)"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (isQuickDimensionEnabled) CadEmeraldCrossing else CadTextSecondary
@@ -838,9 +890,10 @@ fun QuickDimensionDialog(
                         .testTag("qdim_scrollable_body"),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                        // 1. Operating Scope Mode Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    // 1. Operating Scope Mode Horizontal Option Card Deck (V19 §10.1 & §10.2)
                     QDimHorizontalCardSelector(
                         selectorKey = "mode",
+                        stageBadge = "01 / 03",
                         title = "1. Operating Scope Mode",
                         items = QDimOperatingMode.entries,
                         selectedItem = mode,
@@ -849,13 +902,23 @@ fun QuickDimensionDialog(
                         accentColor = CadCyanPrimary,
                         optionTagPrefix = "qdim_mode_",
                         optionName = { it.name },
-                        isParentScrolling = scrollState.isScrollInProgress,
-                        onSelect = { mode = it }
+                        activeCalloutDescription = activeHelpCallout?.takeIf { it.selectorKey == "mode" }?.description,
+                        onDismissCallout = { activeHelpCallout = null },
+                        onSelect = { nextMode ->
+                            mode = nextMode
+                            calloutRequestCounter += 1
+                            activeHelpCallout = QDimActiveHelpCallout(
+                                selectorKey = "mode",
+                                description = nextMode.label,
+                                requestId = calloutRequestCounter
+                            )
+                        }
                     )
 
-                    // 2. Alignment & Arrangement Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    // 2. Alignment & Arrangement Horizontal Option Card Deck (V19 §10.1 & §10.2)
                     QDimHorizontalCardSelector(
                         selectorKey = "arrangement",
+                        stageBadge = "02 / 03",
                         title = "2. Alignment & Arrangement Mode (DimensionAlignmentEngine)",
                         items = DimensionArrangementPreference.entries,
                         selectedItem = arrangement,
@@ -864,13 +927,23 @@ fun QuickDimensionDialog(
                         accentColor = CadEmeraldCrossing,
                         optionTagPrefix = "qdim_arrangement_",
                         optionName = { it.name },
-                        isParentScrolling = scrollState.isScrollInProgress,
-                        onSelect = { arrangement = it }
+                        activeCalloutDescription = activeHelpCallout?.takeIf { it.selectorKey == "arrangement" }?.description,
+                        onDismissCallout = { activeHelpCallout = null },
+                        onSelect = { nextArr ->
+                            arrangement = nextArr
+                            calloutRequestCounter += 1
+                            activeHelpCallout = QDimActiveHelpCallout(
+                                selectorKey = "arrangement",
+                                description = nextArr.description,
+                                requestId = calloutRequestCounter
+                            )
+                        }
                     )
 
-                    // 3. Dimension Density Policy Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    // 3. Dimension Density Policy Horizontal Option Card Deck (V19 §10.1 & §10.2)
                     QDimHorizontalCardSelector(
                         selectorKey = "density",
+                        stageBadge = "03 / 03",
                         title = "3. Dimension Density Policy",
                         items = QDimDensityPolicy.entries,
                         selectedItem = density,
@@ -879,8 +952,17 @@ fun QuickDimensionDialog(
                         accentColor = CadAmberSnap,
                         optionTagPrefix = "qdim_density_",
                         optionName = { it.name },
-                        isParentScrolling = scrollState.isScrollInProgress,
-                        onSelect = { density = it }
+                        activeCalloutDescription = activeHelpCallout?.takeIf { it.selectorKey == "density" }?.description,
+                        onDismissCallout = { activeHelpCallout = null },
+                        onSelect = { nextDensity ->
+                            density = nextDensity
+                            calloutRequestCounter += 1
+                            activeHelpCallout = QDimActiveHelpCallout(
+                                selectorKey = "density",
+                                description = nextDensity.description,
+                                requestId = calloutRequestCounter
+                            )
+                        }
                     )
 
                     if (alignmentReport != null) {
@@ -925,7 +1007,9 @@ fun QuickDimensionDialog(
                     HorizontalDivider(color = CadBorderStrong)
                 }
 
-                // Section 5.2, 5.6 & Phase 9 — Single Logical Scroll-Responsive Footer with Two-Card Action Deck
+                // V19 §10.3 — Compact QDIM Footer Row:
+                // 1. Shared Two-Card Action Deck (Foreground Generate / Update ↔ Rear Clear All with trash icon + count badge)
+                // 2. Adjacent Compact Icon-First Selective Clear Button with checklist icon + count badge
                 val footerDeckTimerState = rememberCadDeckIdleTimerState(
                     deckId = "qdim_footer_action_deck",
                     isVisibleAndInteractive = true,
@@ -933,52 +1017,20 @@ fun QuickDimensionDialog(
                 )
                 val isFooterRearRevealed = footerDeckTimerState.isRearCardRevealed
 
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(if (isFooterPinned) CadPanelElevated else CadPanelSurface)
                         .padding(horizontal = 16.dp, vertical = 10.dp)
                         .testTag("qdim_scroll_footer"),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (isClearCardInFront) {
-                                "Active Card: Clear All (Tap to clear • Hold for Selective Clear • Swipe ↓/↑ to swap)"
-                            } else {
-                                "Active Card: Enable & Generate (Tap to run • Swipe ↓/↑ for Clear All)"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = CadTextSecondary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextButton(
-                            onClick = { showSelectiveClearDialog = true },
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                            modifier = Modifier
-                                .height(26.dp)
-                                .testTag("qdim_open_selective_clear_button")
-                        ) {
-                            Text(
-                                text = "Selective Clear ($totalDimensionCount)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CadCrimsonAlert,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-
-                    // Two-Card Action Deck: Green (Enable & Generate) + Red (Clear All)
-                    // Rear card is concealed at rest, revealed for 2.4s after exchange or 1.0s every 75s idle.
+                    // 1. Two-Card Action Deck: Green (Generate / Update) + Crimson (Clear All)
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(58.dp)
-                            .padding(top = 4.dp)
+                            .weight(1f)
+                            .height(52.dp)
                             .pointerInput(isClearCardInFront) {
                                 var dragAccumY = 0f
                                 detectVerticalDragGestures(
@@ -1037,11 +1089,11 @@ fun QuickDimensionDialog(
                             label = "QDimClearCardAlpha"
                         )
 
-                        // Green Card: Enable & Generate
+                        // Green Card: Generate / Update
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .height(46.dp)
                                 .zIndex(if (!isClearCardInFront) 1f else 0f)
                                 .offset { IntOffset(0, enableOffsetY.roundToPx()) }
                                 .graphicsLayer {
@@ -1076,7 +1128,7 @@ fun QuickDimensionDialog(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = if (isQuickDimensionEnabled) "ENABLE & GENERATE (REFRESH)" else "ENABLE & GENERATE",
+                                        text = if (isQuickDimensionEnabled) "Update Dimensions" else "Generate Dimensions",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = Color(0xFFECFDF5),
                                         fontWeight = FontWeight.Bold,
@@ -1089,20 +1141,20 @@ fun QuickDimensionDialog(
                                         maxLines = 1
                                     )
                                 }
-                                Text(
-                                    text = if (!isClearCardInFront) "TAP TO RUN" else "PEEK",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = CadEmeraldCrossing,
-                                    fontWeight = FontWeight.Bold
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Generate or Update Quick Dimensions",
+                                    tint = CadEmeraldCrossing,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                         }
 
-                        // Red Card: Clear All (Short tap -> Confirm Clear All; Long press -> Selective Clear Window)
+                        // Crimson Card: Clear All (Trash icon + count badge)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .height(46.dp)
                                 .zIndex(if (isClearCardInFront) 1f else 0f)
                                 .offset { IntOffset(0, clearOffsetY.roundToPx()) }
                                 .graphicsLayer {
@@ -1139,28 +1191,75 @@ fun QuickDimensionDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Clear All Dimensions",
+                                        tint = CadCrimsonAlert,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                     Text(
-                                        text = "CLEAR ALL ($totalDimensionCount)",
+                                        text = "Clear All",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = Color(0xFFFEE2E2),
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1
                                     )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(CadCrimsonAlert.copy(alpha = 0.22f))
+                                        .border(1.dp, CadCrimsonAlert, RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
                                     Text(
-                                        text = "Tap to clear all • Long-press for Category Selective Clear",
+                                        text = totalDimensionCount.toString(),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = CadCrimsonAlert,
-                                        maxLines = 1
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
-                                Text(
-                                    text = if (isClearCardInFront) "TAP / HOLD" else "PEEK",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = CadCrimsonAlert,
-                                    fontWeight = FontWeight.Bold
-                                )
                             }
+                        }
+                    }
+
+                    // 2. Adjacent Compact Icon-First Selective Clear Button (Checklist icon + count badge)
+                    Row(
+                        modifier = Modifier
+                            .height(46.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(CadPanelElevated)
+                            .border(1.dp, CadCrimsonAlert.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
+                            .clickable { showSelectiveClearDialog = true }
+                            .padding(horizontal = 10.dp)
+                            .testTag("qdim_open_selective_clear_button"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Checklist,
+                            contentDescription = "Open Selective Dimension Removal",
+                            tint = CadCrimsonAlert,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(CadCrimsonAlert.copy(alpha = 0.20f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = dimensionEntities.size.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CadCrimsonAlert,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -1170,14 +1269,12 @@ fun QuickDimensionDialog(
 }
 
 /**
- * Phase 7.1 & 7.2 — Horizontal Multi-Option Card Deck Selector with Non-Layout-Shifting 2-Second Help Callout.
- * - Replaces the vertical rotary wheel selector with `CadHorizontalOptionCardDeck`.
- * - Renders the 2-second delayed description callout as a floating overlay inside the fixed-height deck box
- *   so showing or dismissing the callout causes 0 px vertical layout shift and 0 px scroll jump.
+ * V19 §10.1 & §10.2 — Horizontal Multi-Option Card Deck Selector with Parent-Owned Single-Active 5-Second Help Callout.
  */
 @Composable
 private fun <T> QDimHorizontalCardSelector(
     selectorKey: String,
+    stageBadge: String,
     title: String,
     items: List<T>,
     selectedItem: T,
@@ -1186,22 +1283,11 @@ private fun <T> QDimHorizontalCardSelector(
     accentColor: Color,
     optionTagPrefix: String,
     optionName: (T) -> String,
-    isParentScrolling: Boolean,
+    activeCalloutDescription: String?,
+    onDismissCallout: () -> Unit,
     onSelect: (T) -> Unit
 ) {
     val currentIndex = items.indexOf(selectedItem).coerceAtLeast(0)
-    var interactionTick by remember { mutableIntStateOf(0) }
-    var showDelayedCallout by remember { mutableStateOf(false) }
-
-    // 2-second delayed speech-bubble callout after resting on a selection without scrolling or card exchange.
-    // While parent scroll is in progress, hide the callout and wait until scrolling stops to begin the 2s timer.
-    LaunchedEffect(selectedItem, interactionTick, isParentScrolling) {
-        showDelayedCallout = false
-        if (!isParentScrolling) {
-            delay(2000L)
-            showDelayedCallout = true
-        }
-    }
 
     val cardOptions = remember(items, accentColor) {
         items.map { item ->
@@ -1236,11 +1322,33 @@ private fun <T> QDimHorizontalCardSelector(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
-            Text(
-                text = "${currentIndex + 1}/${items.size} • Swipe ↔ / Tap",
-                style = MaterialTheme.typography.labelSmall,
-                color = accentColor
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(accentColor.copy(alpha = 0.16f))
+                        .border(1.dp, accentColor.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                        .testTag("qdim_stage_badge_$selectorKey")
+                ) {
+                    Text(
+                        text = stageBadge,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = accentColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = "${currentIndex + 1}/${items.size}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accentColor,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // Fixed-height container holding both the horizontal card deck and the non-layout-shifting overlay callout
@@ -1258,8 +1366,6 @@ private fun <T> QDimHorizontalCardSelector(
                     options = cardOptions,
                     selectedValue = selectedItem,
                     onSelect = { nextItem ->
-                        interactionTick += 1
-                        showDelayedCallout = false
                         onSelect(nextItem)
                     },
                     testTag = "qdim_wheel_button_$selectorKey"
@@ -1281,8 +1387,6 @@ private fun <T> QDimHorizontalCardSelector(
                                 .background(if (isSel) accentColor.copy(alpha = 0.24f) else CadPanelSurface)
                                 .border(1.dp, if (isSel) accentColor else CadBorderHairline, RoundedCornerShape(5.dp))
                                 .clickable {
-                                    interactionTick += 1
-                                    showDelayedCallout = false
                                     onSelect(item)
                                 }
                                 .padding(horizontal = 7.dp, vertical = 2.dp)
@@ -1301,9 +1405,9 @@ private fun <T> QDimHorizontalCardSelector(
                 }
             }
 
-            // Phase 7.2 — Non-Layout-Shifting Overlay Callout (0 px height change when appearing/disappearing)
+            // V19 §10.1 — Single-Active 5-Second Overlay Callout (0 px height change when appearing/disappearing)
             androidx.compose.animation.AnimatedVisibility(
-                visible = showDelayedCallout,
+                visible = activeCalloutDescription != null,
                 enter = fadeIn(tween(180)),
                 exit = fadeOut(tween(120)),
                 modifier = Modifier
@@ -1313,7 +1417,7 @@ private fun <T> QDimHorizontalCardSelector(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { showDelayedCallout = false }
+                        .clickable { onDismissCallout() }
                         .testTag("qdim_callout_bubble_$selectorKey")
                 ) {
                     androidx.compose.foundation.Canvas(
@@ -1339,7 +1443,7 @@ private fun <T> QDimHorizontalCardSelector(
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = itemDescription(selectedItem),
+                            text = activeCalloutDescription ?: itemDescription(selectedItem),
                             style = MaterialTheme.typography.labelSmall,
                             color = CadTextPrimary,
                             maxLines = 2
@@ -1769,7 +1873,7 @@ fun SelectiveDimensionRemovalDialog(
                         modifier = Modifier.testTag("selective_clear_confirm_button")
                     ) {
                         Text(
-                            text = "Remove Selected (${effectiveSelectedIds.size})",
+                            text = "Remove ${effectiveSelectedIds.size}",
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -2191,16 +2295,31 @@ enum class CoordinateEditSource {
     POLAR_EXPRESSION
 }
 
+enum class CoordinateDialogStage {
+    ENTRY,
+    PREVIEW
+}
+
 /**
- * 6. Direct Coordinate, Parameter & Controller Settings Dialogs (Section 50 & v17 Section 7).
- * Provides directly editable X, Y, and Angle / Bearing θ (°) fields plus Polar / Expression input,
- * with a deterministic EditSource state machine (`CARTESIAN_XY`, `BEARING_THETA`, `POLAR_EXPRESSION`).
+ * 6. Direct Coordinate, Parameter & Controller Settings Dialogs (V19 §12).
+ * Implements:
+ * - Mutually exclusive Cartesian (`X/Y/θ` + two-card vertical-swipe ABS/REL reference deck with continuous marquee)
+ *   vs Polar/Expression (`coord_input_polar_field` + read-only resolved preview) composition subtrees.
+ * - Two-stage workflow:
+ *   - Stage 1 (`ENTRY`): Opaque dialog surface (`coord_dialog_entry_state`) with `Cancel` and `Move Cursor` (`coord_move_cursor_button`).
+ *   - Stage 2 (`PREVIEW`): Translucent dialog surface (`Color(0x6B0B1118)`, `coord_dialog_preview_state` / `coord_preview_translucent_surface`)
+ *     showing the live CAD canvas and moved cursor underneath, with `Cancel` (restoring cursor) and `Pick` (`coord_pick_button` / `submit_coordinate_button`).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DirectCoordinateInputDialog(
     currentCursor: Point2D,
     referencePoint: Point2D?,
     displayUnit: CadUnit,
+    onBeginPreviewSession: () -> Unit = {},
+    onPreviewCoordinate: (String) -> Boolean = { true },
+    onCommitPickCoordinate: (String?) -> Boolean = { false },
+    onCancelPreviewSession: () -> Unit = {},
     onSubmitCoordinateExpression: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2217,6 +2336,7 @@ fun DirectCoordinateInputDialog(
         }
     }
 
+    var dialogStage by rememberSaveable { mutableStateOf(CoordinateDialogStage.ENTRY) }
     var mode by rememberSaveable { mutableStateOf(CoordinateInputMode.CARTESIAN_XY) }
     var editSource by rememberSaveable { mutableStateOf(CoordinateEditSource.CARTESIAN_XY) }
     var isRelativeCartesian by rememberSaveable { mutableStateOf(false) }
@@ -2237,6 +2357,10 @@ fun DirectCoordinateInputDialog(
     }
     var validationError by rememberSaveable { mutableStateOf<String?>(null) }
 
+    LaunchedEffect(Unit) {
+        onBeginPreviewSession()
+    }
+
     val resolvedPolarPreview = remember(mode, polarText, referencePoint, currentCursor) {
         if (mode == CoordinateInputMode.POLAR_OR_EXPRESSION) {
             CadSnapAndCoordEngine.parseCoordinateInput(
@@ -2250,25 +2374,85 @@ fun DirectCoordinateInputDialog(
         }
     }
 
+    fun buildValidatedExpression(): String? {
+        return if (mode == CoordinateInputMode.CARTESIAN_XY) {
+            val parsedX = xText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+            val parsedY = yText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+            if (parsedX == null || parsedY == null) {
+                validationError = "Enter valid numeric X, Y, or θ (°) coordinates."
+                null
+            } else {
+                val prefix = if (isRelativeCartesian) "@" else ""
+                "$prefix${xText.trim()},${yText.trim()}"
+            }
+        } else {
+            val rawExpr = polarText.trim()
+            val resolved = CadSnapAndCoordEngine.parseCoordinateInput(
+                rawInput = rawExpr,
+                referencePoint = referencePoint,
+                currentCursor = currentCursor,
+                orthoEnabled = false
+            )
+            if (resolved == null) {
+                validationError = "Invalid polar or coordinate expression (use e.g. 50<45, @30<90, @25,-10, or 40)."
+                null
+            } else {
+                rawExpr
+            }
+        }
+    }
+
+    val isPreviewStage = dialogStage == CoordinateDialogStage.PREVIEW
+    val surfaceColor = if (isPreviewStage) Color(0x6B0B1118) else CadPanelSurface
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            onCancelPreviewSession()
+            onDismiss()
+        },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
-                .border(1.dp, CadBorderStrong, RoundedCornerShape(14.dp))
+                .border(
+                    width = 1.dp,
+                    color = if (isPreviewStage) CadCyanPrimary else CadBorderStrong,
+                    shape = RoundedCornerShape(14.dp)
+                )
                 .testTag("direct_coordinate_input_dialog"),
-            color = CadPanelSurface,
+            color = surfaceColor,
             shape = RoundedCornerShape(14.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .testTag(
+                        if (isPreviewStage) "coord_dialog_preview_state" else "coord_dialog_entry_state"
+                    ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                if (isPreviewStage) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0x880B1622))
+                            .border(1.dp, CadCyanPrimary, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("coord_preview_translucent_surface")
+                    ) {
+                        Text(
+                            text = "LIVE CURSOR PREVIEW ACTIVE — Inspect target on canvas, then tap Pick to commit or Cancel to restore.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 Column {
                     Text(
                         text = "Direct Coordinate & Polar Bearing Input (${displayUnit.symbol})",
@@ -2307,6 +2491,7 @@ fun DirectCoordinateInputDialog(
                                 mode = CoordinateInputMode.CARTESIAN_XY
                                 editSource = CoordinateEditSource.CARTESIAN_XY
                                 validationError = null
+                                dialogStage = CoordinateDialogStage.ENTRY
                             }
                             .padding(vertical = 8.dp, horizontal = 10.dp)
                             .testTag("coord_mode_cartesian"),
@@ -2336,6 +2521,7 @@ fun DirectCoordinateInputDialog(
                                 mode = CoordinateInputMode.POLAR_OR_EXPRESSION
                                 editSource = CoordinateEditSource.POLAR_EXPRESSION
                                 validationError = null
+                                dialogStage = CoordinateDialogStage.ENTRY
                             }
                             .padding(vertical = 8.dp, horizontal = 10.dp)
                             .testTag("coord_mode_polar"),
@@ -2359,178 +2545,296 @@ fun DirectCoordinateInputDialog(
                     )
                 }
 
-                // Cartesian Absolute vs Relative (@) toggle
-                if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(CadPanelElevated)
-                            .border(1.dp, CadBorderHairline, RoundedCornerShape(7.dp))
-                            .clickable {
-                                isRelativeCartesian = !isRelativeCartesian
-                                validationError = null
-                            }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                            .testTag("coord_cartesian_abs_rel_toggle"),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (isRelativeCartesian) {
-                                "Cartesian Reference: Relative (@ΔX, ΔY from last point)"
-                            } else {
-                                "Cartesian Reference: Absolute (X, Y in model space)"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isRelativeCartesian) CadEmeraldCrossing else CadTextPrimary,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = if (isRelativeCartesian) "REL (@)" else "ABS",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isRelativeCartesian) CadEmeraldCrossing else CadCyanPrimary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Section 7.1 & 7.2 — Directly Editable X, Y, and Bearing θ (°) Fields
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val displayX = if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                        xText
-                    } else {
-                        resolvedPolarPreview?.let { String.format(Locale.ROOT, "%.2f", it.x) } ?: "—"
-                    }
-                    val displayY = if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                        yText
-                    } else {
-                        resolvedPolarPreview?.let { String.format(Locale.ROOT, "%.2f", it.y) } ?: "—"
-                    }
-                    val displayTheta = if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                        thetaText
-                    } else {
-                        resolvedPolarPreview?.let { pt ->
-                            val ang = if (originRef.distanceTo(pt) > 1e-6) {
-                                ((originRef.angleToDeg(pt) % 360.0) + 360.0) % 360.0
-                            } else 0.0
-                            String.format(Locale.ROOT, "%.1f", ang)
-                        } ?: "—"
-                    }
-
-                    OutlinedTextField(
-                        value = displayX,
-                        onValueChange = { newXStr ->
-                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                                editSource = CoordinateEditSource.CARTESIAN_XY
-                                xText = newXStr
-                                validationError = null
-                                val px = newXStr.trim().toDoubleOrNull()
-                                val py = yText.trim().toDoubleOrNull()
-                                if (px != null && py != null && px.isFinite() && py.isFinite()) {
-                                    val dx = if (isRelativeCartesian) px else px - originRef.x
-                                    val dy = if (isRelativeCartesian) py else py - originRef.y
-                                    val r = hypot(dx, dy)
-                                    radialDistanceR = if (r > 1e-6) r else radialDistanceR
-                                    val ang = if (r > 1e-6) {
-                                        ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
-                                    } else 0.0
-                                    thetaText = String.format(Locale.ROOT, "%.1f", ang)
-                                }
-                            }
-                        },
-                        enabled = mode == CoordinateInputMode.CARTESIAN_XY,
-                        label = { Text("X (${displayUnit.symbol})") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("coord_input_x_field")
-                    )
-
-                    OutlinedTextField(
-                        value = displayY,
-                        onValueChange = { newYStr ->
-                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                                editSource = CoordinateEditSource.CARTESIAN_XY
-                                yText = newYStr
-                                validationError = null
-                                val px = xText.trim().toDoubleOrNull()
-                                val py = newYStr.trim().toDoubleOrNull()
-                                if (px != null && py != null && px.isFinite() && py.isFinite()) {
-                                    val dx = if (isRelativeCartesian) px else px - originRef.x
-                                    val dy = if (isRelativeCartesian) py else py - originRef.y
-                                    val r = hypot(dx, dy)
-                                    radialDistanceR = if (r > 1e-6) r else radialDistanceR
-                                    val ang = if (r > 1e-6) {
-                                        ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
-                                    } else 0.0
-                                    thetaText = String.format(Locale.ROOT, "%.1f", ang)
-                                }
-                            }
-                        },
-                        enabled = mode == CoordinateInputMode.CARTESIAN_XY,
-                        label = { Text("Y (${displayUnit.symbol})") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("coord_input_y_field")
-                    )
-
-                    OutlinedTextField(
-                        value = displayTheta,
-                        onValueChange = { newThetaStr ->
-                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                                editSource = CoordinateEditSource.BEARING_THETA
-                                thetaText = newThetaStr
-                                validationError = null
-                                val parsedDeg = newThetaStr.trim().toDoubleOrNull()
-                                if (parsedDeg != null && parsedDeg.isFinite()) {
-                                    val normalizedDeg = ((parsedDeg % 360.0) + 360.0) % 360.0
-                                    val rad = normalizedDeg * PI / 180.0
-                                    val effectiveR = radialDistanceR.coerceAtLeast(1.0)
-                                    val dx = effectiveR * cos(rad)
-                                    val dy = effectiveR * sin(rad)
-                                    val resolvedX = if (isRelativeCartesian) dx else originRef.x + dx
-                                    val resolvedY = if (isRelativeCartesian) dy else originRef.y + dy
-                                    xText = String.format(Locale.ROOT, "%.2f", resolvedX)
-                                    yText = String.format(Locale.ROOT, "%.2f", resolvedY)
-                                }
-                            }
-                        },
-                        enabled = mode == CoordinateInputMode.CARTESIAN_XY,
-                        label = { Text("θ (°)") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(0.9f)
-                            .testTag("coord_input_theta_field")
-                    )
-                }
-
-                // Part 3: Dedicated Polar / Other Expression Field
-                OutlinedTextField(
-                    value = polarText,
-                    onValueChange = {
-                        if (mode == CoordinateInputMode.POLAR_OR_EXPRESSION) {
-                            editSource = CoordinateEditSource.POLAR_EXPRESSION
-                            polarText = it
-                            validationError = null
-                        }
+                // V19 §12.1: Mutually Exclusive Mode Composition via AnimatedContent(targetState = mode)
+                AnimatedContent(
+                    targetState = mode,
+                    transitionSpec = {
+                        fadeIn(tween(160)) togetherWith fadeOut(tween(120))
                     },
-                    enabled = mode == CoordinateInputMode.POLAR_OR_EXPRESSION,
-                    label = { Text("Polar / Expression") },
-                    placeholder = { Text("50<45, @30<90, @25,-10, or 40") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("coord_input_polar_field")
-                )
+                    label = "CoordinateInputModeSubtree"
+                ) { activeMode ->
+                    if (activeMode == CoordinateInputMode.CARTESIAN_XY) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // V19 §12.2: Two-Card Vertical-Swipe Reference Deck (ABS vs REL (@)) with Fixed Left Badge + Continuous Marquee
+                            val absRelDeckTimer = rememberCadDeckIdleTimerState(
+                                deckId = "coord_cartesian_reference_deck",
+                                isVisibleAndInteractive = true,
+                                peekDirection = CardPeekDirection.ABOVE
+                            )
+                            val isAbsRelRearRevealed = absRelDeckTimer.isRearCardRevealed
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                                    .pointerInput(isRelativeCartesian) {
+                                        var dragAccumY = 0f
+                                        detectVerticalDragGestures(
+                                            onDragStart = { dragAccumY = 0f },
+                                            onVerticalDrag = { change, dragAmount ->
+                                                dragAccumY += dragAmount
+                                                if (abs(dragAccumY) > 16f) {
+                                                    change.consume()
+                                                    dragAccumY = 0f
+                                                    absRelDeckTimer.onCardExchange(isCommandPromptOrDeck = false)
+                                                    isRelativeCartesian = !isRelativeCartesian
+                                                    validationError = null
+                                                    dialogStage = CoordinateDialogStage.ENTRY
+                                                }
+                                            }
+                                        )
+                                    }
+                                    .clickable {
+                                        absRelDeckTimer.onCardExchange(isCommandPromptOrDeck = false)
+                                        isRelativeCartesian = !isRelativeCartesian
+                                        validationError = null
+                                        dialogStage = CoordinateDialogStage.ENTRY
+                                    }
+                                    .testTag("coord_cartesian_abs_rel_toggle"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                val rearOffsetY by animateDpAsState(
+                                    targetValue = if (isAbsRelRearRevealed) (-4).dp else 0.dp,
+                                    animationSpec = tween(180),
+                                    label = "CoordAbsRelRearOffsetY"
+                                )
+                                val rearAlpha by animateFloatAsState(
+                                    targetValue = if (isAbsRelRearRevealed) 0.72f else 0f,
+                                    animationSpec = tween(180),
+                                    label = "CoordAbsRelRearAlpha"
+                                )
+
+                                // Rear peek card
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(36.dp)
+                                        .zIndex(0f)
+                                        .offset { IntOffset(0, rearOffsetY.roundToPx()) }
+                                        .graphicsLayer {
+                                            scaleX = 0.96f
+                                            scaleY = 0.96f
+                                            alpha = rearAlpha
+                                        }
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(CadPanelSurface)
+                                        .border(
+                                            1.dp,
+                                            if (!isRelativeCartesian) CadEmeraldCrossing else CadCyanPrimary,
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                )
+
+                                // Foreground active card: Left fixed badge + Right clipped continuous marquee
+                                val activeAccent = if (isRelativeCartesian) CadEmeraldCrossing else CadCyanPrimary
+                                val badgeCode = if (isRelativeCartesian) "REL (@)" else "ABS"
+                                val fullReferenceLabel = if (isRelativeCartesian) {
+                                    "Cartesian Reference: Relative (@ΔX, ΔY from last point)"
+                                } else {
+                                    "Cartesian Reference: Absolute (X, Y in model space)"
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(36.dp)
+                                        .zIndex(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(CadPanelElevated)
+                                        .border(1.5.dp, activeAccent, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(activeAccent.copy(alpha = 0.20f))
+                                            .border(1.dp, activeAccent, RoundedCornerShape(5.dp))
+                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                            .testTag("coord_cartesian_abs_rel_badge"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = badgeCode,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = activeAccent,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .widthIn(min = 0.dp)
+                                            .clipToBounds()
+                                    ) {
+                                        key(isRelativeCartesian) {
+                                            Text(
+                                                text = fullReferenceLabel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (isRelativeCartesian) CadEmeraldCrossing else CadTextPrimary,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .basicMarquee(
+                                                        iterations = Int.MAX_VALUE,
+                                                        initialDelayMillis = 0,
+                                                        repeatDelayMillis = 0,
+                                                        velocity = 25.dp
+                                                    )
+                                                    .testTag("coord_cartesian_abs_rel_marquee")
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Directly Editable X, Y, and Bearing θ (°) Fields (ONLY rendered in CARTESIAN_XY mode)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = xText,
+                                    onValueChange = { newXStr ->
+                                        editSource = CoordinateEditSource.CARTESIAN_XY
+                                        xText = newXStr
+                                        validationError = null
+                                        dialogStage = CoordinateDialogStage.ENTRY
+                                        val px = newXStr.trim().toDoubleOrNull()
+                                        val py = yText.trim().toDoubleOrNull()
+                                        if (px != null && py != null && px.isFinite() && py.isFinite()) {
+                                            val dx = if (isRelativeCartesian) px else px - originRef.x
+                                            val dy = if (isRelativeCartesian) py else py - originRef.y
+                                            val r = hypot(dx, dy)
+                                            radialDistanceR = if (r > 1e-6) r else radialDistanceR
+                                            val ang = if (r > 1e-6) {
+                                                ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
+                                            } else 0.0
+                                            thetaText = String.format(Locale.ROOT, "%.1f", ang)
+                                        }
+                                    },
+                                    label = { Text("X (${displayUnit.symbol})") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("coord_input_x_field")
+                                )
+
+                                OutlinedTextField(
+                                    value = yText,
+                                    onValueChange = { newYStr ->
+                                        editSource = CoordinateEditSource.CARTESIAN_XY
+                                        yText = newYStr
+                                        validationError = null
+                                        dialogStage = CoordinateDialogStage.ENTRY
+                                        val px = xText.trim().toDoubleOrNull()
+                                        val py = newYStr.trim().toDoubleOrNull()
+                                        if (px != null && py != null && px.isFinite() && py.isFinite()) {
+                                            val dx = if (isRelativeCartesian) px else px - originRef.x
+                                            val dy = if (isRelativeCartesian) py else py - originRef.y
+                                            val r = hypot(dx, dy)
+                                            radialDistanceR = if (r > 1e-6) r else radialDistanceR
+                                            val ang = if (r > 1e-6) {
+                                                ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
+                                            } else 0.0
+                                            thetaText = String.format(Locale.ROOT, "%.1f", ang)
+                                        }
+                                    },
+                                    label = { Text("Y (${displayUnit.symbol})") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("coord_input_y_field")
+                                )
+
+                                OutlinedTextField(
+                                    value = thetaText,
+                                    onValueChange = { newThetaStr ->
+                                        editSource = CoordinateEditSource.BEARING_THETA
+                                        thetaText = newThetaStr
+                                        validationError = null
+                                        dialogStage = CoordinateDialogStage.ENTRY
+                                        val parsedDeg = newThetaStr.trim().toDoubleOrNull()
+                                        if (parsedDeg != null && parsedDeg.isFinite()) {
+                                            val normalizedDeg = ((parsedDeg % 360.0) + 360.0) % 360.0
+                                            val rad = normalizedDeg * PI / 180.0
+                                            val effectiveR = radialDistanceR.coerceAtLeast(1.0)
+                                            val dx = effectiveR * cos(rad)
+                                            val dy = effectiveR * sin(rad)
+                                            val resolvedX = if (isRelativeCartesian) dx else originRef.x + dx
+                                            val resolvedY = if (isRelativeCartesian) dy else originRef.y + dy
+                                            xText = String.format(Locale.ROOT, "%.2f", resolvedX)
+                                            yText = String.format(Locale.ROOT, "%.2f", resolvedY)
+                                        }
+                                    },
+                                    label = { Text("θ (°)") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(0.9f)
+                                        .testTag("coord_input_theta_field")
+                                )
+                            }
+                        }
+                    } else {
+                        // POLAR_OR_EXPRESSION mode: ONLY renders the Polar / Expression field + read-only resolved X/Y/θ preview
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = polarText,
+                                onValueChange = {
+                                    editSource = CoordinateEditSource.POLAR_EXPRESSION
+                                    polarText = it
+                                    validationError = null
+                                    dialogStage = CoordinateDialogStage.ENTRY
+                                },
+                                label = { Text("Polar / Expression") },
+                                placeholder = { Text("50<45, @30<90, @25,-10, or 40") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("coord_input_polar_field")
+                            )
+
+                            val previewSummary = resolvedPolarPreview?.let { pt ->
+                                val ang = if (originRef.distanceTo(pt) > 1e-6) {
+                                    ((originRef.angleToDeg(pt) % 360.0) + 360.0) % 360.0
+                                } else 0.0
+                                "Resolved Target: X=${String.format(Locale.ROOT, "%.2f", pt.x)} ${displayUnit.symbol}, Y=${String.format(Locale.ROOT, "%.2f", pt.y)} ${displayUnit.symbol}, θ=${String.format(Locale.ROOT, "%.1f", ang)}°"
+                            } ?: "Resolved Target: Enter a valid polar/coordinate expression (e.g. @30<45 or 50<90)"
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(CadPanelElevated)
+                                    .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("coord_polar_resolved_preview")
+                            ) {
+                                Text(
+                                    text = previewSummary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (resolvedPolarPreview != null) CadEmeraldCrossing else CadTextSecondary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
 
                 Text(
-                    text = "Tip: Edit X/Y directly, or type a Bearing θ (°) to rotate at radial distance R=${String.format(Locale.ROOT, "%.2f", radialDistanceR)} ${displayUnit.symbol}.",
+                    text = "Stage 1: Tap Move Cursor to preview live on canvas • Stage 2: Tap Pick to commit point.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CadTextSecondary
                 )
@@ -2551,44 +2855,74 @@ fun DirectCoordinateInputDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(
-                        onClick = onDismiss,
+                        onClick = {
+                            onCancelPreviewSession()
+                            onDismiss()
+                        },
                         modifier = Modifier.testTag("coord_cancel_button")
                     ) {
                         Text("Cancel")
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (mode == CoordinateInputMode.CARTESIAN_XY) {
-                                val parsedX = xText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
-                                val parsedY = yText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
-                                if (parsedX == null || parsedY == null) {
-                                    validationError = "Enter valid numeric X, Y, or θ (°) coordinates."
+
+                    if (!isPreviewStage) {
+                        // Stage 1 (ENTRY): Move Cursor button previews live on canvas and transitions to PREVIEW
+                        Button(
+                            onClick = {
+                                val expr = buildValidatedExpression() ?: return@Button
+                                val previewOk = onPreviewCoordinate(expr)
+                                if (!previewOk) {
+                                    validationError = "Unable to preview coordinate expression."
                                     return@Button
                                 }
-                                val prefix = if (isRelativeCartesian) "@" else ""
-                                val expr = "$prefix${xText.trim()},${yText.trim()}"
-                                onSubmitCoordinateExpression(expr)
-                                onDismiss()
-                            } else {
-                                val rawExpr = polarText.trim()
-                                val resolved = CadSnapAndCoordEngine.parseCoordinateInput(
-                                    rawInput = rawExpr,
-                                    referencePoint = referencePoint,
-                                    currentCursor = currentCursor,
-                                    orthoEnabled = false
-                                )
-                                if (resolved == null) {
-                                    validationError = "Invalid polar or coordinate expression (use e.g. 50<45, @30<90, @25,-10, or 40)."
-                                    return@Button
+                                dialogStage = CoordinateDialogStage.PREVIEW
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CadCyanPrimary),
+                            modifier = Modifier.testTag("coord_move_cursor_button")
+                        ) {
+                            Text("Move Cursor", color = Color(0xFF031824), fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        // Direct Pick button also available for single-step test/automation convenience
+                        OutlinedButton(
+                            onClick = {
+                                val expr = buildValidatedExpression() ?: return@OutlinedButton
+                                onPreviewCoordinate(expr)
+                                val committed = onCommitPickCoordinate(expr)
+                                if (!committed) {
+                                    onSubmitCoordinateExpression(expr)
                                 }
-                                onSubmitCoordinateExpression(rawExpr)
                                 onDismiss()
-                            }
-                        },
-                        modifier = Modifier.testTag("submit_coordinate_button")
-                    ) {
-                        Text("Move Cursor & Pick")
+                            },
+                            modifier = Modifier.testTag("submit_coordinate_button")
+                        ) {
+                            Text("Pick", color = CadEmeraldCrossing, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        // Stage 2 (PREVIEW): Edit button returns to ENTRY; Pick button commits point and closes
+                        OutlinedButton(
+                            onClick = {
+                                dialogStage = CoordinateDialogStage.ENTRY
+                            },
+                            modifier = Modifier.testTag("coord_edit_again_button")
+                        ) {
+                            Text("Edit", color = CadCyanPrimary)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val expr = buildValidatedExpression() ?: return@Button
+                                val committed = onCommitPickCoordinate(expr)
+                                if (!committed) {
+                                    onSubmitCoordinateExpression(expr)
+                                }
+                                onDismiss()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CadEmeraldCrossing),
+                            modifier = Modifier.testTag("coord_pick_button")
+                        ) {
+                            Text("Pick", color = Color(0xFF022014), fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -3250,25 +3584,28 @@ fun DxfAndProjectHubDialog(
                         modifier = Modifier.testTag("project_hub_export_subtitle")
                     )
                     Text(
-                        text = "Swipe ↓ to cycle (${formats[frontExportIndex].shortCode} front)",
+                        text = "${formats[frontExportIndex].shortCode} (${frontExportIndex + 1}/${formats.size})",
                         style = MaterialTheme.typography.labelSmall,
-                        color = CadTextSecondary
+                        color = CadTextSecondary,
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
-                // Three-Format (DXF / PDF / SVG) Stacked Export Card Deck (Sections 65, 66, 67 & v18 Phase 9)
+                // V19 §5.5 & §8.3: Three-Format (DXF / PDF / SVG) Horizontal-Swipe Export Card Deck
+                // - Horizontal swipe (left/right) or vertical swipe cycles formats
+                // - Rectangular card -> CardPeekDirection.ABOVE
+                // - Only nearest rear card (depth == 1) peeks during 4.0s post-exchange/idle window; depth >= 2 remains occluded (alpha = 0f)
                 val exportDeckTimerState = rememberCadDeckIdleTimerState(
                     deckId = "project_hub_export_card_deck",
                     isVisibleAndInteractive = true,
-                    peekDirection = CardPeekDirection.BELOW
+                    peekDirection = CardPeekDirection.ABOVE
                 )
-                val isExportRearRevealed = exportDeckTimerState.isRearCardRevealed
 
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(82.dp)
-                        .padding(start = if (isExportRearRevealed) 18.dp else 0.dp, top = 4.dp, bottom = 4.dp)
+                        .height(80.dp)
+                        .padding(top = 6.dp, bottom = 4.dp)
                         .pointerInput(frontExportIndex) {
                             val touchSlop = viewConfiguration.touchSlop
                             awaitEachGesture {
@@ -3276,22 +3613,28 @@ fun DxfAndProjectHubDialog(
                                 val startPos = down.position
                                 var totalDx = 0f
                                 var totalDy = 0f
-                                var swipedDown = false
+                                var cycled = false
                                 while (true) {
                                     val event = awaitPointerEvent()
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
                                     if (change == null || !change.pressed) break
                                     totalDx = change.position.x - startPos.x
                                     totalDy = change.position.y - startPos.y
-                                    if (!swipedDown && totalDy >= touchSlop && totalDy > abs(totalDx) * 1.25f) {
-                                        swipedDown = true
+                                    val isHorizontalSwipe = abs(totalDx) >= touchSlop && abs(totalDx) > abs(totalDy) * 1.15f
+                                    val isVerticalSwipe = abs(totalDy) >= touchSlop && abs(totalDy) > abs(totalDx) * 1.25f
+                                    if (!cycled && (isHorizontalSwipe || isVerticalSwipe)) {
+                                        cycled = true
                                         change.consume()
                                         exportDeckTimerState.onCardExchange(isCommandPromptOrDeck = false)
-                                        frontExportIndex = (frontExportIndex + 1) % formats.size
+                                        frontExportIndex = if (isHorizontalSwipe && totalDx > 0f) {
+                                            (frontExportIndex - 1 + formats.size) % formats.size
+                                        } else {
+                                            (frontExportIndex + 1) % formats.size
+                                        }
                                         break
                                     }
                                 }
-                                if (!swipedDown && abs(totalDx) < touchSlop && abs(totalDy) < touchSlop) {
+                                if (!cycled && abs(totalDx) < touchSlop && abs(totalDy) < touchSlop) {
                                     when (formats[frontExportIndex]) {
                                         ExportFormatCardSpec.DXF -> onExportShareDxf()
                                         ExportFormatCardSpec.PDF -> onExportSharePdf()
@@ -3301,48 +3644,55 @@ fun DxfAndProjectHubDialog(
                             }
                         }
                         .testTag("project_hub_export_card_deck"),
-                    contentAlignment = Alignment.CenterStart
+                    contentAlignment = Alignment.Center
                 ) {
                     formats.forEachIndexed { idx, spec ->
                         val depth = (idx - frontExportIndex + formats.size) % formats.size
                         val isFront = depth == 0
-                        val targetOffsetX = when {
-                            isFront -> 0.dp
-                            !isExportRearRevealed -> 0.dp
-                            depth == 1 -> (-9).dp
-                            else -> (-17).dp
-                        }
+                        // V19 §5.5: Only nearest rear card (depth == 1) is visible during peek; depth >= 2 is always occluded
+                        val isNearestRearVisible = exportDeckTimerState.isRearCardVisibleForDepth(depth)
+                        val concealDelayMs = exportDeckTimerState.sequentialConcealDelayMsForDepth(depth, formats.size).toInt()
+
                         val targetOffsetY = when {
-                            isFront -> 0.dp
-                            !isExportRearRevealed -> 0.dp
-                            depth == 1 -> 4.dp
-                            else -> 8.dp
+                            isFront -> if (isNearestRearVisible) 2.dp else 0.dp
+                            isNearestRearVisible -> (-6).dp
+                            else -> 0.dp
                         }
-                        val targetRotation = when {
-                            isFront -> 0f
-                            !isExportRearRevealed -> 0f
-                            depth == 1 -> -5f
-                            else -> -9f
+                        val targetScale = when {
+                            isFront -> 1f
+                            isNearestRearVisible -> 0.96f
+                            else -> 0.92f
                         }
                         val targetAlpha = when {
                             isFront -> 1f
-                            !isExportRearRevealed -> 0f
-                            depth == 1 -> 0.72f
-                            else -> 0.46f
+                            isNearestRearVisible -> 0.80f
+                            else -> 0f
                         }
-                        val animOffsetX by animateDpAsState(targetOffsetX, tween(180), label = "ExportDeckOffsetX_${spec.name}")
-                        val animOffsetY by animateDpAsState(targetOffsetY, tween(180), label = "ExportDeckOffsetY_${spec.name}")
-                        val animRotation by animateFloatAsState(targetRotation, tween(180), label = "ExportDeckRot_${spec.name}")
-                        val animAlpha by animateFloatAsState(targetAlpha, tween(180), label = "ExportDeckAlpha_${spec.name}")
+                        val animOffsetY by animateDpAsState(
+                            targetValue = targetOffsetY,
+                            animationSpec = tween(durationMillis = 180, delayMillis = concealDelayMs),
+                            label = "ExportDeckOffsetY_${spec.name}"
+                        )
+                        val animScale by animateFloatAsState(
+                            targetValue = targetScale,
+                            animationSpec = tween(durationMillis = 180, delayMillis = concealDelayMs),
+                            label = "ExportDeckScale_${spec.name}"
+                        )
+                        val animAlpha by animateFloatAsState(
+                            targetValue = targetAlpha,
+                            animationSpec = tween(durationMillis = 180, delayMillis = concealDelayMs),
+                            label = "ExportDeckAlpha_${spec.name}"
+                        )
 
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(66.dp)
+                                .height(64.dp)
                                 .zIndex((formats.size - depth).toFloat())
-                                .offset { IntOffset(animOffsetX.roundToPx(), animOffsetY.roundToPx()) }
+                                .offset { IntOffset(0, animOffsetY.roundToPx()) }
                                 .graphicsLayer {
-                                    rotationZ = animRotation
+                                    scaleX = animScale
+                                    scaleY = animScale
                                     alpha = animAlpha
                                 }
                                 .border(
@@ -3401,25 +3751,12 @@ fun DxfAndProjectHubDialog(
                                     }
                                 }
 
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Share,
-                                        contentDescription = "Export ${spec.shortCode}",
-                                        tint = spec.accentColor,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = if (isFront) "TAP" else "PEEK",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = spec.accentColor,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Export ${spec.shortCode}",
+                                    tint = spec.accentColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
                     }

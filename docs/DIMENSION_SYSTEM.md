@@ -1,13 +1,14 @@
 # Quick Dimension (`QDIM`), Card Selectors & Selective Dimension Removal
 
-## 1. Two-Pass Quick Dimension & Alignment Solver (`AutoDimensionEngine` & `DimensionAlignmentEngine`)
+## 1. Shape-Aware Quick Dimension & Alignment Solver (`AutoDimensionEngine` & `DimensionAlignmentEngine`)
 
-1. **Pass 1 — Geometric Feature & Alignment Extraction**:
-   - Scans target entities (selected entities or all visible geometry) to extract horizontal/vertical spans, circle diameters (`⌀`), arc/fillet radii (`R`), chamfer bevel notes (`C`), and angular vertex relationships (`°`).
+1. **Pass 1 — Shape Classification, Geometric Feature & Alignment Extraction**:
+   - Classifies target geometry into `QDimShapeFamily` (`STANDALONE_CIRCLE`, `CONCENTRIC_CIRCLES`, `HOLE_PATTERN_WITHOUT_PLATE`, `STANDALONE_ARC`, `PLATE_WITH_HOLES`, `TRIANGLE_POLYGON`, `RECTANGLE_BOX`, `OPEN_POLYLINE_CONTOUR`, `MIXED_COMPOSITE`) and builds an explicit `QDimDimensionPlan`.
+   - Suppresses redundant horizontal/vertical bounding-box and radius/half-span linear callouts on standalone circles, concentric circles, hole patterns without a plate, and standalone partial arcs; emits both `⌀` and `R` in Detailed mode for standalone circles; caps triangle interior angles at 2 in Detailed mode.
    - Evaluates symmetric margins, equal hole patterns, and collinear alignments within engineering tolerance to produce a `DimensionAlignmentReport`.
-2. **Pass 2 — 1D Interval-Graph Lane Allocation & 2D AABB Collision Avoidance**:
+2. **Pass 2 — 1D Interval-Graph Lane Allocation & Full 2D Collision Avoidance**:
    - Assigns each linear dimension to an outward offset tier (`tierIndex`) using interval-graph coloring so parallel extension/dimension lines never overlap.
-   - Evaluates 2D Axis-Aligned Bounding Boxes (`AABB`) for dimension text labels and leader rays so callouts avoid colliding with holes and geometry.
+   - Evaluates 2D Axis-Aligned Bounding Boxes (`AABB`) and segment intersections across text labels, arrowheads, witness lines, and model contours so callouts avoid colliding with holes, arrows, and geometry.
 
 ---
 
@@ -15,15 +16,14 @@
 
 - **Bounded Scroll Surface**: Uses a single hoisted `rememberScrollState()` with threshold-pinned header (`qdim_scroll_header`, including a compact rotating header refresh icon `qdim_header_refresh_icon_button`) and footer (`qdim_scroll_footer`).
 - **Three Horizontal Swipeable Card Decks (`QDimHorizontalCardSelector` / `CadHorizontalOptionCardDeck`)**:
-  1. **Operating Scope Mode** (`qdim_wheel_mode`)
-  2. **Alignment & Arrangement Mode** (`qdim_wheel_arrangement`)
-  3. **Dimension Density Policy** (`qdim_wheel_density`)
-  - Horizontal left/right swipes advance or rewind one option at a time using the shared card-stack transition, while vertical drags pass cleanly to the parent dialog scroll container.
-- **Non-Layout-Shifting Delayed Callout Overlay**:
-  - After resting on an option for 2 seconds, a floating speech-bubble callout overlay (`Popup`) explains the selected option without altering card height, pushing sibling sections, or changing the dialog scroll position.
-- **Two-Card Footer Action Deck (`qdim_footer_action_deck`)**:
-  - Green foreground **ENABLE & GENERATE** (`execute_qdim_confirm_button`) and red **CLEAR ALL** (`clear_all_dimensions_button`), governed by an isolated `CadDeckIdleTimerState`.
-  - Downward swipe exchanges the front and rear cards without executing; tapping *Clear All* opens destructive confirmation; long-pressing *Clear All* opens Selective Dimension Removal.
+  1. **Operating Scope Mode** (`qdim_wheel_mode`, stage badge `01 / 03`)
+  2. **Alignment & Arrangement Mode** (`qdim_wheel_arrangement`, stage badge `02 / 03`)
+  3. **Dimension Density Policy** (`qdim_wheel_density`, stage badge `03 / 03`)
+  - Horizontal left/right swipes advance or rewind one option at a time with a swipe-direction-aware chevron trail (`«  «  «` or `»  »  »`), while vertical drags pass cleanly to the parent dialog scroll container.
+- **Parent-Owned Single-Active Callout Overlay (`5.0s` Auto-Dismiss)**:
+  - Never opens automatically on initial dialog launch. Only the most recently interacted selector displays its floating callout (`Popup`) for `5,000ms`, immediately replacing any earlier selector's callout and dismissing on vertical scroll.
+- **Compact Footer Action Row (`qdim_footer_action_deck` + `qdim_open_selective_clear_button`)**:
+  - Green foreground **Generate / Update** (`execute_qdim_confirm_button`) and red **Clear All** (`clear_all_dimensions_button`) two-card deck paired on the same horizontal row with an adjacent icon-first **Selective Clear** button (`qdim_open_selective_clear_button`).
 
 ---
 

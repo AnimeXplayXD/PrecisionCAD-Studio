@@ -42,9 +42,9 @@ EXCLUDED_DIRS = {
     ".git",
     ".gradle",
     ".idea",
-    ".aistudio",
     ".build-outputs",
     "build",
+    "public",
     "reports",
     "__pycache__",
 }
@@ -671,10 +671,11 @@ def scan_repository_files_builtin(repo_root: pathlib.Path) -> tuple[list[dict], 
 
     for root, dirs, files in os.walk(repo_root):
         for d in sorted(dirs):
-            if d in EXCLUDED_DIRS:
+            if d in EXCLUDED_DIRS or (d.startswith(".") and d != ".github"):
                 rel_d = str((pathlib.Path(root) / d).relative_to(repo_root)).replace("\\", "/")
-                excluded_by_policy.append(f"{rel_d}/ (excluded directory by policy)")
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS)
+                if d in EXCLUDED_DIRS:
+                    excluded_by_policy.append(f"{rel_d}/ (excluded directory by policy)")
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS and not (d.startswith(".") and d != ".github"))
         root_path = pathlib.Path(root)
         for fname in sorted(files):
             fpath = root_path / fname

@@ -92,6 +92,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -523,7 +524,9 @@ fun CadWorkspaceScreen(
                         displayUnit = uiState.displayUnit,
                         precision = uiState.precision,
                         pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
-                        onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
+                        onTouchpadGestureStart = viewModel::beginTouchpadCursorGesture,
+                        onRelativeTouchpadDelta = viewModel::moveTouchpadCursorRaw,
+                        onTouchpadGestureEnd = viewModel::finishTouchpadCursorGesture,
                         onJoystickVelocityStep = viewModel::moveCursorByDelta,
                         onStepNudge = viewModel::stepNudgeCursor,
                         onPickAtCursor = viewModel::pickPointAtCursor,
@@ -928,7 +931,9 @@ fun CadWorkspaceScreen(
                             displayUnit = uiState.displayUnit,
                             precision = uiState.precision,
                             pixelsPerModelUnit = uiState.viewport.pixelsPerModelUnit,
-                            onRelativeTouchpadDelta = viewModel::moveCursorByDelta,
+                            onTouchpadGestureStart = viewModel::beginTouchpadCursorGesture,
+                            onRelativeTouchpadDelta = viewModel::moveTouchpadCursorRaw,
+                            onTouchpadGestureEnd = viewModel::finishTouchpadCursorGesture,
                             onJoystickVelocityStep = viewModel::moveCursorByDelta,
                             onStepNudge = viewModel::stepNudgeCursor,
                             onPickAtCursor = viewModel::pickPointAtCursor,
@@ -1096,6 +1101,10 @@ fun CadWorkspaceScreen(
                 Point2DDisplayAdapter.toDisplay(it, uiState.storageUnit, uiState.displayUnit)
             },
             displayUnit = uiState.displayUnit,
+            onBeginPreviewSession = viewModel::beginCoordinatePreviewSession,
+            onPreviewCoordinate = viewModel::previewCoordinateExpression,
+            onCommitPickCoordinate = viewModel::commitCoordinatePreviewPick,
+            onCancelPreviewSession = viewModel::cancelCoordinatePreviewSession,
             onSubmitCoordinateExpression = viewModel::submitCommandOrCoordinateInput,
             onDismiss = { showCoordinateDialog = false }
         )
@@ -2348,7 +2357,7 @@ private fun ContextualCommandAndOptionsDock(
             peekDirection = CardPeekDirection.SIDE,
             isVisible = isCommandDeckVisible,
             isEnabled = isCommandDeckVisible,
-            postExchangeRevealMs = 0L
+            postExchangeRevealMs = CadDeckIdleTimerState.POST_EXCHANGE_REVEAL_MS
         )
 
         var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
@@ -2358,6 +2367,7 @@ private fun ContextualCommandAndOptionsDock(
             }
         }
 
+        val commandBarShape = RoundedCornerShape(8.dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2368,14 +2378,21 @@ private fun ContextualCommandAndOptionsDock(
             Surface(
                 modifier = Modifier
                     .weight(1f)
-                    .border(1.dp, CadBorderStrong, RoundedCornerShape(8.dp)),
-                shape = RoundedCornerShape(8.dp),
-                color = Color(0xD80A0F14)
+                    .clip(commandBarShape)
+                    .border(
+                        width = if (isCommandFieldFocused) 1.5.dp else 1.dp,
+                        color = if (isCommandFieldFocused) CadCyanPrimary else CadBorderStrong,
+                        shape = commandBarShape
+                    ),
+                shape = commandBarShape,
+                color = Color(0xD80A0F14),
+                shadowElevation = 0.dp,
+                tonalElevation = 0.dp
             ) {
                 OutlinedTextField(
                     value = commandLineInput,
                     onValueChange = { nextText ->
-                        commandDeckTimer.onUserInteraction()
+                        // V19 §4.4: Typing in the command field never triggers rear-card peek or resets deck phase
                         onCommandLineInputChange(nextText)
                     },
                     placeholder = {
@@ -2388,6 +2405,18 @@ private fun ContextualCommandAndOptionsDock(
                         )
                     },
                     singleLine = true,
+                    shape = commandBarShape,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        disabledBorderColor = Color.Transparent,
+                        errorBorderColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        errorContainerColor = Color.Transparent,
+                        cursorColor = CadCyanPrimary
+                    ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
                         if (commandLineInput.isNotBlank()) {
@@ -2399,10 +2428,11 @@ private fun ContextualCommandAndOptionsDock(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(46.dp)
+                        .clip(commandBarShape)
                         .onFocusChanged { focusState ->
                             isCommandFieldFocused = focusState.isFocused
                             if (focusState.isFocused) {
-                                commandDeckTimer.onUserInteraction()
+                                // V19 §4.4: Focusing the command bar never causes the rear Cancel card to peek
                                 onOpenCommandEditing()
                             } else if (commandLineInput.isEmpty()) {
                                 onCloseCommandEditing()

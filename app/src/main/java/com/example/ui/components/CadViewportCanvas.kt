@@ -1516,12 +1516,13 @@ private fun DrawScope.drawPolarTrackingOverlay(
     val polarColor = Color(0xFF38BDF8)
     val arcColor = Color(0xFFFBBF24)
 
-    // 1. Temporary Dotted Polar Guide Ray & 2. Dotted Angular Arc when polar guide is acquired
-    if (polarPreview.isPolarGuideAcquired &&
-        polarPreview.worldPolarAngleDeg != null &&
-        polarPreview.activePolarAngleDeg != null
+    // 1. V19 §13.2 — Blue Dashed PolarSnap Ray:
+    // Rendered IF AND ONLY IF PolarSnap is enabled AND the effective cursor bearing matches
+    // an active PolarSnap angle within POLAR_SNAP_RAY_DISPLAY_EPSILON_DEG (0.01°).
+    if (polarPreview.isPolarSnapRayVisibleForDisplay &&
+        polarPreview.worldPolarSnapAngleDeg != null
     ) {
-        val worldAngleRad = Math.toRadians(polarPreview.worldPolarAngleDeg)
+        val worldAngleRad = Math.toRadians(polarPreview.worldPolarSnapAngleDeg)
         val diagModel = (hypot(size.width, size.height) / viewport.pixelsPerModelUnit.coerceAtLeast(0.05f)).toDouble() * 1.8
         val farEndModel = Point2D(
             x = polarPreview.basePoint.x + cos(worldAngleRad) * diagModel,
@@ -1535,8 +1536,14 @@ private fun DrawScope.drawPolarTrackingOverlay(
             strokeWidth = 1.5f,
             pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
         )
+    }
 
-        // 2. Dotted Reference Angle Arc centered at basePoint
+    // 2. V19 §13.2 — Yellow Visual Polar Tracking Reference Angle Arc & Label (Read-Only HUD):
+    // Rendered when Visual Polar Tracking acquires a guide within tolerance (0.35° / 0.55°),
+    // without ever drawing the blue dashed PolarSnap ray unless isPolarSnapRayVisibleForDisplay is true.
+    if (polarPreview.isPolarGuideAcquired &&
+        polarPreview.activePolarAngleDeg != null
+    ) {
         val screenDist = hypot(cursorScreen.x - baseScreen.x, cursorScreen.y - baseScreen.y)
         val arcRadiusPx = (screenDist * 0.35f).coerceIn(28f, 68f)
         val sweepCcwDeg = polarPreview.activePolarAngleDeg.toFloat()

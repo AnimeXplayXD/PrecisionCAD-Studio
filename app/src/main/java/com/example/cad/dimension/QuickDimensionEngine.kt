@@ -46,16 +46,169 @@ data class DimensionStyleConfig(
 )
 
 /**
+ * V19 §14.2 & §14.7 — Shape-Aware QDIM Geometry Classification & Dimension Plan.
+ */
+enum class QDimShapeFamily {
+    STANDALONE_CIRCLE,
+    CONCENTRIC_CIRCLES,
+    HOLE_PATTERN,
+    PARTIAL_ARC,
+    STRAIGHT_LINE,
+    RECTANGLE,
+    ROUNDED_RECTANGLE,
+    TRIANGLE,
+    REGULAR_POLYGON,
+    IRREGULAR_POLYGON,
+    SLOT_OBROUND,
+    COMPOUND_PROFILE
+}
+
+data class QDimGeometryClassification(
+    val shapeFamily: QDimShapeFamily,
+    val circleCount: Int,
+    val arcCount: Int,
+    val lineSegmentCount: Int,
+    val filletArcCount: Int,
+    val isStandaloneCircularOnly: Boolean,
+    val isStandaloneArcOnly: Boolean,
+    val isClosedPolygonOnly: Boolean,
+    val polygonVertexCount: Int = 0,
+    val isRegularPolygon: Boolean = false
+)
+
+data class QDimDimensionPlan(
+    val shapeFamily: QDimShapeFamily,
+    val densityPolicy: QDimDensityPolicy,
+    val suppressBoundingBoxLinearDims: Boolean,
+    val suppressHalfSpanLinearDims: Boolean,
+    val emitFullCircleDiameterCount: Int,
+    val emitFullCircleRadiusCount: Int,
+    val emitArcRadiusCount: Int,
+    val emitArcIncludedAngleCount: Int,
+    val maxInteriorAnglesCount: Int,
+    val groupEqualFillets: Boolean,
+    val groupEqualHoles: Boolean
+)
+
+/**
  * 10.1 AutoDimensionEngine
  * Responsibilities:
- * - Analyse selected or all sheet entities.
+ * - Classify target geometry before generating candidates (V19 §14.2).
  * - Detect geometric relationships (overall width/height, hole patterns, concentric bores, center distances, edge offsets, fillet/arc radii, angles).
  * - Generate candidate dimensions following a 4-tier hierarchy and ISO 129-1 / ASME Y14.5 conventions.
- * - Avoid redundant pairwise hole-to-hole dimensions.
+ * - Avoid redundant dimensions on circles (no bounding-box width/height or half-span linear dimensions on standalone circles), arcs, and polygons.
  * - Apply the selected dimension-density policy (Sparse, Balanced, Detailed).
  * - Preserve existing manual annotations without overwriting or duplicating them.
  */
 object AutoDimensionEngine {
+
+    private data class DetectedArcFeature(
+        val sourceEntityId: String,
+        val arc: CadEntity.ArcEntity,
+        val isFromPolylineBulge: Boolean = false
+    )
+
+    fun classifyTargetGeometry(geometricTargets: List<CadEntity>): QDimGeometryClassification {
+        val circles = geometricTargets.filterIsInstance<CadEntity.CircleEntity>()
+        val donuts = geometricTargets.filterIsInstance<CadEntity.DonutEntity>()
+        val ellipses = geometricTargets.filterIsInstance<CadEntity.EllipseEntity>()
+        val standaloneArcs = geometricTargets.filterIsInstance<CadEntity.ArcEntity>()
+        val standaloneLines = geometricTargets.filterIsInstance<CadEntity.LineEntity>()
+        val polylines = geometricTargets.filterIsInstance<CadEntity.PolylineEntity>()
+
+        var polyLineCount = 0
+        var polyArcCount = 0
+        polylines.forEach { poly ->
+            CadGeometryKernel.explodePolylineToPrimitives(poly).forEach { prim ->
+                when (prim) {
+                    is CadEntity.LineEntity -> polyLineCount++
+                    is CadEntity.ArcEntity -> polyArcCount++
+                    else -> Unit
+                }
+            }
+        }
+
+        val totalLines = standaloneLines.size + polyLineCount
+        val totalArcs = standaloneArcs.size + polyArcCount
+        val hasOnlyCircles = totalLines == 0 && totalArcs == 0 && donuts.isEmpty() && ellipses.isEmpty() && circles.isNotEmpty()
+        val hasOnlyStandaloneArcs = totalLines == 0 && circles.isEmpty() && donuts.isEmpty() && ellipses.isEmpty() && standaloneArcs.isNotEmpty() && polyArcCount == 0
+
+        val shapeFamily = when {
+            hasOnlyCircles && circles.size == 1 -> QDimShapeFamily.STANDALONE_CIRCLE
+            hasOnlyCircles && circles.size > 1 -> {
+                val c0 = circles.first().center
+                val allConcentric = circles.all { it.center.distanceTo(c0) <= 1e-2 }
+                if (allConcentric) QDimShapeFamily.CONCENTRIC_CIRCLES else QDimShapeFamily.HOLE_PATTERN
+            }
+            hasOnlyStandaloneArcs -> QDimShapeFamily.PARTIAL_ARC
+            totalLines == 1 && circles.isEmpty() && totalArcs == 0 && donuts.isEmpty() && ellipses.isEmpty() ->
+                QDimShapeFamily.STRAIGHT_LINE
+            circles.isEmpty() && donuts.isEmpty() && ellipses.isEmpty() && totalLines == 3 && totalArcs == 0 ->
+                QDimShapeFamily.TRIANGLE
+            circles.isEmpty() && donuts.isEmpty() && ellipses.isEmpty() && totalLines == 4 && polyArcCount > 0 ->
+                QDimShapeFamily.ROUNDED_RECTANGLE
+            circles.isEmpty() && donuts.isEmpty() && ellipses.isEmpty() && totalLines == 2 && totalArcs == 2 ->
+                QDimShapeFamily.SLOT_OBROUND
+            circles.isEmpty() && donuts.isEmpty() && ellipses.isEmpty() && polylines.size == 1 && polylines.first().isClosed && polyArcCount == 0 -> {
+                val vCount = polylines.first().vertices.size
+                when {
+                    vCount == 3 -> QDimShapeFamily.TRIANGLE
+                    vCount == 4 -> QDimShapeFamily.RECTANGLE
+                    vCount >= 5 -> QDimShapeFamily.REGULAR_POLYGON
+                    else -> QDimShapeFamily.IRREGULAR_POLYGON
+                }
+            }
+            else -> QDimShapeFamily.COMPOUND_PROFILE
+        }
+
+        return QDimGeometryClassification(
+            shapeFamily = shapeFamily,
+            circleCount = circles.size,
+            arcCount = standaloneArcs.size,
+            lineSegmentCount = totalLines,
+            filletArcCount = polyArcCount,
+            isStandaloneCircularOnly = hasOnlyCircles,
+            isStandaloneArcOnly = hasOnlyStandaloneArcs,
+            isClosedPolygonOnly = circles.isEmpty() && totalArcs == 0 && totalLines >= 3,
+            polygonVertexCount = if (polylines.size == 1) polylines.first().vertices.size else totalLines,
+            isRegularPolygon = shapeFamily == QDimShapeFamily.REGULAR_POLYGON
+        )
+    }
+
+    fun buildDimensionPlan(
+        classification: QDimGeometryClassification,
+        density: QDimDensityPolicy
+    ): QDimDimensionPlan {
+        val suppressBBoxLinear = when (classification.shapeFamily) {
+            QDimShapeFamily.STANDALONE_CIRCLE,
+            QDimShapeFamily.CONCENTRIC_CIRCLES,
+            QDimShapeFamily.HOLE_PATTERN,
+            QDimShapeFamily.PARTIAL_ARC -> true
+            else -> false
+        }
+        val suppressHalfSpan = classification.isStandaloneCircularOnly || classification.isStandaloneArcOnly
+        val emitCircleDiamCount = if (classification.circleCount > 0) 1 else 0
+        val emitCircleRadCount = if (classification.shapeFamily == QDimShapeFamily.STANDALONE_CIRCLE && density == QDimDensityPolicy.DETAILED) 1 else 0
+        val emitArcRadCount = if (classification.isStandaloneArcOnly) classification.arcCount else 0
+        val emitArcAngleCount = if (classification.isStandaloneArcOnly && density != QDimDensityPolicy.SPARSE) classification.arcCount else 0
+        val maxInteriorAngles = when (classification.shapeFamily) {
+            QDimShapeFamily.TRIANGLE -> if (density == QDimDensityPolicy.DETAILED) 2 else if (density == QDimDensityPolicy.BALANCED) 1 else 0
+            else -> Int.MAX_VALUE
+        }
+        return QDimDimensionPlan(
+            shapeFamily = classification.shapeFamily,
+            densityPolicy = density,
+            suppressBoundingBoxLinearDims = suppressBBoxLinear,
+            suppressHalfSpanLinearDims = suppressHalfSpan,
+            emitFullCircleDiameterCount = emitCircleDiamCount,
+            emitFullCircleRadiusCount = emitCircleRadCount,
+            emitArcRadiusCount = emitArcRadCount,
+            emitArcIncludedAngleCount = emitArcAngleCount,
+            maxInteriorAnglesCount = maxInteriorAngles,
+            groupEqualFillets = true,
+            groupEqualHoles = true
+        )
+    }
 
     fun removeAutoDimensions(allEntities: List<CadEntity>): List<CadEntity> {
         return allEntities.filterNot {
@@ -111,6 +264,9 @@ object AutoDimensionEngine {
             return allEntities to emptyReport
         }
 
+        val classification = classifyTargetGeometry(geometricTargets)
+        val dimensionPlan = buildDimensionPlan(classification, density)
+
         val preservedEntities = if (replaceExistingAutoDims) {
             removeAutoDimensions(allEntities)
         } else {
@@ -127,62 +283,68 @@ object AutoDimensionEngine {
         val candidateDims = mutableListOf<CadEntity.DimensionEntity>()
         val centerMarks = mutableListOf<CadEntity.CenterMarkEntity>()
 
-        // --- TIER 1: Primary Overall Bounding Width & Height ---
-        val primaryPolyOrLineId = geometricTargets.firstOrNull {
-            it is CadEntity.PolylineEntity || it is CadEntity.LineEntity
-        }?.id
-
-        if (overallBounds.width > 1e-3 && !hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_HORIZONTAL, overallBounds.width)) {
-            candidateDims.add(
-                CadEntity.DimensionEntity(
-                    dimensionType = DimensionType.LINEAR_HORIZONTAL,
-                    anchor1 = Point2D(overallBounds.minX, overallBounds.maxY),
-                    anchor2 = Point2D(overallBounds.maxX, overallBounds.maxY),
-                    dimensionLinePoint = Point2D(overallBounds.center.x, overallBounds.maxY + 18.0),
-                    sourceEntityIds = listOfNotNull(primaryPolyOrLineId),
-                    isAutoGenerated = true,
-                    hierarchyTier = DimensionHierarchyTier.PRIMARY_OVERALL
-                )
-            )
-        }
-
-        if (overallBounds.height > 1e-3 && !hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_VERTICAL, overallBounds.height)) {
-            candidateDims.add(
-                CadEntity.DimensionEntity(
-                    dimensionType = DimensionType.LINEAR_VERTICAL,
-                    anchor1 = Point2D(overallBounds.minX, overallBounds.minY),
-                    anchor2 = Point2D(overallBounds.minX, overallBounds.maxY),
-                    dimensionLinePoint = Point2D(overallBounds.minX - 18.0, overallBounds.center.y),
-                    sourceEntityIds = listOfNotNull(primaryPolyOrLineId),
-                    isAutoGenerated = true,
-                    hierarchyTier = DimensionHierarchyTier.PRIMARY_OVERALL
-                )
-            )
-        }
-
         // --- Analyze Both Standalone Arcs AND Polyline Bulge Arcs (Fillets / Rounded Corners) ---
-        data class DetectedArcFeature(
-            val sourceEntityId: String,
-            val arc: CadEntity.ArcEntity
-        )
-
         val detectedArcs = mutableListOf<DetectedArcFeature>()
         val allLines = mutableListOf<Pair<String, CadEntity.LineEntity>>()
         geometricTargets.forEach { ent ->
             when (ent) {
-                is CadEntity.ArcEntity -> detectedArcs.add(DetectedArcFeature(ent.id, ent))
+                is CadEntity.ArcEntity -> detectedArcs.add(DetectedArcFeature(ent.id, ent, isFromPolylineBulge = false))
                 is CadEntity.LineEntity -> allLines.add(ent.id to ent)
                 is CadEntity.PolylineEntity -> {
                     val prims = CadGeometryKernel.explodePolylineToPrimitives(ent)
                     prims.forEach { prim ->
                         when (prim) {
-                            is CadEntity.ArcEntity -> detectedArcs.add(DetectedArcFeature(ent.id, prim))
+                            is CadEntity.ArcEntity -> detectedArcs.add(DetectedArcFeature(ent.id, prim, isFromPolylineBulge = true))
                             is CadEntity.LineEntity -> allLines.add(ent.id to prim)
                             else -> Unit
                         }
                     }
                 }
                 else -> Unit
+            }
+        }
+
+        // --- TIER 1: Primary Overall Bounding Width & Height ---
+        // V19 §14.3: Suppressed for standalone circles, concentric circles, hole patterns without a plate, and standalone partial arcs!
+        val primaryPolyOrLineId = geometricTargets.firstOrNull {
+            it is CadEntity.PolylineEntity || it is CadEntity.LineEntity
+        }?.id
+
+        val isSingleInclinedLine = classification.shapeFamily == QDimShapeFamily.STRAIGHT_LINE &&
+            allLines.size == 1 &&
+            abs(allLines.first().second.start.x - allLines.first().second.end.x) > 1e-3 &&
+            abs(allLines.first().second.start.y - allLines.first().second.end.y) > 1e-3
+
+        val emitOverallBoundingLinear = !dimensionPlan.suppressBoundingBoxLinearDims &&
+            !(isSingleInclinedLine && density != QDimDensityPolicy.DETAILED)
+
+        if (emitOverallBoundingLinear) {
+            if (overallBounds.width > 1e-3 && !hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_HORIZONTAL, overallBounds.width)) {
+                candidateDims.add(
+                    CadEntity.DimensionEntity(
+                        dimensionType = DimensionType.LINEAR_HORIZONTAL,
+                        anchor1 = Point2D(overallBounds.minX, overallBounds.maxY),
+                        anchor2 = Point2D(overallBounds.maxX, overallBounds.maxY),
+                        dimensionLinePoint = Point2D(overallBounds.center.x, overallBounds.maxY + 18.0),
+                        sourceEntityIds = listOfNotNull(primaryPolyOrLineId),
+                        isAutoGenerated = true,
+                        hierarchyTier = DimensionHierarchyTier.PRIMARY_OVERALL
+                    )
+                )
+            }
+
+            if (overallBounds.height > 1e-3 && !hasEquivalentManualLinear(manualDimensions, DimensionType.LINEAR_VERTICAL, overallBounds.height)) {
+                candidateDims.add(
+                    CadEntity.DimensionEntity(
+                        dimensionType = DimensionType.LINEAR_VERTICAL,
+                        anchor1 = Point2D(overallBounds.minX, overallBounds.minY),
+                        anchor2 = Point2D(overallBounds.minX, overallBounds.maxY),
+                        dimensionLinePoint = Point2D(overallBounds.minX - 18.0, overallBounds.center.y),
+                        sourceEntityIds = listOfNotNull(primaryPolyOrLineId),
+                        isAutoGenerated = true,
+                        hierarchyTier = DimensionHierarchyTier.PRIMARY_OVERALL
+                    )
+                )
             }
         }
 
@@ -213,35 +375,35 @@ object AutoDimensionEngine {
         val outerTrackOffset = innerTrackOffset + (spanScale * 0.075).coerceIn(7.5, 16.0)
         val placedLeaderBoxes = mutableListOf<BoundingBox2D>()
 
-        // Reserve linear dimension label boxes so radial/diametric leaders never collide with them
         val topTrackY = overallBounds.maxY + outerTrackOffset
         val bottomTrackY = overallBounds.minY - innerTrackOffset
         val leftTrackX = overallBounds.minX - outerTrackOffset
         val rightTrackX = overallBounds.maxX + innerTrackOffset
-        placedLeaderBoxes.add(
-            BoundingBox2D(
-                overallBounds.center.x - spanScale * 0.16,
-                topTrackY - 4.0,
-                overallBounds.center.x + spanScale * 0.16,
-                topTrackY + 6.0
+        if (emitOverallBoundingLinear) {
+            placedLeaderBoxes.add(
+                BoundingBox2D(
+                    overallBounds.center.x - spanScale * 0.16,
+                    topTrackY - 4.0,
+                    overallBounds.center.x + spanScale * 0.16,
+                    topTrackY + 6.0
+                )
             )
-        )
-        placedLeaderBoxes.add(
-            BoundingBox2D(
-                leftTrackX - 6.0,
-                overallBounds.center.y - spanScale * 0.16,
-                leftTrackX + 4.0,
-                overallBounds.center.y + spanScale * 0.16
+            placedLeaderBoxes.add(
+                BoundingBox2D(
+                    leftTrackX - 6.0,
+                    overallBounds.center.y - spanScale * 0.16,
+                    leftTrackX + 4.0,
+                    overallBounds.center.y + spanScale * 0.16
+                )
             )
-        )
+        }
 
         // Group circles by layer + strict equal diameter (within 1e-4 tolerance) to generate verified pattern callouts like `6× ⌀10.00`
         val diameterGroups = circles.groupBy { it.layerName to (it.diameter * 10000.0).roundToLong() }
             .entries
-            .sortedByDescending { it.key.second } // Largest diameter first
+            .sortedByDescending { it.key.second }
 
         diameterGroups.forEachIndexed { groupIdx, (_, group) ->
-            // Prefer top-right or outer circle for cleanest unobstructed leader exit
             val representative = group.maxByOrNull { it.center.x * 0.75 + it.center.y } ?: group.first()
             val countPrefix = if (group.size > 1) "${group.size}× " else ""
 
@@ -254,7 +416,9 @@ object AutoDimensionEngine {
                 center = representative.center,
                 radius = representative.radius,
                 minClearanceRadius = maxConcentricRadius,
-                preferredBaseAngle = if (group.size > 1) {
+                preferredBaseAngle = if (classification.shapeFamily == QDimShapeFamily.STANDALONE_CIRCLE) {
+                    38.0
+                } else if (group.size > 1) {
                     overallBounds.center.angleToDeg(representative.center)
                 } else {
                     22.0 + groupIdx * 25.0
@@ -263,7 +427,7 @@ object AutoDimensionEngine {
                 allArcs = detectedArcs.map { it.arc },
                 overallBounds = overallBounds,
                 placedLeaderBoxes = placedLeaderBoxes,
-                lockContactAngle = null
+                lockContactAngle = if (classification.shapeFamily == QDimShapeFamily.STANDALONE_CIRCLE) 38.0 else null
             )
 
             placedLeaderBoxes.add(placement.reservedBox)
@@ -280,6 +444,38 @@ object AutoDimensionEngine {
                     hierarchyTier = DimensionHierarchyTier.GEOMETRIC_CALLOUT
                 )
             )
+
+            // V19 §14.3.1 — Standalone Complete Circle in Detailed mode:
+            // Emit 1 Diameter (Ø) and 1 Radius (R) at distinct non-overlapping leader angles (38° and 142°),
+            // and zero horizontal/vertical linear bounding or half-span dimensions!
+            if (classification.shapeFamily == QDimShapeFamily.STANDALONE_CIRCLE &&
+                density == QDimDensityPolicy.DETAILED
+            ) {
+                val radiusPlacement = findBestLeaderPlacement(
+                    featureId = representative.id,
+                    center = representative.center,
+                    radius = representative.radius,
+                    minClearanceRadius = maxConcentricRadius,
+                    preferredBaseAngle = 142.0,
+                    allCircles = circles,
+                    allArcs = detectedArcs.map { it.arc },
+                    overallBounds = overallBounds,
+                    placedLeaderBoxes = placedLeaderBoxes,
+                    lockContactAngle = 142.0
+                )
+                placedLeaderBoxes.add(radiusPlacement.reservedBox)
+                candidateDims.add(
+                    CadEntity.DimensionEntity(
+                        dimensionType = DimensionType.RADIUS,
+                        anchor1 = representative.center,
+                        anchor2 = radiusPlacement.rimContactPoint,
+                        dimensionLinePoint = radiusPlacement.shoulderPoint,
+                        sourceEntityIds = listOf(representative.id),
+                        isAutoGenerated = true,
+                        hierarchyTier = DimensionHierarchyTier.GEOMETRIC_CALLOUT
+                    )
+                )
+            }
         }
 
         // --- Analyze Donuts (Inner & Outer Diameters) (Section 57) ---
@@ -400,17 +596,83 @@ object AutoDimensionEngine {
             }
         }
 
-        if (density != QDimDensityPolicy.SPARSE) {
+        // V19 §14.3.3 — Standalone Partial Arc: emit Radius in Sparse/Balanced/Detailed, plus Included Angle in Balanced/Detailed
+        if (classification.isStandaloneArcOnly) {
+            val radiusGroups = detectedArcs.groupBy { it.arc.layerName to (it.arc.radius * 10000.0).roundToLong() }
+            for ((_, arcGroup) in radiusGroups) {
+                val repFeature = arcGroup.maxByOrNull { it.arc.midPoint.x + it.arc.midPoint.y } ?: arcGroup.first()
+                val repArc = repFeature.arc
+                val mid = repArc.midPoint
+                val outwardAngle = repArc.center.angleToDeg(mid)
+                val prefix = if (arcGroup.size > 1) "${arcGroup.size}× " else ""
+                if (repArc.radius >= 4.0) {
+                    centerMarks.add(
+                        CadEntity.CenterMarkEntity(
+                            center = repArc.center,
+                            radius = min(repArc.radius * 0.45, 5.0),
+                            sourceEntityId = repFeature.sourceEntityId
+                        )
+                    )
+                }
+                val placement = findBestLeaderPlacement(
+                    featureId = repFeature.sourceEntityId,
+                    center = repArc.center,
+                    radius = repArc.radius,
+                    minClearanceRadius = repArc.radius,
+                    preferredBaseAngle = outwardAngle,
+                    allCircles = circles,
+                    allArcs = detectedArcs.map { it.arc },
+                    overallBounds = overallBounds,
+                    placedLeaderBoxes = placedLeaderBoxes,
+                    lockContactAngle = outwardAngle
+                )
+                placedLeaderBoxes.add(placement.reservedBox)
+                candidateDims.add(
+                    CadEntity.DimensionEntity(
+                        dimensionType = DimensionType.RADIUS,
+                        anchor1 = repArc.center,
+                        anchor2 = mid,
+                        dimensionLinePoint = placement.shoulderPoint,
+                        customPrefix = prefix,
+                        sourceEntityIds = arcGroup.map { it.sourceEntityId }.distinct(),
+                        isAutoGenerated = true,
+                        hierarchyTier = DimensionHierarchyTier.GEOMETRIC_CALLOUT
+                    )
+                )
+                // In Balanced & Detailed mode on a standalone partial arc, also emit the included sweep angle (never a redundant chord/arc-length triple)
+                if (density != QDimDensityPolicy.SPARSE && abs(repArc.sweepAngleDeg) in 1.0..359.0) {
+                    val startPt = repArc.startPoint
+                    val endPt = repArc.endPoint
+                    val angMidPt = repArc.center.polarOffset(max(repArc.radius * 0.55, 8.0), outwardAngle)
+                    candidateDims.add(
+                        CadEntity.DimensionEntity(
+                            dimensionType = DimensionType.ANGULAR,
+                            anchor1 = startPt,
+                            anchor2 = endPt,
+                            dimensionLinePoint = angMidPt,
+                            angularVertex = repArc.center,
+                            sourceEntityIds = listOf(repFeature.sourceEntityId),
+                            isAutoGenerated = true,
+                            hierarchyTier = DimensionHierarchyTier.GEOMETRIC_CALLOUT
+                        )
+                    )
+                }
+            }
+        }
+
+        if (density != QDimDensityPolicy.SPARSE && !classification.isStandaloneArcOnly) {
             // --- TIER 2: Secondary Dimensions (Edge-to-Hole Offsets, Hole Pitch Chains / Baselines / Ordinates) ---
-            if (circles.isNotEmpty()) {
+            // V19 §14.3.1 & §14.3.2: Only emit plate-edge-to-hole offsets when an enclosing plate/line profile exists
+            // (`!dimensionPlan.suppressHalfSpanLinearDims`), preventing half-radius (90.55 cm) dimensions on standalone circles!
+            val hasEnclosingPlateEdges = !dimensionPlan.suppressHalfSpanLinearDims && allLines.isNotEmpty()
+            if (circles.isNotEmpty() && (hasEnclosingPlateEdges || circles.size > 1)) {
                 val clusterTol = max(0.25, spanScale * 0.005)
                 val rowsByY = clusterCirclesByCoord(circles, clusterTol) { it.center.y }
                 val bottomRow = rowsByY.minByOrNull { row -> row.minOf { it.center.y } }.orEmpty().sortedBy { it.center.x }
                 val colsByX = clusterCirclesByCoord(circles, clusterTol) { it.center.x }
                 val rightCol = colsByX.maxByOrNull { col -> col.maxOf { it.center.x } }.orEmpty().sortedBy { it.center.y }
 
-                if (arrangementPreference == DimensionArrangementPreference.ORDINATE) {
-                    // Ordinate mode: emit X ordinate dimensions for distinct X hole columns and Y ordinate dimensions for distinct Y hole rows
+                if (arrangementPreference == DimensionArrangementPreference.ORDINATE && hasEnclosingPlateEdges) {
                     val distinctXCols = colsByX.mapNotNull { col -> col.minByOrNull { it.center.y } }.sortedBy { it.center.x }
                     distinctXCols.forEach { hole ->
                         candidateDims.add(
@@ -448,7 +710,7 @@ object AutoDimensionEngine {
                     if (distinctXTargets.isNotEmpty()) {
                         val firstHole = distinctXTargets.first()
                         val leftEdgeOffset = firstHole.center.x - overallBounds.minX
-                        if (leftEdgeOffset > 1e-2 && leftEdgeOffset < overallBounds.width - 1e-2) {
+                        if (hasEnclosingPlateEdges && leftEdgeOffset > 1e-2 && leftEdgeOffset < overallBounds.width - 1e-2) {
                             candidateDims.add(
                                 CadEntity.DimensionEntity(
                                     dimensionType = DimensionType.LINEAR_HORIZONTAL,
@@ -482,10 +744,10 @@ object AutoDimensionEngine {
                             }
                         }
 
-                        // In Detailed mode, if right margin is asymmetric with left margin, explicitly dimension the right margin
                         val lastHole = distinctXTargets.last()
                         val rightEdgeOffset = overallBounds.maxX - lastHole.center.x
-                        if (density == QDimDensityPolicy.DETAILED &&
+                        if (hasEnclosingPlateEdges &&
+                            density == QDimDensityPolicy.DETAILED &&
                             rightEdgeOffset > 1e-2 &&
                             abs(rightEdgeOffset - leftEdgeOffset) > 1e-3
                         ) {
@@ -511,7 +773,7 @@ object AutoDimensionEngine {
                     if (distinctYTargets.isNotEmpty()) {
                         val bottomHole = distinctYTargets.first()
                         val bottomEdgeOffset = bottomHole.center.y - overallBounds.minY
-                        if (bottomEdgeOffset > 1e-2 && bottomEdgeOffset < overallBounds.height - 1e-2) {
+                        if (hasEnclosingPlateEdges && bottomEdgeOffset > 1e-2 && bottomEdgeOffset < overallBounds.height - 1e-2) {
                             candidateDims.add(
                                 CadEntity.DimensionEntity(
                                     dimensionType = DimensionType.LINEAR_VERTICAL,
@@ -546,7 +808,8 @@ object AutoDimensionEngine {
 
                         val topHole = distinctYTargets.last()
                         val topEdgeOffset = overallBounds.maxY - topHole.center.y
-                        if (density == QDimDensityPolicy.DETAILED &&
+                        if (hasEnclosingPlateEdges &&
+                            density == QDimDensityPolicy.DETAILED &&
                             topEdgeOffset > 1e-2 &&
                             abs(topEdgeOffset - bottomEdgeOffset) > 1e-3
                         ) {
@@ -568,14 +831,12 @@ object AutoDimensionEngine {
 
             val radiusGroups = detectedArcs.groupBy { it.arc.layerName to (it.arc.radius * 10000.0).roundToLong() }
             for ((_, arcGroup) in radiusGroups) {
-                // Choose the top-right-most arc in the group so the radial callout exits cleanly outside the part
                 val repFeature = arcGroup.maxByOrNull { it.arc.midPoint.x + it.arc.midPoint.y } ?: arcGroup.first()
                 val repArc = repFeature.arc
                 val mid = repArc.midPoint
                 val outwardAngle = repArc.center.angleToDeg(mid)
                 val prefix = if (arcGroup.size > 1) "${arcGroup.size}× " else ""
 
-                // Place a center mark for standalone arcs with radius >= 4.0
                 if (repArc.radius >= 4.0) {
                     centerMarks.add(
                         CadEntity.CenterMarkEntity(
@@ -615,7 +876,7 @@ object AutoDimensionEngine {
                 )
             }
 
-            // --- Polygon & Triangle Interior Vertex Angular Extraction (Sections 52, 53, 55.3 & 57) ---
+            // --- Polygon & Triangle Interior Vertex Angular Extraction (Sections 52, 53, 55.3, 57 & V19 §14.3.7) ---
             data class DetectedCornerAngle(
                 val sourceEntityId: String,
                 val vertex: Point2D,
@@ -734,8 +995,14 @@ object AutoDimensionEngine {
                             groupIdx++
                         }
                     } else {
-                        // In Detailed mode (or open polyline), dimension every valid vertex angle on staggered radii
-                        unannotatedCorners.forEachIndexed { cIdx, cand ->
+                        // In Detailed mode (or open polyline), dimension valid vertex angles on staggered radii
+                        // V19 §14.3.7: For a triangle in Detailed mode, cap at dimensionPlan.maxInteriorAnglesCount (max 2 angles)
+                        val cornersToEmit = if (isTriangle) {
+                            unannotatedCorners.take(dimensionPlan.maxInteriorAnglesCount)
+                        } else {
+                            unannotatedCorners
+                        }
+                        cornersToEmit.forEachIndexed { cIdx, cand ->
                             val arcRadius = (cand.minIncidentEdgeLen * 0.26 + (cIdx % 3) * 2.4).coerceIn(5.5, 18.0)
                             val arcMidPt = cand.vertex.polarOffset(arcRadius, cand.bisectorAngleDeg)
                             candidateDims.add(
@@ -1108,6 +1375,9 @@ object AutoDimensionEngine {
             storageUnit = storageUnit,
             displayUnit = displayUnit,
             viewport = viewport
+        ).copy(
+            geometryClassification = classification,
+            dimensionPlan = dimensionPlan
         )
 
         return (preservedEntities + centerMarks + alignmentReport.resolvedDimensions) to alignmentReport
