@@ -228,15 +228,21 @@ class CadDeckIdleTimerState(
         directInteractionGeneration++
         elapsedIdleMs = 0L
         isIdlePeeking = false
-        if (didExchangeCards) {
+        if (didExchangeCards && postExchangeRevealMs > 0L) {
             isPostExchangeRevealing = true
+            elapsedPostExchangeMs = 0L
+        } else {
+            isPostExchangeRevealing = false
             elapsedPostExchangeMs = 0L
         }
     }
 
-    fun onCardExchanged(isCommandPromptOrDeck: Boolean = false) = onDirectDeckInteraction(didExchangeCards = true)
-    fun onCardExchange(isCommandPromptOrDeck: Boolean = false) = onDirectDeckInteraction(didExchangeCards = true)
-    fun onOrderExchanged(isCommandPromptOrDeck: Boolean = false) = onDirectDeckInteraction(didExchangeCards = true)
+    fun onCardExchanged(isCommandPromptOrDeck: Boolean = false) =
+        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
+    fun onCardExchange(isCommandPromptOrDeck: Boolean = false) =
+        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
+    fun onOrderExchanged(isCommandPromptOrDeck: Boolean = false) =
+        onDirectDeckInteraction(didExchangeCards = !isCommandPromptOrDeck && postExchangeRevealMs > 0L)
     fun onDirectInteraction() = onDirectDeckInteraction(didExchangeCards = false)
     fun onUserInteraction() = onDirectDeckInteraction(didExchangeCards = false)
     fun cancelAllVisualPeeks() = updateEligibility(parentVisible = false)
@@ -281,10 +287,25 @@ fun rememberCadDeckIdleTimerState(
     deckId: String,
     peekDirection: CardPeekDirection = CardPeekDirection.ABOVE,
     isVisible: Boolean = true,
-    isEnabled: Boolean = true
+    isEnabled: Boolean = true,
+    postExchangeRevealMs: Long = CadDeckIdleTimerState.POST_EXCHANGE_REVEAL_MS
 ): CadDeckIdleTimerState {
-    val state = remember(deckId) {
-        CadDeckIdleTimerState(deckId = deckId, peekDirection = peekDirection)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isReducedMotion = remember(context) {
+        runCatching {
+            android.provider.Settings.Global.getFloat(
+                context.contentResolver,
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f
+            ) == 0f
+        }.getOrDefault(false)
+    }
+    val state = remember(deckId, postExchangeRevealMs) {
+        CadDeckIdleTimerState(
+            deckId = deckId,
+            peekDirection = peekDirection,
+            postExchangeRevealMs = postExchangeRevealMs
+        )
     }
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -301,8 +322,12 @@ fun rememberCadDeckIdleTimerState(
         }
     }
 
-    LaunchedEffect(isVisible, isEnabled) {
-        state.updateEligibility(parentVisible = isVisible, deckEnabled = isEnabled)
+    LaunchedEffect(isVisible, isEnabled, isReducedMotion) {
+        state.updateEligibility(
+            parentVisible = isVisible,
+            deckEnabled = isEnabled,
+            reducedMotion = isReducedMotion
+        )
     }
 
     // Drive post-exchange 2.4s reveal retraction and 75s section-local idle peek
@@ -313,7 +338,7 @@ fun rememberCadDeckIdleTimerState(
     ) {
         if (!state.isParentVisible || !state.isWindowResumed) return@LaunchedEffect
 
-        if (state.isPostExchangeRevealing) {
+        if (state.isPostExchangeRevealing && state.postExchangeRevealMs > 0L) {
             delay(state.postExchangeRevealMs)
             state.advanceTimeBy(state.postExchangeRevealMs)
         }
@@ -359,8 +384,35 @@ fun BindCadDeckIdleTimerEffect(
     timerState: CadDeckIdleTimerState,
     isEligible: Boolean
 ) {
-    LaunchedEffect(isEligible) {
-        timerState.updateEligibility(parentVisible = isEligible, deckEnabled = isEligible)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isReducedMotion = remember(context) {
+        runCatching {
+            android.provider.Settings.Global.getFloat(
+                context.contentResolver,
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f
+            ) == 0f
+        }.getOrDefault(false)
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, timerState) {
+        val observer = LifecycleEventObserver { _, event ->
+            val resumed = event == Lifecycle.Event.ON_RESUME ||
+                lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            timerState.updateEligibility(windowResumed = resumed)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            timerState.updateEligibility(parentVisible = false)
+        }
+    }
+    LaunchedEffect(isEligible, isReducedMotion) {
+        timerState.updateEligibility(
+            parentVisible = isEligible,
+            deckEnabled = isEligible,
+            reducedMotion = isReducedMotion
+        )
     }
     LaunchedEffect(
         timerState.isEligibleForTimer,
@@ -368,7 +420,7 @@ fun BindCadDeckIdleTimerEffect(
         timerState.directInteractionGeneration
     ) {
         if (!timerState.isParentVisible || !timerState.isWindowResumed) return@LaunchedEffect
-        if (timerState.isPostExchangeRevealing) {
+        if (timerState.isPostExchangeRevealing && timerState.postExchangeRevealMs > 0L) {
             delay(timerState.postExchangeRevealMs)
             timerState.advanceTimeBy(timerState.postExchangeRevealMs)
         }

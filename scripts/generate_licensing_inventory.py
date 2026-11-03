@@ -28,7 +28,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-SCHEMA_VERSION = "18.1.0"
+SCHEMA_VERSION = "18.2.0"
 
 DISCLAIMER_TEXT = (
     "Informational inventory only. Automated detection reports licence and copyright "
@@ -1134,7 +1134,7 @@ def main() -> int:
         if rc_all == 0:
             current_cfg = None
             current_lines: list[str] = []
-            cfg_header_re = re.compile(r"^([A-Za-z0-9_]+)\s+-\s+.*$")
+            cfg_header_re = re.compile(r"^([A-Za-z0-9_]+)(?:\s+-\s+.*)?$")
             for line in out_all.splitlines():
                 hm = cfg_header_re.match(line)
                 if hm:
@@ -1164,8 +1164,36 @@ def main() -> int:
                     "status": "RESOLVED",
                     "diagnosticLog": "diagnostics/gradle-app-dependencies.log",
                 }
+            elif rc_all == 0 and cfg_name not in config_blocks:
+                # Dynamic configuration discovery (§7.3): `:app:dependencies` succeeded (rc=0) and
+                # enumerated all configurations in the `:app` container. Configurations not created
+                # by AGP in the active variant model (such as `releaseUnitTestRuntimeClasspath` and
+                # `releaseUnitTestCompileClasspath` when only Debug unit tests are enabled) are
+                # classified as `NOT_APPLICABLE` with an explicit reason rather than failed/missing.
+                not_applicable_reason = (
+                    "AGP creates unit-test configurations only for enabled unit-test variants; "
+                    f"'{cfg_name}' is not created in the ':app' variant model (unit tests run on the "
+                    "Debug variant via 'debugUnitTestCompileClasspath' and 'debugUnitTestRuntimeClasspath')."
+                )
+                log_rel = f"diagnostics/gradle-config-{cfg_name}.log"
+                (out_dir / log_rel).write_text(
+                    f"Dynamic configuration discovery from ':app:dependencies' (rc=0):\n"
+                    f"Configuration '{cfg_name}' is NOT_APPLICABLE in ':app'.\n"
+                    f"Reason: {not_applicable_reason}\n",
+                    encoding="utf-8",
+                )
+                configuration_results[cfg_name] = {
+                    "description": cfg_desc,
+                    "exists": False,
+                    "resolvable": False,
+                    "exitCode": None,
+                    "recordCount": 0,
+                    "status": "NOT_APPLICABLE",
+                    "notApplicableReason": not_applicable_reason,
+                    "diagnosticLog": log_rel,
+                }
             else:
-                # Fallback individual query with full diagnostic capture
+                # Fallback individual query when `:app:dependencies` itself did not succeed
                 rc_c, out_c, err_c, dur_c, to_c = run_cmd(
                     [gradle_cmd, ":app:dependencies", "--configuration", cfg_name, "--no-daemon"],
                     repo_root,
@@ -1193,18 +1221,23 @@ def main() -> int:
                     }
                 else:
                     not_found = "not found in configuration container" in (out_c + err_c)
-                    status_label = "NOT_PRESENT_IN_VARIANT_MODEL" if not_found else "RESOLUTION_FAILED"
+                    status_label = "NOT_APPLICABLE" if not_found else "RESOLUTION_FAILED"
                     if not not_found:
                         unexpected_omitted_configs.append(f"{cfg_name} (rc={rc_c})")
                     configuration_results[cfg_name] = {
                         "description": cfg_desc,
                         "exists": not not_found,
                         "resolvable": False,
-                        "exitCode": rc_c,
+                        "exitCode": None if not_found else rc_c,
                         "durationSeconds": dur_c,
                         "recordCount": 0,
                         "status": status_label,
-                        "error": (err_c or out_c).strip(),
+                        "notApplicableReason": (
+                            "Configuration is not created in the active AGP variant model."
+                            if not_found
+                            else ""
+                        ),
+                        "error": "" if not_found else (err_c or out_c).strip(),
                         "diagnosticLog": log_rel,
                     }
 
@@ -1214,7 +1247,8 @@ def main() -> int:
                 "resolvable": False,
                 "exitCode": None,
                 "recordCount": 0,
-                "status": "REPLACED_BY_CANONICAL_AGP_CONFIGURATION",
+                "status": "NOT_APPLICABLE",
+                "notApplicableReason": note,
                 "note": note,
             }
     else:
@@ -1255,11 +1289,16 @@ def main() -> int:
     scancode_duration_s: float = 0.0
     scancode_Diagnostic_log = ""
 
-    if env_install_status in ("INSTALL_FAILED", "VERSION_CHECK_FAILED"):
+    if env_install_status in (
+        "INSTALL_FAILED",
+        "ARCHIVE_VERIFIED",
+        "BOOTSTRAP_FAILED_PYTHON_MISSING",
+        "VERSION_CHECK_FAILED",
+    ):
         scancode_status = env_install_status
         scancode_Diagnostic_log = "diagnostics/scancode-install.log"
     elif scancode_bin:
-        scancode_status = "INSTALLED"
+        scancode_status = "ARCHIVE_VERIFIED"
         rc_ver, out_ver, err_ver, dur_ver, _ = run_cmd([scancode_bin, "--version"], repo_root, timeout=30)
         (diag_dir / "scancode-version.log").write_text(
             f"cmd: {scancode_bin} --version\nrc: {rc_ver}\nduration_s: {dur_ver}\n"
@@ -1272,7 +1311,12 @@ def main() -> int:
             f"--- STDOUT ---\n{out_help}\n--- STDERR ---\n{err_help}\n",
             encoding="utf-8",
         )
-        if rc_ver != 0 or rc_help != 0:
+        combined_ver_err = (out_ver + "\n" + err_ver + "\n" + out_help + "\n" + err_help)
+        if "Unable to find an installation of Python" in combined_ver_err:
+            scancode_status = "BOOTSTRAP_FAILED_PYTHON_MISSING"
+            scancode_exit_code = rc_ver if rc_ver != 0 else rc_help
+            scancode_Diagnostic_log = "diagnostics/scancode-version.log"
+        elif rc_ver != 0 or rc_help != 0:
             scancode_status = "VERSION_CHECK_FAILED"
             scancode_exit_code = rc_ver if rc_ver != 0 else rc_help
             scancode_Diagnostic_log = "diagnostics/scancode-version.log"

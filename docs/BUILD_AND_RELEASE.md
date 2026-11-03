@@ -7,7 +7,7 @@
 - **Compile SDK**: Android API `37`, minor API level `2` (`compileSdk { version = release(37) { minorApiLevel = 2 } }`)
 - **Target SDK**: `37` (`minSdk = 24`)
 - **Toolchain**:
-  - Gradle Wrapper: `9.3.1` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with verified `distributionSha256Sum=b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06`
+  - Gradle Wrapper: `9.8.2` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with verified `distributionSha256Sum=21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607`
   - Android Gradle Plugin (AGP): `9.1.1`
   - Kotlin Compose Plugin: `2.2.10`
   - KSP: `2.3.5`
@@ -15,6 +15,7 @@
   - Node 24-Compatible Actions:
     - `actions/checkout@v7.0.1`
     - `actions/setup-java@v6.1.0`
+    - `actions/setup-python@v7.1.0`
     - `gradle/actions/setup-gradle@v6.4.1`
     - `actions/upload-artifact@v7.0.2`
     - `softprops/action-gh-release@v3.0.3`
@@ -25,7 +26,7 @@
 
 ## 2. Automated Versioning (`version.properties` + `app/build.gradle.kts`)
 
-- Base version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=0`, `VERSION_CODE=18`) are stored in root `version.properties`.
+- Base version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=2`, `VERSION_CODE=20`) are stored in root `version.properties`.
 - In GitHub Actions CI, `VERSION_CODE` is computed as `BASE_CODE + GITHUB_RUN_NUMBER` and verified across **all paginated** GitHub Releases (`per_page=100`, `page=1..N`) to guarantee that every new stable Release has a `versionCode` strictly greater than the highest previously published stable release.
 - Manual `version_name_override` values on `workflow_dispatch` are validated via environment variables (`INPUT_VERSION_OVERRIDE`) without direct shell expansion of `${{ inputs.* }}`.
 

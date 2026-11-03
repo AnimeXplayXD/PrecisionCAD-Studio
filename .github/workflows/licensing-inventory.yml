@@ -71,7 +71,20 @@ jobs:
             cp .env.example .env
           fi
 
-      - name: Download, Verify & Install Pinned ScanCode Toolkit Standalone Archive (v32.5.0)
+      - name: Set up Python 3.12 for ScanCode Toolkit (v32.5.0_py3.12)
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12.x'
+
+      - name: Verify Python 3.12 Runtime & Virtualenv Prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3.12 --version
+          python --version
+          python3.12 -m venv --help > /dev/null
+
+      - name: Download, Verify & Bootstrap Pinned ScanCode Toolkit Standalone Archive (v32.5.0)
         id: scancode_setup
         shell: bash
         run: |
@@ -98,19 +111,31 @@ jobs:
             echo "ERROR: ScanCode archive SHA-256 mismatch!" | tee -a "$INSTALL_LOG"
             exit 1
           fi
+          echo "SCANCODE_INSTALL_STATUS=ARCHIVE_VERIFIED" >> "$GITHUB_ENV"
 
           rm -rf "$EXTRACT_DIR"
           mkdir -p "$EXTRACT_DIR"
           tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR" --strip-components=1 >> "$INSTALL_LOG" 2>&1
           rm -f "$ARCHIVE_PATH"
 
+          if ! command -v python3.12 > /dev/null 2>&1; then
+            echo "SCANCODE_INSTALL_STATUS=BOOTSTRAP_FAILED_PYTHON_MISSING" >> "$GITHUB_ENV"
+            echo "ERROR: python3.12 is required by ${SCANCODE_ARCHIVE_NAME} but was not found on PATH" | tee -a "$INSTALL_LOG"
+            exit 1
+          fi
+
+          echo "Python 3.12 runtime: $(python3.12 --version 2>&1)" | tee -a "$INSTALL_LOG"
           if [ -x "${EXTRACT_DIR}/configure" ]; then
-            "${EXTRACT_DIR}/configure" >> "$INSTALL_LOG" 2>&1 || true
+            if ! PYTHON_EXECUTABLE="$(command -v python3.12)" "${EXTRACT_DIR}/configure" >> "$INSTALL_LOG" 2>&1; then
+              echo "SCANCODE_INSTALL_STATUS=BOOTSTRAP_FAILED_PYTHON_MISSING" >> "$GITHUB_ENV"
+              echo "ERROR: ScanCode ./configure bootstrap failed" | tee -a "$INSTALL_LOG"
+              exit 1
+            fi
           fi
 
           SCANCODE_EXE="${EXTRACT_DIR}/scancode"
           if [ ! -x "$SCANCODE_EXE" ]; then
-            echo "SCANCODE_INSTALL_STATUS=INSTALL_FAILED" >> "$GITHUB_ENV"
+            echo "SCANCODE_INSTALL_STATUS=BOOTSTRAP_FAILED_PYTHON_MISSING" >> "$GITHUB_ENV"
             echo "ERROR: Extracted ScanCode binary not found or not executable at ${SCANCODE_EXE}" | tee -a "$INSTALL_LOG"
             exit 1
           fi
@@ -138,7 +163,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/generate_licensing_inventory.py --output-dir reports/licensing
+          PYTHON_CMD="python3"
+          if command -v python3.12 > /dev/null 2>&1; then
+            PYTHON_CMD="python3.12"
+          fi
+          "$PYTHON_CMD" scripts/generate_licensing_inventory.py --output-dir reports/licensing
 
       - name: Publish Inventory Summary & Completeness Status to Job Summary
         if: always()

@@ -16,9 +16,10 @@ A `.pcad` document preserves:
 
 ### A. Automatic Quick Save (App-Private Crash-Safe Storage)
 - Writes to `<context.filesDir>/pcad_autosave/quick_save_working.pcad` using an atomic `.tmp` -> `.bak` -> rename swap protocol.
+- Flushed automatically after workspace edits (debounced) and immediately whenever the user navigates from the active Workspace to the Home screen (`openHomeScreen()`), without clearing `isDocumentDirty` (`documentRevision != lastExplicitSaveRevision`).
 
 ### B. Explicit Save (`Documents/PrecisionCAD/<basename>.pcad`)
-- Writes directly to `Documents/PrecisionCAD/<basename>.pcad` (via `MediaStore.Files` on Android 10+ and direct directory fallback).
+- Writes directly to `Documents/PrecisionCAD/<basename>.pcad` (via `MediaStore.Files` on Android 10+ and direct directory fallback) and updates `lastExplicitSaveRevision = documentRevision` so `isDocumentDirty` becomes `false`.
 - Synchronizes the canonical basename (`Geo.pcad` -> `TITLE: Geo` in title block and `Geo.pdf` on plotted PDF export).
 
 ---

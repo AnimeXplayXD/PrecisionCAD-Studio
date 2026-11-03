@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import com.example.R
 import com.example.cad.update.AppUpdateUiState
 import com.example.cad.update.ChangelogCategory
@@ -380,18 +381,107 @@ fun CadReleaseCatalogueDialog(
 
                 HorizontalDivider(color = CadBorderStrong)
 
-                // Section 15.4 & 16.3 — Fixed Bottom Two-Card Action Footer (DOWNLOAD/CANCEL -> INSTALL/CANCEL)
-                // Tap-only, concise labels only ("DOWNLOAD" or "INSTALL" in green, "CANCEL" in red), no GitHub button.
-                val actionDeckTimer = remember {
-                    CadDeckIdleTimerState(
-                        deckId = "release_catalogue_action_deck",
-                        peekDirection = CardPeekDirection.SIDE
-                    )
-                }
+                // Section 15.4, 16.3 & V18.2 §5 — Fixed Bottom Single-Position Stacked Two-Card Action Deck
+                // Never side-by-side; one foreground action card ("DOWNLOAD" / "INSTALL" in green, or "CANCEL" in red)
+                // with an explicit tap-to-exchange affordance, 2.4s post-exchange reveal, and 75s 1s idle peek.
+                val actionDeckTimer = rememberCadDeckIdleTimerState(
+                    deckId = "release_catalogue_action_deck",
+                    peekDirection = CardPeekDirection.SIDE,
+                    isVisible = true,
+                    isEnabled = true
+                )
                 BindCadDeckIdleTimerEffect(
                     timerState = actionDeckTimer,
                     isEligible = true
                 )
+
+                var isPrimaryActionInFront by androidx.compose.runtime.saveable.rememberSaveable {
+                    androidx.compose.runtime.mutableStateOf(true)
+                }
+                var isActionCommitLocked by remember(updateUiState) {
+                    androidx.compose.runtime.mutableStateOf(false)
+                }
+
+                val downloadableTarget = remember(releases, updateUiState, installedVersionCode) {
+                    when (updateUiState) {
+                        is AppUpdateUiState.UpdateAvailable ->
+                            updateUiState.latestRelease.takeIf { it.apkAsset != null && it.apkAsset.browserDownloadUrl.isNotBlank() }
+                        else ->
+                            releases.firstOrNull {
+                                !it.isPrerelease &&
+                                    it.versionCode > installedVersionCode &&
+                                    it.apkAsset != null &&
+                                    it.apkAsset.browserDownloadUrl.isNotBlank()
+                            } ?: releases.firstOrNull {
+                                !it.isPrerelease &&
+                                    it.apkAsset != null &&
+                                    it.apkAsset.browserDownloadUrl.isNotBlank()
+                            } ?: releases.firstOrNull {
+                                it.apkAsset != null && it.apkAsset.browserDownloadUrl.isNotBlank()
+                            }
+                    }
+                }
+
+                val isPrimaryActionEnabled = when {
+                    isDownloading || updateUiState is AppUpdateUiState.Checking -> false
+                    isReadyToInstall -> true
+                    updateUiState is AppUpdateUiState.UpToDate && updatesBehindCount <= 0 -> false
+                    else -> downloadableTarget != null
+                }
+
+                val deckTransition = androidx.compose.animation.core.updateTransition(
+                    targetState = isPrimaryActionInFront,
+                    label = "ReleaseActionDeckTransition"
+                )
+                val isDeckAnimating = deckTransition.currentState != deckTransition.targetState
+                androidx.compose.runtime.LaunchedEffect(isDeckAnimating) {
+                    actionDeckTimer.updateEligibility(transitionRunning = isDeckAnimating)
+                }
+
+                val isRearPeeking = actionDeckTimer.isRearCardPeeking || isDeckAnimating
+                val rearOffsetX by androidx.compose.animation.core.animateDpAsState(
+                    targetValue = if (isRearPeeking) (if (isPrimaryActionInFront) 6.dp else (-6).dp) else 0.dp,
+                    animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
+                    label = "ReleaseRearOffsetX"
+                )
+                val rearOffsetY by androidx.compose.animation.core.animateDpAsState(
+                    targetValue = if (isRearPeeking) (-5).dp else 0.dp,
+                    animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
+                    label = "ReleaseRearOffsetY"
+                )
+                val rearScale by animateFloatAsState(
+                    targetValue = if (isRearPeeking) 0.985f else 0.92f,
+                    animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
+                    label = "ReleaseRearScale"
+                )
+                val rearRotation by animateFloatAsState(
+                    targetValue = if (isRearPeeking) (if (isPrimaryActionInFront) 1.4f else -1.4f) else 0f,
+                    animationSpec = tween(durationMillis = 210, easing = FastOutSlowInEasing),
+                    label = "ReleaseRearRotation"
+                )
+                val rearAlpha by animateFloatAsState(
+                    targetValue = if (isRearPeeking) 0.88f else 0f,
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                    label = "ReleaseRearAlpha"
+                )
+
+                val frontTitle = if (isPrimaryActionInFront) primaryTitle else "CANCEL"
+                val rearTitle = if (isPrimaryActionInFront) "CANCEL" else primaryTitle
+                val frontSurfaceColor = if (isPrimaryActionInFront) CadToggleEnabledSurface else CadCardDestructiveSurface
+                val frontBorderColor = if (isPrimaryActionInFront) CadToggleEnabledBorder else CadCardDestructiveBorder
+                val frontTextColor = when {
+                    !isPrimaryActionInFront -> CadCardDestructiveText
+                    isPrimaryActionEnabled -> CadToggleEnabledText
+                    else -> CadTextMuted
+                }
+                val rearSurfaceColor = if (isPrimaryActionInFront) CadCardDestructiveSurface else CadToggleEnabledSurface
+                val rearBorderColor = if (isPrimaryActionInFront) CadCardDestructiveBorder else CadToggleEnabledBorder
+                val rearTextColor = if (isPrimaryActionInFront) CadCardDestructiveText else CadToggleEnabledText
+                val activeActionTestTag = if (isPrimaryActionInFront) {
+                    "release_catalogue_primary_button"
+                } else {
+                    "release_catalogue_cancel_button"
+                }
 
                 Column(
                     modifier = Modifier
@@ -414,74 +504,201 @@ fun CadReleaseCatalogueDialog(
                         modifier = Modifier.testTag("release_catalogue_status_text")
                     )
 
-                    Row(
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(54.dp)
+                            .padding(top = 5.dp, end = 5.dp)
                             .testTag("release_catalogue_action_deck"),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        contentAlignment = Alignment.Center
                     ) {
+                        // Rear card — concealed behind foreground at rest; peeks during 2.4s post-exchange or 75s 1s idle peek.
+                        // Never executes an action while concealed; when peeking, tapping the exposed tab exchanges front/rear order.
                         Surface(
                             modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                                .clickable(enabled = !isDownloading) {
-                                    actionDeckTimer.onCardExchanged()
-                                    if (isReadyToInstall) {
-                                        onRequestInstall()
-                                    } else {
-                                        val target = releases.firstOrNull { !it.isPrerelease && it.apkAsset != null }
-                                            ?: releases.firstOrNull { it.apkAsset != null }
-                                            ?: releases.firstOrNull()
-                                        if (onDownloadRelease != null && target != null) {
-                                            onDownloadRelease(target)
-                                        } else {
-                                            onStartDownload(target)
-                                        }
-                                    }
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    translationX = rearOffsetX.toPx()
+                                    translationY = rearOffsetY.toPx()
+                                    scaleX = rearScale
+                                    scaleY = rearScale
+                                    rotationZ = rearRotation
+                                    alpha = rearAlpha
                                 }
-                                .testTag("release_catalogue_primary_button"),
-                            shape = RoundedCornerShape(10.dp),
-                            color = CadToggleEnabledSurface,
-                            border = androidx.compose.foundation.BorderStroke(1.5.dp, CadToggleEnabledBorder)
-                        ) {
-                            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                                Text(
-                                    text = primaryTitle,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = if (!isDownloading) CadToggleEnabledText else CadTextMuted,
-                                    fontWeight = FontWeight.Bold
+                                .zIndex(0f)
+                                .then(
+                                    if (isRearPeeking && !isDeckAnimating) {
+                                        Modifier
+                                            .clickable {
+                                                isPrimaryActionInFront = !isPrimaryActionInFront
+                                                actionDeckTimer.onDirectDeckInteraction(didExchangeCards = true)
+                                            }
+                                            .semantics {
+                                                contentDescription = "Peeking rear card $rearTitle: tap to bring to front"
+                                            }
+                                    } else {
+                                        Modifier
+                                    }
                                 )
+                                .testTag("release_catalogue_rear_peek_card"),
+                            shape = RoundedCornerShape(10.dp),
+                            color = rearSurfaceColor,
+                            border = if (isRearPeeking) {
+                                androidx.compose.foundation.BorderStroke(1.dp, rearBorderColor.copy(alpha = 0.82f))
+                            } else {
+                                null
+                            }
+                        ) {
+                            if (isRearPeeking) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.TopEnd
+                                ) {
+                                    Text(
+                                        text = rearTitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 9.sp,
+                                        color = rearTextColor.copy(alpha = 0.72f),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
 
+                        // Active foreground card — single stacked position
                         Surface(
                             modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                                .clickable {
-                                    actionDeckTimer.onDirectInteraction()
-                                    if (onCancelOrReset != null) {
-                                        onCancelOrReset()
-                                    } else {
-                                        onCancelOrDismissAction()
-                                    }
-                                    if (!isDownloading) {
-                                        onDismiss()
+                                .fillMaxSize()
+                                .zIndex(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            color = frontSurfaceColor,
+                            border = androidx.compose.foundation.BorderStroke(1.5.dp, frontBorderColor)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Main body: executes the active foreground action once
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .then(
+                                            if (isPrimaryActionInFront) {
+                                                if (isPrimaryActionEnabled && !isDeckAnimating && !isActionCommitLocked) {
+                                                    Modifier.clickable {
+                                                        isActionCommitLocked = true
+                                                        actionDeckTimer.onDirectDeckInteraction(didExchangeCards = false)
+                                                        if (isReadyToInstall) {
+                                                            onRequestInstall()
+                                                        } else {
+                                                            val target = downloadableTarget
+                                                            if (target != null) {
+                                                                if (onDownloadRelease != null) {
+                                                                    onDownloadRelease(target)
+                                                                } else {
+                                                                    onStartDownload(target)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    Modifier
+                                                }
+                                            } else {
+                                                if (!isDeckAnimating && !isActionCommitLocked) {
+                                                    Modifier.clickable {
+                                                        isActionCommitLocked = true
+                                                        actionDeckTimer.onDirectDeckInteraction(didExchangeCards = false)
+                                                        val wasDownloading = isDownloading
+                                                        if (onCancelOrReset != null) {
+                                                            onCancelOrReset()
+                                                        } else {
+                                                            onCancelOrDismissAction()
+                                                        }
+                                                        if (!wasDownloading) {
+                                                            onDismiss()
+                                                        } else {
+                                                            isActionCommitLocked = false
+                                                        }
+                                                    }
+                                                } else {
+                                                    Modifier
+                                                }
+                                            }
+                                        )
+                                        .semantics {
+                                            contentDescription = if (isPrimaryActionInFront) {
+                                                "$primaryTitle active action card"
+                                            } else {
+                                                "CANCEL active action card"
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp)
+                                        .testTag(activeActionTestTag),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (isPrimaryActionInFront) {
+                                                        if (isPrimaryActionEnabled) CadEmeraldCrossing else CadTextMuted
+                                                    } else {
+                                                        CadCardDestructiveBorder
+                                                    }
+                                                )
+                                        )
+                                        Text(
+                                            text = frontTitle,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = frontTextColor,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1
+                                        )
                                     }
                                 }
-                                .testTag("release_catalogue_cancel_button"),
-                            shape = RoundedCornerShape(10.dp),
-                            color = CadCardDestructiveSurface,
-                            border = androidx.compose.foundation.BorderStroke(1.5.dp, CadCardDestructiveBorder)
-                        ) {
-                            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                                Text(
-                                    text = "CANCEL",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = CadCardDestructiveText,
-                                    fontWeight = FontWeight.Bold
+
+                                // Vertical divider between main action body and exchange affordance
+                                Box(
+                                    modifier = Modifier
+                                        .width(1.dp)
+                                        .fillMaxHeight(0.68f)
+                                        .background(frontBorderColor.copy(alpha = 0.55f))
                                 )
+
+                                // Explicit tap-to-exchange affordance (>= 48.dp hit target) — swaps front/rear without executing either action
+                                Box(
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 88.dp, minHeight = 48.dp)
+                                        .fillMaxHeight()
+                                        .clickable(enabled = !isDeckAnimating) {
+                                            isPrimaryActionInFront = !isPrimaryActionInFront
+                                            actionDeckTimer.onDirectDeckInteraction(didExchangeCards = true)
+                                        }
+                                        .padding(horizontal = 12.dp)
+                                        .semantics {
+                                            contentDescription = "Exchange card to $rearTitle"
+                                        }
+                                        .testTag("release_catalogue_exchange_button"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "⇄ $rearTitle",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isPrimaryActionInFront) CadCardDestructiveText else CadToggleEnabledText,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
                             }
                         }
                     }

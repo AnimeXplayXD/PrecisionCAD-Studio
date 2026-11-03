@@ -1383,7 +1383,69 @@ class ExampleUnitTest {
         )
         assertEquals(2, behindCount)
     }
+
+    @Test
+    fun `TC-V18_2-01 verify v18_2 Version 1_18_2, Gradle 9_8_2 wrapper, Requirement A concealed-at-rest command deck, and Requirement D licensing inventory rules`() {
+        // 1. Requirement A: Command Send/Cancel deck uses postExchangeRevealMs = 0L so rear card stays 100% concealed at rest and after exchange
+        val commandDeck = com.example.ui.components.CadDeckIdleTimerState(
+            deckId = "command_send_cancel",
+            postExchangeRevealMs = 0L
+        )
+        assertFalse(commandDeck.isRearCardVisible)
+        assertFalse(commandDeck.isRearCardRevealed)
+        val gen0 = commandDeck.interactionGeneration
+        commandDeck.onOrderExchanged(isCommandPromptOrDeck = true)
+        assertFalse(commandDeck.isPostExchangeRevealActive)
+        assertFalse(commandDeck.isRearCardVisible)
+        assertFalse(commandDeck.isRearCardRevealed)
+        assertTrue(commandDeck.interactionGeneration > gen0)
+
+        // When 75s idle timer triggers a 1000ms peek, rear card is revealed only during the peek window
+        commandDeck.advanceTimeBy(75_000L)
+        assertTrue(commandDeck.isIdlePeeking)
+        assertTrue(commandDeck.isRearCardVisible)
+        assertTrue(commandDeck.isRearCardRevealed)
+        commandDeck.advanceTimeBy(1_000L)
+        assertFalse(commandDeck.isIdlePeeking)
+        assertFalse(commandDeck.isRearCardVisible)
+        assertFalse(commandDeck.isRearCardRevealed)
+
+        // 2. Verify root version.properties (1.18.2, VERSION_CODE=20) and gradle-wrapper.properties (9.8.2)
+        val repoRoot = java.io.File("..").takeIf { java.io.File(it, "version.properties").exists() }
+            ?: java.io.File(".")
+        val versionPropsFile = java.io.File(repoRoot, "version.properties")
+        if (versionPropsFile.exists()) {
+            val vProps = java.util.Properties().apply {
+                versionPropsFile.inputStream().use { load(it) }
+            }
+            assertEquals("1", vProps.getProperty("VERSION_MAJOR"))
+            assertEquals("18", vProps.getProperty("VERSION_MINOR"))
+            assertEquals("2", vProps.getProperty("VERSION_PATCH"))
+            val vCode = vProps.getProperty("VERSION_CODE", "0").toInt()
+            assertTrue(vCode >= 20)
+        }
+        val wrapperPropsFile = java.io.File(repoRoot, "gradle/wrapper/gradle-wrapper.properties")
+        if (wrapperPropsFile.exists()) {
+            val wrapperText = wrapperPropsFile.readText()
+            assertTrue(wrapperText.contains("gradle-9.8.2-bin.zip"))
+            assertTrue(wrapperText.contains("21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607"))
+        }
+
+        // 3. Requirement D: Verify licensing-inventory.yml Python 3.12 provisioning and generate_licensing_inventory.py schema 18.2.0
+        val workflowFile = java.io.File(repoRoot, ".github/workflows/licensing-inventory.yml")
+        if (workflowFile.exists()) {
+            val wfText = workflowFile.readText()
+            assertTrue(wfText.contains("actions/setup-python@v7.1.0"))
+            assertTrue(wfText.contains("python-version: '3.12.x'"))
+            assertFalse(wfText.contains("./configure || true"))
+        }
+        val scriptFile = java.io.File(repoRoot, "scripts/generate_licensing_inventory.py")
+        if (scriptFile.exists()) {
+            val scriptText = scriptFile.readText()
+            assertTrue(scriptText.contains("SCHEMA_VERSION = \"18.2.0\""))
+            assertTrue(scriptText.contains("NOT_APPLICABLE"))
+            assertTrue(scriptText.contains("BOOTSTRAP_FAILED_PYTHON_MISSING"))
+        }
+    }
 }
-
-
 

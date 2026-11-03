@@ -112,11 +112,52 @@ data class DocumentSnapshot(
     val storageUnit: CadUnit,
     val displayUnit: CadUnit,
     val unitChangeMode: UnitChangeMode = UnitChangeMode.CONVERT_DISPLAY_UNITS,
-    val isQuickDimensionEnabled: Boolean = false
+    val sheetSetup: SheetSetupConfig = SheetSetupConfig(),
+    val dimensionStyle: DimensionStyleConfig = DimensionStyleConfig(),
+    val isQuickDimensionEnabled: Boolean = false,
+    val revision: Long = 0L
 )
+
+sealed interface PendingHomeReplacementAction {
+    val actionSummaryLabel: String
+
+    data class NewBlankDrawing(
+        val name: String,
+        val unit: CadUnit
+    ) : PendingHomeReplacementAction {
+        override val actionSummaryLabel: String
+            get() = "Create New Blank Drawing ('$name', ${unit.symbol})"
+    }
+
+    data class OpenSavedProject(
+        val projectId: String,
+        val projectName: String = projectId
+    ) : PendingHomeReplacementAction {
+        override val actionSummaryLabel: String
+            get() = "Open Saved Drawing ('$projectName')"
+    }
+
+    data object OpenDxfOrPcadPicker : PendingHomeReplacementAction {
+        override val actionSummaryLabel: String
+            get() = "Open DXF / PCAD File"
+    }
+
+    data class ImportDxfOrPcadText(
+        val content: String
+    ) : PendingHomeReplacementAction {
+        override val actionSummaryLabel: String
+            get() = "Import Pasted DXF / PCAD Content"
+    }
+}
 
 data class CadWorkspaceUiState(
     val isHomeScreenVisible: Boolean = true,
+    val hasActiveWorkspaceSession: Boolean = false,
+    val documentRevision: Long = 0L,
+    val lastExplicitSaveRevision: Long = 0L,
+    val pendingCommandLineInput: String = "",
+    val pendingHomeReplacementAction: PendingHomeReplacementAction? = null,
+    val shouldLaunchHomeDxfPicker: Boolean = false,
     val currentProjectId: String = "untitled_drawing",
     val currentProjectName: String = "Untitled Drawing",
     val workspaceSpace: WorkspaceSpace = WorkspaceSpace.MODEL_SPACE,
@@ -188,6 +229,9 @@ data class CadWorkspaceUiState(
             activeCommand != CadCommandId.SELECT ||
             commandStepPoints.isNotEmpty() ||
             selectionBoxDrag != null
+
+    val isDocumentDirty: Boolean
+        get() = hasActiveWorkspaceSession && documentRevision != lastExplicitSaveRevision
 }
 
 /**
@@ -218,11 +262,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private var overviewDismissJob: Job? = null
     private var autoQuickSaveJob: Job? = null
     private var overviewSeq: Long = 1L
+    private var nextRevisionCounter: Long = 1L
 
     var lastQuickSaveFile: File? = null
         private set
     var lastExplicitSavedPcadFile: File? = null
         private set
+
+    var simulateExplicitSaveFailureForTesting: Boolean = false
 
     init {
         viewModelScope.launch {
@@ -334,14 +381,134 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
     }
 
-    // --- Section 62: Home Screen & Drawing Lifecycle Navigation ---
+    // --- Section 62 & V18.2 Requirement C: Home Screen, Return-to-Canvas & Unsaved Session Protection ---
 
     fun openHomeScreen() {
+        val st = _uiState.value
+        if (st.hasActiveWorkspaceSession) {
+            // Flush an immediate automatic quick-save / checkpoint so no in-progress work is lost,
+            // without marking an unsaved drawing as explicitly saved (lastExplicitSaveRevision unchanged).
+            triggerAutomaticQuickSave(immediate = true)
+        }
         _uiState.update { it.copy(isHomeScreenVisible = true) }
     }
 
     fun enterWorkspace() {
-        _uiState.update { it.copy(isHomeScreenVisible = false) }
+        _uiState.update {
+            it.copy(
+                isHomeScreenVisible = false,
+                hasActiveWorkspaceSession = true,
+                pendingHomeReplacementAction = null
+            )
+        }
+    }
+
+    fun returnToActiveWorkspace() {
+        val st = _uiState.value
+        if (!st.hasActiveWorkspaceSession) return
+        _uiState.update {
+            it.copy(
+                isHomeScreenVisible = false,
+                pendingHomeReplacementAction = null
+            )
+        }
+    }
+
+    fun updatePendingCommandLineInput(input: String) {
+        _uiState.update { it.copy(pendingCommandLineInput = input) }
+    }
+
+    fun consumeHomeDxfPickerLaunchRequest() {
+        _uiState.update { it.copy(shouldLaunchHomeDxfPicker = false) }
+    }
+
+    fun requestNewBlankDrawingFromHome(
+        name: String = "Untitled Drawing",
+        unit: CadUnit = _uiState.value.displayUnit
+    ) {
+        val st = _uiState.value
+        val action = PendingHomeReplacementAction.NewBlankDrawing(name = name, unit = unit)
+        if (st.hasActiveWorkspaceSession && st.isDocumentDirty) {
+            _uiState.update { it.copy(pendingHomeReplacementAction = action) }
+        } else {
+            executeHomeReplacementAction(action)
+        }
+    }
+
+    fun requestOpenSavedProjectFromHome(
+        projectId: String,
+        projectName: String = projectId
+    ) {
+        val st = _uiState.value
+        val resolvedName = savedProjects.value.firstOrNull { it.projectId == projectId }?.name ?: projectName
+        val action = PendingHomeReplacementAction.OpenSavedProject(projectId = projectId, projectName = resolvedName)
+        if (st.hasActiveWorkspaceSession && st.isDocumentDirty) {
+            _uiState.update { it.copy(pendingHomeReplacementAction = action) }
+        } else {
+            executeHomeReplacementAction(action)
+        }
+    }
+
+    fun requestOpenDxfPickerFromHome() {
+        val st = _uiState.value
+        val action = PendingHomeReplacementAction.OpenDxfOrPcadPicker
+        if (st.hasActiveWorkspaceSession && st.isDocumentDirty) {
+            _uiState.update { it.copy(pendingHomeReplacementAction = action) }
+        } else {
+            executeHomeReplacementAction(action)
+        }
+    }
+
+    fun requestImportDxfTextFromHome(content: String) {
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) return
+        val st = _uiState.value
+        val action = PendingHomeReplacementAction.ImportDxfOrPcadText(content = trimmed)
+        if (st.hasActiveWorkspaceSession && st.isDocumentDirty) {
+            _uiState.update { it.copy(pendingHomeReplacementAction = action) }
+        } else {
+            executeHomeReplacementAction(action)
+        }
+    }
+
+    fun confirmSaveAndContinuePendingHomeAction(): Boolean {
+        val pending = _uiState.value.pendingHomeReplacementAction ?: return false
+        val savedOk = saveCurrentProject(_uiState.value.currentProjectName)
+        if (!savedOk) {
+            // Save failed: keep the user on the current session and surface an error notification
+            // without replacing the active drawing.
+            return false
+        }
+        _uiState.update { it.copy(pendingHomeReplacementAction = null) }
+        executeHomeReplacementAction(pending)
+        return true
+    }
+
+    fun confirmDiscardAndContinuePendingHomeAction() {
+        val pending = _uiState.value.pendingHomeReplacementAction ?: return
+        _uiState.update { it.copy(pendingHomeReplacementAction = null) }
+        executeHomeReplacementAction(pending)
+    }
+
+    fun dismissPendingHomeAction() {
+        _uiState.update { it.copy(pendingHomeReplacementAction = null) }
+    }
+
+    private fun executeHomeReplacementAction(action: PendingHomeReplacementAction) {
+        when (action) {
+            is PendingHomeReplacementAction.NewBlankDrawing -> {
+                createNewBlankProject(name = action.name, unit = action.unit)
+            }
+            is PendingHomeReplacementAction.OpenSavedProject -> {
+                loadProject(action.projectId)
+            }
+            PendingHomeReplacementAction.OpenDxfOrPcadPicker -> {
+                _uiState.update { it.copy(shouldLaunchHomeDxfPicker = true) }
+            }
+            is PendingHomeReplacementAction.ImportDxfOrPcadText -> {
+                importDxfString(action.content)
+            }
+        }
     }
 
     fun startNewBlankDrawing(
@@ -523,12 +690,23 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 storageUnit = st.storageUnit,
                 displayUnit = st.displayUnit,
                 unitChangeMode = st.unitChangeMode,
-                isQuickDimensionEnabled = st.isQuickDimensionEnabled
+                sheetSetup = st.sheetSetup,
+                dimensionStyle = st.dimensionStyle,
+                isQuickDimensionEnabled = st.isQuickDimensionEnabled,
+                revision = st.documentRevision
             )
         )
         if (undoStack.size > 80) undoStack.removeFirst()
         redoStack.clear()
-        _uiState.update { it.copy(canUndo = undoStack.isNotEmpty(), canRedo = false) }
+        val nextRev = nextRevisionCounter++
+        _uiState.update {
+            it.copy(
+                hasActiveWorkspaceSession = true,
+                documentRevision = nextRev,
+                canUndo = undoStack.isNotEmpty(),
+                canRedo = false
+            )
+        }
         triggerAutomaticQuickSave()
     }
 
@@ -543,7 +721,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 storageUnit = current.storageUnit,
                 displayUnit = current.displayUnit,
                 unitChangeMode = current.unitChangeMode,
-                isQuickDimensionEnabled = current.isQuickDimensionEnabled
+                sheetSetup = current.sheetSetup,
+                dimensionStyle = current.dimensionStyle,
+                isQuickDimensionEnabled = current.isQuickDimensionEnabled,
+                revision = current.documentRevision
             )
         )
         val prev = undoStack.removeLast()
@@ -556,7 +737,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 storageUnit = prev.storageUnit,
                 displayUnit = prev.displayUnit,
                 unitChangeMode = prev.unitChangeMode,
+                sheetSetup = prev.sheetSetup,
+                dimensionStyle = prev.dimensionStyle,
                 isQuickDimensionEnabled = prev.isQuickDimensionEnabled,
+                documentRevision = prev.revision,
                 canUndo = undoStack.isNotEmpty(),
                 canRedo = redoStack.isNotEmpty(),
                 commandPromptBanner = msg
@@ -577,7 +761,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 storageUnit = current.storageUnit,
                 displayUnit = current.displayUnit,
                 unitChangeMode = current.unitChangeMode,
-                isQuickDimensionEnabled = current.isQuickDimensionEnabled
+                sheetSetup = current.sheetSetup,
+                dimensionStyle = current.dimensionStyle,
+                isQuickDimensionEnabled = current.isQuickDimensionEnabled,
+                revision = current.documentRevision
             )
         )
         val next = redoStack.removeLast()
@@ -590,7 +777,10 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 storageUnit = next.storageUnit,
                 displayUnit = next.displayUnit,
                 unitChangeMode = next.unitChangeMode,
+                sheetSetup = next.sheetSetup,
+                dimensionStyle = next.dimensionStyle,
                 isQuickDimensionEnabled = next.isQuickDimensionEnabled,
+                documentRevision = next.revision,
                 canUndo = undoStack.isNotEmpty(),
                 canRedo = redoStack.isNotEmpty(),
                 commandPromptBanner = msg
@@ -1151,6 +1341,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     fun applySheetSetup(newSetup: SheetSetupConfig) {
         val prev = _uiState.value
+        if (prev.sheetSetup != newSetup) {
+            recordUndoSnapshot()
+        }
         val isNewSheetPage = prev.sheetSetup.preset != newSetup.preset ||
             prev.sheetSetup.titleBlockDrawingNo != newSetup.titleBlockDrawingNo
         val msg = "PAGESETUP • Sheet updated to ${newSetup.preset.label} (${newSetup.orientation.label}, Scale ${newSetup.scaleLabel})"
@@ -1165,6 +1358,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 entities = cleanedEntities,
                 isQuickDimensionEnabled = if (isNewSheetPage) false else it.isQuickDimensionEnabled,
                 dimensionStyle = it.dimensionStyle.copy(standard = newSetup.draftingStandard),
+                commandPromptBanner = msg
+            )
+        }
+        emitTransientNotification(msg, NotificationCategory.INFO)
+    }
+
+    fun updateDimensionStyle(newStyle: DimensionStyleConfig) {
+        val prev = _uiState.value
+        if (prev.dimensionStyle == newStyle) return
+        recordUndoSnapshot()
+        val msg = "DIMSTYLE • Updated dimension style (${newStyle.standard.label})"
+        _uiState.update {
+            it.copy(
+                dimensionStyle = newStyle,
                 commandPromptBanner = msg
             )
         }
@@ -3331,6 +3538,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         _uiState.update {
             it.copy(
                 isHomeScreenVisible = false,
+                hasActiveWorkspaceSession = true,
+                pendingHomeReplacementAction = null,
                 storageUnit = imported.storageUnit,
                 displayUnit = imported.displayUnit,
                 layers = imported.layers,
@@ -3355,12 +3564,19 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             emitTransientNotification("PCAD OPEN • Invalid or corrupted .pcad project file", NotificationCategory.ERROR)
             return
         }
-        recordUndoSnapshot()
+        undoStack.clear()
+        redoStack.clear()
+        val nextRev = nextRevisionCounter++
         val baseName = CadPcadPersistence.canonicalBasename(doc.projectName)
         val msg = "OPEN (.PCAD) • Restored '$baseName.pcad' (${doc.entities.size} entities, ${doc.displayUnit.symbol})"
         _uiState.update {
             it.copy(
                 isHomeScreenVisible = false,
+                hasActiveWorkspaceSession = true,
+                documentRevision = nextRev,
+                lastExplicitSaveRevision = nextRev,
+                pendingCommandLineInput = "",
+                pendingHomeReplacementAction = null,
                 currentProjectId = doc.projectId,
                 currentProjectName = baseName,
                 storageUnit = doc.storageUnit,
@@ -3381,6 +3597,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 isQuickDimensionEnabled = doc.isQuickDimensionEnabled,
                 qdimDensity = doc.qdimDensity,
                 qdimArrangementPreference = doc.qdimArrangementPreference,
+                canUndo = false,
+                canRedo = false,
                 activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg,
                 commandPanelState = CommandPanelState.Hidden
@@ -3390,27 +3608,44 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         emitTransientNotification(msg, NotificationCategory.SUCCESS)
     }
 
-    fun saveCurrentProject(projectName: String) {
+    fun saveCurrentProject(projectName: String): Boolean {
         val st = _uiState.value
         val baseName = CadPcadPersistence.canonicalBasename(projectName)
+        if (simulateExplicitSaveFailureForTesting) {
+            val errMsg = "SAVE FAILED • Could not save '$baseName.pcad' to Documents/PrecisionCAD"
+            emitTransientNotification(errMsg, NotificationCategory.ERROR, isPersistentError = true)
+            return false
+        }
         val saveId = if (st.currentProjectId == "untitled_drawing") {
             "proj_${UUID.randomUUID().toString().take(8)}"
         } else {
             st.currentProjectId
         }
         val updatedSheet = st.sheetSetup.copy(titleBlockTitle = baseName)
-        _uiState.update {
-            it.copy(
-                currentProjectId = saveId,
-                currentProjectName = baseName,
-                sheetSetup = updatedSheet
-            )
-        }
         val pcadDoc = buildCurrentPcadDocument(projectNameOverride = baseName).copy(projectId = saveId)
         val payload = currentDxfPayload()
-        val explicitResult = CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(getApplication(), pcadDoc)
+        val explicitResult = runCatching {
+            CadPcadPersistence.saveExplicitToDocumentsPrecisionCad(getApplication(), pcadDoc)
+        }.getOrNull()
+        if (explicitResult == null || !explicitResult.localFile.exists()) {
+            val errMsg = "SAVE FAILED • Could not write '$baseName.pcad'"
+            emitTransientNotification(errMsg, NotificationCategory.ERROR, isPersistentError = true)
+            return false
+        }
         lastExplicitSavedPcadFile = explicitResult.localFile
         lastQuickSaveFile = CadPcadPersistence.performAutomaticQuickSave(getApplication(), pcadDoc)
+        val savedRev = _uiState.value.documentRevision
+        val msg = "SAVE • Saved '$baseName.pcad' to Documents/PrecisionCAD/$baseName.pcad"
+        _uiState.update {
+            it.copy(
+                hasActiveWorkspaceSession = true,
+                lastExplicitSaveRevision = savedRev,
+                currentProjectId = saveId,
+                currentProjectName = baseName,
+                sheetSetup = updatedSheet,
+                commandPromptBanner = msg
+            )
+        }
         viewModelScope.launch {
             repository.saveProjectDocument(
                 projectId = saveId,
@@ -3419,31 +3654,39 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 payload = payload,
                 pcadDocument = pcadDoc
             )
-            val msg = "SAVE • Saved '$baseName.pcad' to Documents/PrecisionCAD/$baseName.pcad"
-            _uiState.update {
-                it.copy(
-                    currentProjectId = saveId,
-                    currentProjectName = baseName,
-                    sheetSetup = updatedSheet,
-                    commandPromptBanner = msg
-                )
-            }
             emitTransientNotification(msg, NotificationCategory.SUCCESS)
         }
+        return true
     }
 
     fun loadProject(projectId: String) {
-        _uiState.update { it.copy(isHomeScreenVisible = false) }
+        val resetRev = nextRevisionCounter++
+        _uiState.update {
+            it.copy(
+                isHomeScreenVisible = false,
+                hasActiveWorkspaceSession = true,
+                documentRevision = resetRev,
+                lastExplicitSaveRevision = resetRev,
+                pendingCommandLineInput = "",
+                pendingHomeReplacementAction = null
+            )
+        }
         viewModelScope.launch {
             val loaded = repository.loadProjectDocument(projectId) ?: return@launch
             val meta = savedProjects.value.firstOrNull { it.projectId == projectId }
             undoStack.clear()
             redoStack.clear()
+            val loadedRev = nextRevisionCounter++
             val entitiesWithoutAutoDim = AutoDimensionEngine.removeAutoDimensions(loaded.entities)
             val msg = "OPEN • Loaded '${meta?.name ?: projectId}' (${entitiesWithoutAutoDim.size} entities • Quick Dimension OFF)"
             _uiState.update {
                 it.copy(
                     isHomeScreenVisible = false,
+                    hasActiveWorkspaceSession = true,
+                    documentRevision = loadedRev,
+                    lastExplicitSaveRevision = loadedRev,
+                    pendingCommandLineInput = "",
+                    pendingHomeReplacementAction = null,
                     currentProjectId = projectId,
                     currentProjectName = meta?.name ?: projectId,
                     storageUnit = loaded.storageUnit,
@@ -3472,11 +3715,17 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         undoStack.clear()
         redoStack.clear()
         val newId = "proj_${UUID.randomUUID().toString().take(8)}"
+        val freshRev = nextRevisionCounter++
         prefs.edit { putString("display_unit", unit.name) }
         val msg = "NEW • Created blank drawing '$name' in ${unit.label} (Quick Dimension OFF)"
         _uiState.update {
             it.copy(
                 isHomeScreenVisible = false,
+                hasActiveWorkspaceSession = true,
+                documentRevision = freshRev,
+                lastExplicitSaveRevision = freshRev,
+                pendingCommandLineInput = "",
+                pendingHomeReplacementAction = null,
                 currentProjectId = newId,
                 currentProjectName = name,
                 storageUnit = unit,

@@ -49,7 +49,7 @@ class ExampleRobolectricTest {
 
         composeTestRule.waitForIdle()
 
-        // 1. Verify First-Run Home Screen, Top-Right Update Status Icon, and Release Catalogue Dialog (Phase 12)
+        // 1. Verify First-Run Home Screen, Top-Right Update Status Icon, and Stacked Release Catalogue Action Deck (Requirement B)
         composeTestRule.onNodeWithTag("cad_home_screen").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_update_status_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_update_status_button").performClick()
@@ -58,6 +58,10 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("release_catalogue_title").assertIsDisplayed()
         composeTestRule.onNodeWithTag("release_catalogue_action_deck").assertIsDisplayed()
         composeTestRule.onNodeWithTag("release_catalogue_primary_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_exchange_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_exchange_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("release_catalogue_cancel_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("release_catalogue_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
@@ -109,12 +113,16 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("active_cmd_finish_button").assertIsDisplayed()
 
-        // Engage command bar by typing text -> command_action_card_stack appears; swipe down & cancel
+        // Engage command bar by typing text -> command_action_card_stack appears with rear card 100% concealed at rest (Requirement A); swipe down & cancel
         composeTestRule.onNodeWithTag("command_line_input_field").performTextInput("F")
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("command_action_card_stack").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("command_card_send").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("command_card_cancel").fetchSemanticsNodes().isEmpty())
         composeTestRule.onNodeWithTag("command_action_card_stack").performTouchInput { swipeDown() }
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("command_card_cancel").assertIsDisplayed()
+        assertTrue(composeTestRule.onAllNodesWithTag("command_card_send").fetchSemanticsNodes().isEmpty())
         composeTestRule.onNodeWithTag("command_card_cancel").performClick()
         composeTestRule.waitForIdle()
 
@@ -168,8 +176,45 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("selective_clear_transient_marquee").assertIsDisplayed()
         composeTestRule.onNodeWithTag("selective_dim_cancel_button").performClick()
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("qdim_close_icon_button").performClick()
+        composeTestRule.waitForIdle()
 
-        // 8. Verify Automatic Quick Save (.pcad), Explicit Save (Documents/PrecisionCAD/Geo.pcad), and Geo.pdf Title Sync
+        // 8. Requirement C: Verify Non-Destructive Home Navigation, Automatic Quick-Save Flush, Return to Active Drawing, and Unsaved Replacement Confirmation Dialog
+        // Generating QDIM above incremented documentRevision so isDocumentDirty == true!
+        composeTestRule.onNodeWithTag("top_home_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("cad_home_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_return_to_active_drawing_button").assertIsDisplayed()
+
+        // Return to active drawing without losing entities or undo history
+        composeTestRule.onNodeWithTag("home_return_to_active_drawing_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
+
+        // Navigate back to Home while document is dirty and request a New Blank Drawing -> Unsaved confirmation dialog appears!
+        composeTestRule.onNodeWithTag("top_home_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("home_new_drawing_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("unsaved_drawing_confirmation_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("unsaved_dialog_save_and_continue").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("unsaved_dialog_discard_and_continue").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("unsaved_dialog_stay_here").assertIsDisplayed()
+
+        // Tap "Stay Here" -> cancels replacement and keeps active session
+        composeTestRule.onNodeWithTag("unsaved_dialog_stay_here").performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(composeTestRule.onAllNodesWithTag("unsaved_drawing_confirmation_dialog").fetchSemanticsNodes().isEmpty())
+        composeTestRule.onNodeWithTag("home_return_to_active_drawing_button").assertIsDisplayed()
+
+        // Tap New Blank Drawing again and choose "Save and Continue" -> saves current project and creates new blank drawing
+        composeTestRule.onNodeWithTag("home_new_drawing_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("unsaved_dialog_save_and_continue").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
+
+        // 9. Verify Automatic Quick Save (.pcad), Explicit Save (Documents/PrecisionCAD/Geo.pcad), and Geo.pdf Title Sync
         val basePayload = CadTemplateFactory.createSixHoleMountingPlate()
         val qdimEntities = AutoDimensionEngine.generateQuickDimensions(
             allEntities = basePayload.entities,
@@ -223,7 +268,7 @@ class ExampleRobolectricTest {
         assertTrue(pdfFile.exists())
         assertTrue(pdfFile.length() > 1024L)
 
-        // 9. Verify V18.1 CadGitHubUpdateRepository.createManageUnknownAppSourcesIntent() KTX String.toUri() behavior
+        // 10. Verify V18.1 CadGitHubUpdateRepository.createManageUnknownAppSourcesIntent() KTX String.toUri() behavior
         val updater = com.example.cad.update.CadGitHubUpdateRepository(
             context = context,
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
@@ -236,5 +281,3 @@ class ExampleRobolectricTest {
         }
     }
 }
-
-

@@ -11,7 +11,7 @@
   - `targetSdk`: `37` (Android 17)
   - `minSdk`: `24` (Android 7.0+)
 - **Toolchain Versions**:
-  - Gradle Wrapper: `9.3.1` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with pinned `distributionSha256Sum` (`b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06`)
+  - Gradle Wrapper: `9.8.2` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with pinned `distributionSha256Sum` (`21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607`)
   - Android Gradle Plugin (AGP): `9.1.1`
   - Kotlin Compose Compiler Plugin: `2.2.10`
   - KSP (Room & Moshi codegen): `2.3.5`
@@ -44,17 +44,18 @@
 - **Paper Space Sheet & Opaque Title Block Pass**:
   - Splits Paper Space rendering into a sheet base pass (drawn before the grid) and an opaque title-block pass (drawn after the grid) so grid lines never bleed through the title block, with zoom-independent screen-space title-block typography.
 - **Shared Card Component & Section-Local Idle Motion System**:
-  - Concealed rear card at rest, `2.4s` post-exchange reveal, and strictly isolated `75s` section-local idle peek (`CadDeckIdleTimerState`).
+  - Concealed rear card at rest, `0L` post-exchange reveal on the Command Send/Cancel stack (rear card revealed only during the `75s` section-local idle peek window), and `2.4s` post-exchange reveal + `75s` section-local idle peek (`CadDeckIdleTimerState`) on standard two-card decks.
   - Layout-phase lambda `Modifier.offset { IntOffset(...) }` animations across all card decks so animated cards do not trigger unnecessary Compose recomposition.
   - Green `ENABLE` and neutral-grey `DISABLE` binary cards across Cursor Control, Grid & OSNAP settings, with 3-region OSNAP cards (`[END]` badge left, horizontal marquee full label middle, `ENABLE`/`DISABLE` right).
   - Unbordered translucent floating command dock, single-source IME positioning, and animated controller collapse/expand.
 - **Quick Dimension (`QDIM`) & Selective Dimension Removal**:
   - Horizontal swipeable multi-option card decks for Scope, Arrangement, and Density Policy (decoupled from vertical dialog scrolling) with non-layout-shifting delayed callout overlays driven by `scrollState.isScrollInProgress`.
   - Category-First Selective Dimension Removal with stable scroll-offset preservation, header `SELECT ALL` / `DESELECT ALL` action, and non-layout-shifting transient marquee count notification.
-- **Native `.pcad` Persistence & DXF / PDF / SVG Interchange**:
+- **Non-Destructive Home Navigation, Native `.pcad` Persistence & DXF / PDF / SVG Interchange**:
+  - Navigating between the Workspace and Home screen preserves the active drawing session in memory (`SaveableStateHolder` + `AnimatedContent`), flushes an immediate automatic quick-save (`pcad_autosave/quick_save_working.pcad`), provides a **Return to Active Drawing** action on Home, and guards against overwriting unsaved changes with a 3-choice confirmation dialog (**Save and Continue**, **Discard and Continue**, **Stay Here**).
   - Atomic crash-safe Quick Save (`pcad_autosave/quick_save_working.pcad`) and Explicit Save (`Documents/PrecisionCAD/<basename>.pcad`), distinct from ASCII DXF (`AC1015`), plotted vector PDF, and SVG export.
 - **GitHub Release Catalogue & In-App Updater**:
-  - Queries public GitHub Releases (`AnimeXplayXD/PrecisionCAD-Studio`), displays the Home top-right update status icon (white when current, gold for 1 update, gold + count beside icon for >1 updates), renders a Morphp-style chronological changelog timeline with `DOWNLOAD`/`CANCEL` and `INSTALL`/`CANCEL` footer cards, verifies SHA-256 digest + package ID + versionCode + signer certificate, and invokes Android's `PackageInstaller` confirmation directly in-app.
+  - Queries public GitHub Releases (`AnimeXplayXD/PrecisionCAD-Studio`), displays the Home top-right update status icon (white when current, gold for 1 update, gold + count beside icon for >1 updates), renders a Morphp-style chronological changelog timeline with a single-position stacked `DOWNLOAD`/`CANCEL` (and `INSTALL`/`CANCEL`) action-card deck, verifies SHA-256 digest + package ID + versionCode + signer certificate, and invokes Android's `PackageInstaller` confirmation directly in-app.
 
 ---
 

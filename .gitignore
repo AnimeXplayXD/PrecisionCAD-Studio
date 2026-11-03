@@ -16,4 +16,9 @@
 local.properties
 .env
 debug.keystore
+*.p12
+*.jks
+*.keystore
+*.b64
+precisioncad-release.*
 /reports/

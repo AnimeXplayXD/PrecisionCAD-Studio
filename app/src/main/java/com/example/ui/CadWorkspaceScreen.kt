@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,9 +17,12 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
@@ -56,6 +60,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -73,8 +78,10 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -83,6 +90,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -94,8 +102,8 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -146,9 +154,11 @@ import com.example.cad.model.WorkspaceSpace
 import com.example.cad.update.CadReleaseEntry
 import com.example.cad.update.CadUpdateUiState
 import java.util.Locale
+import com.example.ui.components.BindCadDeckIdleTimerEffect
 import com.example.ui.components.CadDeckIdleTimerState
 import com.example.ui.components.CadReleaseCatalogueDialog
 import com.example.ui.components.CadViewportCanvas
+import com.example.ui.components.CardPeekDirection
 import com.example.ui.components.CommandCompatibilityMatrixDialog
 import com.example.ui.components.ControllerAndSnapSettingsDialog
 import com.example.ui.components.ControllerDockState
@@ -161,6 +171,7 @@ import com.example.ui.components.QuickDimensionDialog
 import com.example.ui.components.SheetSetupDialog
 import com.example.ui.components.UnitsAndPrecisionDialog
 import com.example.ui.components.VirtualCursorControllerDeck
+import com.example.ui.components.rememberCadDeckIdleTimerState
 import com.example.ui.theme.CadAmberSnap
 import com.example.ui.theme.CadBorderHairline
 import com.example.ui.theme.CadBorderStrong
@@ -219,7 +230,13 @@ fun CadWorkspaceScreen(
     var showPropertiesDialog by rememberSaveable { mutableStateOf(false) }
     var showProjectHubDialog by rememberSaveable { mutableStateOf(false) }
     var showActionLauncherDialog by rememberSaveable { mutableStateOf(false) }
-    var commandLineInput by rememberSaveable { mutableStateOf("") }
+    var commandLineInput by rememberSaveable { mutableStateOf(uiState.pendingCommandLineInput) }
+
+    LaunchedEffect(uiState.pendingCommandLineInput) {
+        if (commandLineInput != uiState.pendingCommandLineInput) {
+            commandLineInput = uiState.pendingCommandLineInput
+        }
+    }
 
     val previewEntities = remember(
         uiState.activeCommand,
@@ -263,55 +280,102 @@ fun CadWorkspaceScreen(
         }
     }
 
-    // Section 62: First-Run Home Screen (default launch entry point before workspace)
-    if (uiState.isHomeScreenVisible) {
-        CadHomeScreen(
-            savedProjects = savedProjects,
-            displayUnit = uiState.displayUnit,
-            updatesBehindCount = updatesBehindCount,
-            updateUiState = updateUiState,
-            onOpenReleaseCatalogue = viewModel::openReleaseCatalogue,
-            onNewBlankDrawing = { name, unit ->
-                viewModel.startNewBlankDrawing(name, unit)
-            },
-            onOpenDxfFilePicker = {
-                dxfFilePickerLauncher.launch(arrayOf("*/*"))
-            },
-            onImportDxfContent = { dxfText ->
-                viewModel.importDxfString(dxfText)
-            },
-            onOpenSavedProject = { projectId ->
-                viewModel.loadProject(projectId)
-            },
-            onRenameSavedProject = { projectId, newName ->
-                viewModel.renameSavedProject(projectId, newName)
-            },
-            onDeleteSavedProject = { projectId ->
-                viewModel.deleteSavedProject(projectId)
-            }
-        )
-        if (uiState.isReleaseCatalogueOpen) {
-            CadReleaseCatalogueDialog(
-                releases = releaseCatalogue,
-                updatesBehindCount = updatesBehindCount,
-                updateUiState = updateUiState,
-                onRefreshCatalogue = viewModel::refreshReleaseCatalogue,
-                onDownloadRelease = viewModel::startUpdateDownload,
-                onRequestInstall = viewModel::requestInstallVerifiedUpdate,
-                onCancelOrReset = viewModel::cancelUpdateAction,
-                onDismiss = viewModel::closeReleaseCatalogue
-            )
+    LaunchedEffect(uiState.shouldLaunchHomeDxfPicker) {
+        if (uiState.shouldLaunchHomeDxfPicker) {
+            viewModel.consumeHomeDxfPickerLaunchRequest()
+            dxfFilePickerLauncher.launch(arrayOf("*/*"))
         }
-        return
     }
 
-    // Section 16: Full-screen immersive container without status/navigation bar padding reservation
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(CadModelSpaceBg)
-            .windowInsetsPadding(WindowInsets.displayCutout)
+    // V18.2 Requirement C (§6.5): System Back gesture/button from Home returns to active workspace session
+    BackHandler(
+        enabled = uiState.isHomeScreenVisible &&
+            uiState.hasActiveWorkspaceSession &&
+            uiState.pendingHomeReplacementAction == null &&
+            !uiState.isReleaseCatalogueOpen
     ) {
+        viewModel.returnToActiveWorkspace()
+    }
+
+    val isReducedMotionEnabled = remember(context) {
+        runCatching {
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f
+            ) == 0f
+        }.getOrDefault(false)
+    }
+
+    val saveableStateHolder = rememberSaveableStateHolder()
+
+    // V18.2 Requirement C (§6.2 & §6.3): Coordinated Horizontal Slide + Fade Page Transition
+    // wrapped in SaveableStateHolder ("home" and "workspace" keys) so neither screen loses state.
+    AnimatedContent(
+        targetState = uiState.isHomeScreenVisible,
+        transitionSpec = {
+            if (isReducedMotionEnabled) {
+                fadeIn(animationSpec = tween(120)) togetherWith fadeOut(animationSpec = tween(120))
+            } else if (targetState) {
+                // Navigating Workspace -> Home: Home slides in from the left with fade-in while Workspace slides right with fade-out
+                (slideInHorizontally(animationSpec = tween(340)) { fullWidth -> -fullWidth / 4 } +
+                    fadeIn(animationSpec = tween(320))) togetherWith
+                    (slideOutHorizontally(animationSpec = tween(340)) { fullWidth -> fullWidth / 4 } +
+                        fadeOut(animationSpec = tween(260)))
+            } else {
+                // Navigating Home -> Workspace: Workspace slides in from the right with fade-in while Home slides left with fade-out
+                (slideInHorizontally(animationSpec = tween(340)) { fullWidth -> fullWidth / 4 } +
+                    fadeIn(animationSpec = tween(320))) togetherWith
+                    (slideOutHorizontally(animationSpec = tween(340)) { fullWidth -> -fullWidth / 4 } +
+                        fadeOut(animationSpec = tween(260)))
+            }
+        },
+        modifier = Modifier.fillMaxSize(),
+        label = "HomeWorkspacePageTransition"
+    ) { isHomeVisible ->
+        if (isHomeVisible) {
+            saveableStateHolder.SaveableStateProvider("home") {
+                CadHomeScreen(
+                    savedProjects = savedProjects,
+                    displayUnit = uiState.displayUnit,
+                    hasActiveWorkspaceSession = uiState.hasActiveWorkspaceSession,
+                    activeProjectName = uiState.currentProjectName,
+                    isDocumentDirty = uiState.isDocumentDirty,
+                    activeEntityCount = uiState.entities.size,
+                    updatesBehindCount = updatesBehindCount,
+                    updateUiState = updateUiState,
+                    onReturnToActiveWorkspace = viewModel::returnToActiveWorkspace,
+                    onOpenReleaseCatalogue = viewModel::openReleaseCatalogue,
+                    onNewBlankDrawing = { name, unit ->
+                        viewModel.requestNewBlankDrawingFromHome(name, unit)
+                    },
+                    onOpenDxfFilePicker = {
+                        viewModel.requestOpenDxfPickerFromHome()
+                    },
+                    onImportDxfContent = { dxfText ->
+                        viewModel.requestImportDxfTextFromHome(dxfText)
+                    },
+                    onOpenSavedProject = { projectId ->
+                        viewModel.requestOpenSavedProjectFromHome(projectId)
+                    },
+                    onRenameSavedProject = { projectId, newName ->
+                        viewModel.renameSavedProject(projectId, newName)
+                    },
+                    onDeleteSavedProject = { projectId ->
+                        viewModel.deleteSavedProject(projectId)
+                    }
+                )
+            }
+        } else {
+            saveableStateHolder.SaveableStateProvider("workspace") {
+                // Section 16: Full-screen immersive container without status/navigation bar padding reservation
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(CadModelSpaceBg)
+                        .windowInsetsPadding(WindowInsets.displayCutout)
+                        .testTag("cad_workspace_canvas_container")
+                ) {
         val isLandscape = maxWidth >= 660.dp
 
         if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) {
@@ -520,6 +584,7 @@ fun CadWorkspaceScreen(
                             commandLineInput = commandLineInput,
                             onCommandLineInputChange = { query ->
                                 commandLineInput = query
+                                viewModel.updatePendingCommandLineInput(query)
                                 viewModel.updateCommandInputQuery(query)
                             },
                             onOpenCommandEditing = {
@@ -527,14 +592,17 @@ fun CadWorkspaceScreen(
                             },
                             onCloseCommandEditing = {
                                 commandLineInput = ""
+                                viewModel.updatePendingCommandLineInput("")
                                 viewModel.closeCommandLineEditing()
                             },
                             onSubmitCommandLine = {
                                 viewModel.submitCommandOrCoordinateInput(commandLineInput)
                                 commandLineInput = ""
+                                viewModel.updatePendingCommandLineInput("")
                             },
                             onSelectCommand = { cmd ->
                                 commandLineInput = ""
+                                viewModel.updatePendingCommandLineInput("")
                                 handleCommandSelection(cmd)
                             },
                             onSelectSubOption = viewModel::setCommandSubOption,
@@ -737,6 +805,7 @@ fun CadWorkspaceScreen(
                                     commandLineInput = commandLineInput,
                                     onCommandLineInputChange = { query ->
                                         commandLineInput = query
+                                        viewModel.updatePendingCommandLineInput(query)
                                         viewModel.updateCommandInputQuery(query)
                                     },
                                     onOpenCommandEditing = {
@@ -744,14 +813,17 @@ fun CadWorkspaceScreen(
                                     },
                                     onCloseCommandEditing = {
                                         commandLineInput = ""
+                                        viewModel.updatePendingCommandLineInput("")
                                         viewModel.closeCommandLineEditing()
                                     },
                                     onSubmitCommandLine = {
                                         viewModel.submitCommandOrCoordinateInput(commandLineInput)
                                         commandLineInput = ""
+                                        viewModel.updatePendingCommandLineInput("")
                                     },
                                     onSelectCommand = { cmd ->
                                         commandLineInput = ""
+                                        viewModel.updatePendingCommandLineInput("")
                                         handleCommandSelection(cmd)
                                     },
                                     onSelectSubOption = viewModel::setCommandSubOption,
@@ -878,9 +950,36 @@ fun CadWorkspaceScreen(
                 }
             }
         }
+                }
+            }
+        }
     }
 
     // --- Modal Dialogs ---
+    if (uiState.isReleaseCatalogueOpen) {
+        CadReleaseCatalogueDialog(
+            releases = releaseCatalogue,
+            updatesBehindCount = updatesBehindCount,
+            updateUiState = updateUiState,
+            onRefreshCatalogue = viewModel::refreshReleaseCatalogue,
+            onDownloadRelease = viewModel::startUpdateDownload,
+            onRequestInstall = viewModel::requestInstallVerifiedUpdate,
+            onCancelOrReset = viewModel::cancelUpdateAction,
+            onDismiss = viewModel::closeReleaseCatalogue
+        )
+    }
+
+    val pendingReplacementAction = uiState.pendingHomeReplacementAction
+    if (pendingReplacementAction != null) {
+        UnsavedDrawingConfirmationDialog(
+            activeProjectName = uiState.currentProjectName,
+            pendingAction = pendingReplacementAction,
+            onSaveAndContinue = { viewModel.confirmSaveAndContinuePendingHomeAction() },
+            onDiscardAndContinue = { viewModel.confirmDiscardAndContinuePendingHomeAction() },
+            onStayHere = { viewModel.dismissPendingHomeAction() }
+        )
+    }
+
     if (showActionLauncherDialog) {
         ActionLauncherDialog(
             uiState = uiState,
@@ -2211,12 +2310,12 @@ private fun ContextualCommandAndOptionsDock(
         }
 
         // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
-        // Phase 9.2 & Phase 10.6 (v18):
+        // V18.2 Requirement A (§4):
         // CommandDeckVisible = isImeVisible || commandLineInput.isNotEmpty()
+        // Shared CadDeckIdleTimerState ("command_send_cancel") with concealed-at-rest rear card (postExchangeRevealMs = 0L)
+        // and 75s idle 1s peek.
         val density = LocalDensity.current
         val focusManager = LocalFocusManager.current
-        val scope = rememberCoroutineScope()
-        val commandDeckTimer = remember(scope) { CadDeckIdleTimerState(scope) }
         val imeBottomPx = WindowInsets.ime.getBottom(density)
         var isCommandFieldFocused by remember { mutableStateOf(false) }
         var wasImeOpenWhileFocused by remember { mutableStateOf(false) }
@@ -2245,13 +2344,22 @@ private fun ContextualCommandAndOptionsDock(
             commandLineInput = commandLineInput
         )
 
+        val commandDeckTimer = rememberCadDeckIdleTimerState(
+            deckId = "command_send_cancel",
+            peekDirection = CardPeekDirection.SIDE,
+            isVisible = isCommandDeckVisible,
+            isEnabled = isCommandDeckVisible,
+            postExchangeRevealMs = 0L
+        )
+        BindCadDeckIdleTimerEffect(
+            timerState = commandDeckTimer,
+            isEligible = isCommandDeckVisible
+        )
+
         var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
         LaunchedEffect(isCommandDeckVisible) {
-            if (isCommandDeckVisible) {
-                commandDeckTimer.startOrReset()
-            } else {
+            if (!isCommandDeckVisible) {
                 isSendCardInFront = true
-                commandDeckTimer.stop()
             }
         }
 
@@ -2309,18 +2417,22 @@ private fun ContextualCommandAndOptionsDock(
                 )
             }
 
-            // Stacked Send / Cancel Action-Card Control on Right Side of Command Bar
-            // Visible ONLY when CommandDeckVisible == true; rear card concealed at rest with 75s idle peek & 2.4s post-exchange reveal
+            // Stacked Send / Cancel Action-Card Control on Right Side of Command Bar (Requirement A, §4)
+            // Visible ONLY when CommandDeckVisible == true; rear card is 100% concealed at rest behind the front card
+            // (no exposed strip, border, shadow, or hit target) and peeks for 1.0s after 75s of inactivity.
             AnimatedVisibility(
                 visible = isCommandDeckVisible,
                 enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(180)),
                 exit = fadeOut(animationSpec = tween(160)) + shrinkHorizontally(animationSpec = tween(160))
             ) {
                 val isRearRevealed = commandDeckTimer.isRearCardRevealed
+                val sendIsVisible = isSendCardInFront || isRearRevealed
+                val cancelIsVisible = !isSendCardInFront || isRearRevealed
+
                 val sendOffsetX by animateDpAsState(
                     targetValue = when {
                         isSendCardInFront -> 0.dp
-                        isRearRevealed -> (-6).dp
+                        isRearRevealed -> (-8).dp
                         else -> 0.dp
                     },
                     animationSpec = tween(180),
@@ -2339,7 +2451,7 @@ private fun ContextualCommandAndOptionsDock(
                     targetValue = when {
                         isSendCardInFront -> 1f
                         isRearRevealed -> 0.91f
-                        else -> 0.86f
+                        else -> 0.80f
                     },
                     animationSpec = tween(180),
                     label = "SendCardScale"
@@ -2347,7 +2459,7 @@ private fun ContextualCommandAndOptionsDock(
                 val sendAlpha by animateFloatAsState(
                     targetValue = when {
                         isSendCardInFront -> 1f
-                        isRearRevealed -> 0.72f
+                        isRearRevealed -> 0.78f
                         else -> 0f
                     },
                     animationSpec = tween(180),
@@ -2357,7 +2469,7 @@ private fun ContextualCommandAndOptionsDock(
                 val cancelOffsetX by animateDpAsState(
                     targetValue = when {
                         !isSendCardInFront -> 0.dp
-                        isRearRevealed -> (-6).dp
+                        isRearRevealed -> (-8).dp
                         else -> 0.dp
                     },
                     animationSpec = tween(180),
@@ -2376,7 +2488,7 @@ private fun ContextualCommandAndOptionsDock(
                     targetValue = when {
                         !isSendCardInFront -> 1f
                         isRearRevealed -> 0.91f
-                        else -> 0.86f
+                        else -> 0.80f
                     },
                     animationSpec = tween(180),
                     label = "CancelCardScale"
@@ -2384,7 +2496,7 @@ private fun ContextualCommandAndOptionsDock(
                 val cancelAlpha by animateFloatAsState(
                     targetValue = when {
                         !isSendCardInFront -> 1f
-                        isRearRevealed -> 0.72f
+                        isRearRevealed -> 0.78f
                         else -> 0f
                     },
                     animationSpec = tween(180),
@@ -2393,8 +2505,8 @@ private fun ContextualCommandAndOptionsDock(
 
                 Box(
                     modifier = Modifier
-                        .width(50.dp)
-                        .height(42.dp)
+                        .width(52.dp)
+                        .height(48.dp)
                         .pointerInput(Unit) {
                             awaitEachGesture {
                                 val down = awaitFirstDown(
@@ -2414,7 +2526,7 @@ private fun ContextualCommandAndOptionsDock(
                                         swapped = true
                                         change.consume()
                                         isSendCardInFront = !isSendCardInFront
-                                        commandDeckTimer.onOrderExchanged()
+                                        commandDeckTimer.onOrderExchanged(isCommandPromptOrDeck = true)
                                         break
                                     }
                                 }
@@ -2423,10 +2535,29 @@ private fun ContextualCommandAndOptionsDock(
                         .testTag("command_action_card_stack"),
                     contentAlignment = Alignment.CenterEnd
                 ) {
-                    // Cancel Card (Red X — concealed at rest when Send is front; foreground when exchanged)
+                    // Cancel Card (Red X — 100% concealed at rest behind Send; foreground when exchanged)
+                    val cancelClickModifier = if (cancelIsVisible) {
+                        Modifier.clickable {
+                            if (!isSendCardInFront) {
+                                commandDeckTimer.onUserInteraction()
+                                if (isRunningActiveCommand) {
+                                    onCancelCommand()
+                                }
+                                isCommandFieldFocused = false
+                                focusManager.clearFocus(force = true)
+                                onCloseCommandEditing()
+                            } else {
+                                isSendCardInFront = false
+                                commandDeckTimer.onOrderExchanged(isCommandPromptOrDeck = true)
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+
                     Surface(
                         modifier = Modifier
-                            .size(38.dp)
+                            .size(40.dp)
                             .offset {
                                 val yDp = if (!isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp
                                 IntOffset(cancelOffsetX.roundToPx(), yDp.roundToPx())
@@ -2438,43 +2569,54 @@ private fun ContextualCommandAndOptionsDock(
                                 scaleY = cancelScale
                                 alpha = cancelAlpha
                             }
-                            .border(
-                                1.2.dp,
-                                CadRedAlert,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .clickable(enabled = !isSendCardInFront || isRearRevealed) {
-                                if (!isSendCardInFront) {
-                                    commandDeckTimer.onUserInteraction()
-                                    if (isRunningActiveCommand) {
-                                        onCancelCommand()
-                                    }
-                                    isCommandFieldFocused = false
-                                    focusManager.clearFocus(force = true)
-                                    onCloseCommandEditing()
+                            .then(cancelClickModifier)
+                            .then(
+                                if (cancelIsVisible) {
+                                    Modifier.testTag("command_card_cancel")
                                 } else {
-                                    isSendCardInFront = false
-                                    commandDeckTimer.onOrderExchanged()
+                                    Modifier
                                 }
-                            }
-                            .testTag("command_card_cancel"),
+                            ),
                         shape = RoundedCornerShape(8.dp),
-                        color = OpaqueRedBadgeBg
+                        color = if (cancelIsVisible) OpaqueRedBadgeBg else Color.Transparent,
+                        border = if (cancelIsVisible) BorderStroke(1.2.dp, CadRedAlert) else null,
+                        shadowElevation = 0.dp,
+                        tonalElevation = 0.dp
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Cancel Active Command or Clear Input",
-                                tint = CadRedAlert,
-                                modifier = Modifier.size(17.dp)
-                            )
+                        if (cancelIsVisible) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Cancel Active Command or Clear Input",
+                                    tint = CadRedAlert,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
                         }
                     }
 
-                    // Send Card (Green Send Arrow — foreground by default; concealed at rest when exchanged)
+                    // Send Card (Green Send Arrow — foreground by default; 100% concealed at rest when exchanged)
+                    val sendClickModifier = if (sendIsVisible) {
+                        Modifier.clickable {
+                            if (isSendCardInFront) {
+                                commandDeckTimer.onUserInteraction()
+                                if (commandLineInput.isNotBlank()) {
+                                    onSubmitCommandLine()
+                                    isCommandFieldFocused = false
+                                    focusManager.clearFocus(force = true)
+                                }
+                            } else {
+                                isSendCardInFront = true
+                                commandDeckTimer.onOrderExchanged(isCommandPromptOrDeck = true)
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+
                     Surface(
                         modifier = Modifier
-                            .size(38.dp)
+                            .size(40.dp)
                             .offset {
                                 val yDp = if (isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp
                                 IntOffset(sendOffsetX.roundToPx(), yDp.roundToPx())
@@ -2486,35 +2628,29 @@ private fun ContextualCommandAndOptionsDock(
                                 scaleY = sendScale
                                 alpha = sendAlpha
                             }
-                            .border(
-                                1.2.dp,
-                                CadEmeraldCrossing,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .clickable(enabled = isSendCardInFront || isRearRevealed) {
-                                if (isSendCardInFront) {
-                                    commandDeckTimer.onUserInteraction()
-                                    if (commandLineInput.isNotBlank()) {
-                                        onSubmitCommandLine()
-                                        isCommandFieldFocused = false
-                                        focusManager.clearFocus(force = true)
-                                    }
+                            .then(sendClickModifier)
+                            .then(
+                                if (sendIsVisible) {
+                                    Modifier.testTag("command_card_send")
                                 } else {
-                                    isSendCardInFront = true
-                                    commandDeckTimer.onOrderExchanged()
+                                    Modifier
                                 }
-                            }
-                            .testTag("command_card_send"),
+                            ),
                         shape = RoundedCornerShape(8.dp),
-                        color = OpaqueEmeraldBadgeBg
+                        color = if (sendIsVisible) OpaqueEmeraldBadgeBg else Color.Transparent,
+                        border = if (sendIsVisible) BorderStroke(1.2.dp, CadEmeraldCrossing) else null,
+                        shadowElevation = 0.dp,
+                        tonalElevation = 0.dp
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "Execute Command or Coordinate",
-                                tint = CadEmeraldCrossing,
-                                modifier = Modifier.size(17.dp)
-                            )
+                        if (sendIsVisible) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Execute Command or Coordinate",
+                                    tint = CadEmeraldCrossing,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -3230,14 +3366,133 @@ private fun ActionLauncherDialog(
     }
 }
 
-// --- Section 62: First-Run Home Screen (New Drawing, Open Drawing .dxf, Saved Drawings) ---
+// --- Section 62 & V18.2 Requirement C: First-Run Home Screen + Return to Active Drawing & Unsaved Session Protection ---
+
+@Composable
+private fun UnsavedDrawingConfirmationDialog(
+    activeProjectName: String,
+    pendingAction: PendingHomeReplacementAction,
+    onSaveAndContinue: () -> Unit,
+    onDiscardAndContinue: () -> Unit,
+    onStayHere: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onStayHere,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .widthIn(max = 500.dp)
+                .border(1.5.dp, CadAmberSnap, RoundedCornerShape(12.dp))
+                .testTag("unsaved_drawing_confirmation_dialog"),
+            shape = RoundedCornerShape(12.dp),
+            color = CadSurfaceCard
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = CadAmberSnap,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "UNSAVED DRAWING CHANGES",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = CadAmberSnap,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Active drawing '$activeProjectName' has unsaved edits",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextSecondary
+                        )
+                    }
+                }
+
+                Text(
+                    text = "You requested: ${pendingAction.actionSummaryLabel}. Would you like to save '$activeProjectName' to Documents/PrecisionCAD before continuing, discard your unsaved changes, or stay in your current session?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CadTextPrimary
+                )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onSaveAndContinue,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("unsaved_dialog_save_and_continue"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CadCyanPrimary,
+                            contentColor = Color(0xFF001824)
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Save and Continue", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = onDiscardAndContinue,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("unsaved_dialog_discard_and_continue"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = OpaqueRedBadgeBg,
+                            contentColor = CadRedAlert
+                        ),
+                        border = BorderStroke(1.dp, CadRedAlert),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Discard and Continue", fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = onStayHere,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("unsaved_dialog_stay_here"),
+                        border = BorderStroke(1.dp, CadBorderStrong),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Stay Here", color = CadTextPrimary, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun CadHomeScreen(
     savedProjects: List<CadProjectMetadataEntity>,
     displayUnit: CadUnit,
+    hasActiveWorkspaceSession: Boolean,
+    activeProjectName: String,
+    isDocumentDirty: Boolean,
+    activeEntityCount: Int,
     updatesBehindCount: Int,
     updateUiState: CadUpdateUiState,
+    onReturnToActiveWorkspace: () -> Unit,
     onOpenReleaseCatalogue: () -> Unit,
     onNewBlankDrawing: (String, CadUnit) -> Unit,
     onOpenDxfFilePicker: () -> Unit,
@@ -3310,6 +3565,69 @@ private fun CadHomeScreen(
                         updateUiState = updateUiState,
                         onClick = onOpenReleaseCatalogue
                     )
+                }
+            }
+
+            // V18.2 Requirement C (§6.1): Prominent Return to Active Drawing Card & Button when an active session exists
+            if (hasActiveWorkspaceSession) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.5.dp, CadEmeraldCrossing, RoundedCornerShape(12.dp))
+                        .testTag("home_active_session_banner"),
+                    shape = RoundedCornerShape(12.dp),
+                    color = OpaqueEmeraldBadgeBg
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "ACTIVE DRAWING SESSION PRESERVED",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = CadEmeraldCrossing,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "$activeProjectName • $activeEntityCount entities • ${if (isDocumentDirty) "Unsaved edits (Quick-Saved)" else "Saved"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CadTextPrimary
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = onReturnToActiveWorkspace,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("home_return_to_active_drawing_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CadEmeraldCrossing,
+                                contentColor = Color(0xFF001B10)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Return to Active Drawing",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Return to Active Drawing ($activeProjectName)",
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
 

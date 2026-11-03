@@ -19,13 +19,13 @@ PrecisionCAD Studio is organized into five deterministic layers under `app/src/m
    - `CadRoomDatabase.kt`: Local Room catalogue synchronizing project metadata and `.pcad`/DXF payloads.
    - `CadAppUpdater.kt` & `CadPackageInstallerReceiver.kt`: Public GitHub Releases API client (`CadGitHubUpdateRepository`), structured metadata parser (`CadReleaseParser`), 10-point APK verifier (`CadApkVerifier`), private HTTPS staging downloader, and Android `PackageInstaller` session launcher.
 5. **`ui/` — Jetpack Compose Workspace & Shared Card System**:
-   - `CadWorkspaceViewModel.kt`: Single-source-of-truth `StateFlow<CadWorkspaceUiState>`, undo/redo snapshots, zoom-adaptive grid reference scale tracking, command state machine, live preview synthesis, and update repository coordination.
-   - `CadWorkspaceScreen.kt`: Overlay-invariant full-screen CAD viewport, unbordered translucent floating command dock, single-source IME positioning, and Home screen with top-right update indicator.
+   - `CadWorkspaceViewModel.kt`: Single-source-of-truth `StateFlow<CadWorkspaceUiState>`, non-destructive Home/Workspace session retention (`hasActiveWorkspaceSession`, `documentRevision`, `lastExplicitSaveRevision`, `isDocumentDirty`, `PendingHomeReplacementAction`), undo/redo snapshots, zoom-adaptive grid reference scale tracking, command state machine, live preview synthesis, and update repository coordination.
+   - `CadWorkspaceScreen.kt`: Overlay-invariant full-screen CAD viewport, `SaveableStateHolder` + `AnimatedContent` Home/Workspace transitions, unbordered translucent floating command dock with concealed-at-rest Send/Cancel stack (`postExchangeRevealMs = 0L`), single-source IME positioning, unsaved-drawing replacement confirmation dialog, and Home screen with top-right update indicator.
    - `ui/components/`:
      - `CadViewportCanvas.kt`: Multi-pass 2D technical canvas (Paper Space sheet base pass -> grid pass -> model geometry & dimensions -> Paper Space opaque title-block pass -> transient visual polar & snap overlays).
-     - `CadBinaryToggleCard.kt`: Reusable card-stack system (`CadDeckIdleTimerState`, `CadBinaryToggleCard`, `CadOsnapModeToggleCard`, `CadHorizontalOptionCardDeck`, `CadExchangeableDualActionDeck`) with concealed rear card at rest, `2.4s` post-exchange reveal, and isolated `75s` section-local idle peek.
+     - `CadBinaryToggleCard.kt`: Reusable card-stack system (`CadDeckIdleTimerState`, `CadBinaryToggleCard`, `CadOsnapModeToggleCard`, `CadHorizontalOptionCardDeck`, `CadExchangeableDualActionDeck`) with concealed rear card at rest, configurable post-exchange reveal (`0L` for command Send/Cancel stack; `2.4s` for dual-action decks), and isolated `75s` section-local idle peek.
      - `VirtualCursorController.kt`: Animated controller collapse/expand, vertical-peek mode selector, and 1:1 touchpad / velocity joystick motion engines.
-     - `CadDialogsAndPanels.kt` & `CadReleaseCatalogueDialog.kt`: QDIM dialog, Selective Dimension Removal dialog, Cursor/Grid/OSNAP dialog, and Morphp-style GitHub Release Catalogue dialog.
+     - `CadDialogsAndPanels.kt` & `CadReleaseCatalogueDialog.kt`: QDIM dialog, Selective Dimension Removal dialog, Cursor/Grid/OSNAP dialog, and Morphp-style GitHub Release Catalogue dialog with a single-position stacked Download/Install vs. Cancel action-card deck.
 
 ---
 
