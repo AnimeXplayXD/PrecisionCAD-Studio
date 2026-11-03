@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.cad.data.CadAppDatabase
@@ -46,6 +47,9 @@ import com.example.cad.model.SheetSetupConfig
 import com.example.cad.model.UnitChangeMode
 import com.example.cad.model.VirtualControllerMode
 import com.example.cad.model.WorkspaceSpace
+import com.example.cad.update.CadGitHubUpdateRepository
+import com.example.cad.update.CadReleaseEntry
+import com.example.cad.update.CadUpdateUiState
 import com.example.ui.components.ControllerDockState
 import com.example.ui.components.SelectionBoxDragState
 import com.example.ui.components.ViewportGestureState
@@ -168,13 +172,16 @@ data class CadWorkspaceUiState(
     val viewportWidthPx: Float = 800f,
     val viewportHeightPx: Float = 600f,
     val usableViewportRect: UsableViewportRect = UsableViewportRect(0f, 0f, 800f, 600f),
+    val referencePixelsPerModelUnit: Double? = null,
+    val effectiveGridSnapInterval: Double = 5.0,
     val fitDrawingPolicy: FitDrawingPolicy = FitDrawingPolicy.ALL_VISIBLE,
     val isQuickDimensionEnabled: Boolean = false,
     val qdimDensity: QDimDensityPolicy = QDimDensityPolicy.BALANCED,
     val qdimArrangementPreference: DimensionArrangementPreference = DimensionArrangementPreference.AUTO_CHAIN,
     val lastAlignmentReport: DimensionAlignmentReport? = null,
     val canUndo: Boolean = false,
-    val canRedo: Boolean = false
+    val canRedo: Boolean = false,
+    val isReleaseCatalogueOpen: Boolean = false
 ) {
     val isActiveCommandSession: Boolean
         get() = commandPanelState is CommandPanelState.Running ||
@@ -191,11 +198,16 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     private val database = CadAppDatabase.getInstance(application)
     private val repository = CadProjectRepository(application, database.projectDao())
+    val updateRepository = CadGitHubUpdateRepository(application, viewModelScope)
 
     private val prefs = application.getSharedPreferences("precision_cad_prefs", Context.MODE_PRIVATE)
 
     val savedProjects: StateFlow<List<CadProjectMetadataEntity>> = repository.projectsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val releaseCatalogue: StateFlow<List<CadReleaseEntry>> = updateRepository.releases
+    val updatesBehindCount: StateFlow<Int> = updateRepository.updatesBehindCount
+    val updateUiState: StateFlow<CadUpdateUiState> = updateRepository.uiState
 
     private val _uiState = MutableStateFlow(createInitialState())
     val uiState: StateFlow<CadWorkspaceUiState> = _uiState.asStateFlow()
@@ -216,6 +228,36 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             repository.cleanupUntouchedLegacyTemplatesOnce()
         }
+        updateRepository.checkForUpdates(manual = false)
+    }
+
+    fun openReleaseCatalogue() {
+        _uiState.update { it.copy(isReleaseCatalogueOpen = true) }
+        updateRepository.checkForUpdates(manual = false)
+    }
+
+    fun closeReleaseCatalogue() {
+        _uiState.update { it.copy(isReleaseCatalogueOpen = false) }
+    }
+
+    fun refreshReleaseCatalogue() {
+        updateRepository.checkForUpdates(manual = true)
+    }
+
+    fun startUpdateDownload(release: CadReleaseEntry) {
+        updateRepository.downloadAndVerifyRelease(release)
+    }
+
+    fun requestInstallVerifiedUpdate() {
+        updateRepository.requestInstallOrExecuteSession(getApplication())
+    }
+
+    fun cancelUpdateAction() {
+        updateRepository.cancelOrReset()
+    }
+
+    fun onHostActivityResumed() {
+        updateRepository.onHostResumed(getApplication())
     }
 
     fun buildCurrentPcadDocument(projectNameOverride: String? = null): PcadProjectDocument {
@@ -589,7 +631,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             basePoint = refPt,
             rawCursorPoint = target,
             snapConfig = st.gridSnapConfig,
-            previousBasePoint = prevRefPt
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
         )
         val updatedSelectionBox = st.selectionBoxDrag?.copy(currentModel = target)
         _uiState.update {
@@ -608,19 +651,30 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val st = _uiState.value
         val refPt = st.commandStepPoints.lastOrNull()
         val prevRefPt = if (st.commandStepPoints.size >= 2) st.commandStepPoints[st.commandStepPoints.size - 2] else null
+        val effectiveGridInterval = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseGridInterval = st.gridSnapConfig.gridSnapInterval,
+            currentPixelsPerModelUnit = st.viewport.pixelsPerModelUnit.toDouble(),
+            referencePixelsPerModelUnit = st.referencePixelsPerModelUnit,
+            previousEffectiveInterval = st.effectiveGridSnapInterval
+        )
         val (snapped, candidate) = CadSnapAndCoordEngine.resolveCursorSnap(
             rawModelCursor = newRawModel,
             referencePoint = refPt,
             entities = st.entities,
             snapConfig = st.gridSnapConfig,
             viewport = st.viewport,
-            previousReferencePoint = prevRefPt
+            previousReferencePoint = prevRefPt,
+            usableViewportRect = st.usableViewportRect,
+            referencePixelsPerModelUnit = st.referencePixelsPerModelUnit,
+            previousEffectiveGridInterval = effectiveGridInterval,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
         )
         val polarPreview = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = refPt,
             rawCursorPoint = newRawModel,
             snapConfig = st.gridSnapConfig,
-            previousBasePoint = prevRefPt
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
         )
         // Section 17: Automatically pan/adjust viewport so the cursor never disappears off-screen
         val trackedViewport = st.viewport.trackCursorIntoSafeBoundary(
@@ -637,6 +691,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 activeSnapCandidate = candidate,
                 polarPreview = polarPreview,
                 viewport = trackedViewport,
+                effectiveGridSnapInterval = effectiveGridInterval,
                 selectionBoxDrag = updatedSelectionBox
             )
         }
@@ -650,7 +705,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             basePoint = refPt,
             rawCursorPoint = st.rawCursorModelPos,
             snapConfig = st.gridSnapConfig,
-            previousBasePoint = prevRefPt
+            previousBasePoint = prevRefPt,
+            previouslyAcquiredVisualAngleDeg = st.polarPreview?.acquiredAngleDeg
         )
         if (st.isActiveCommandSession) {
             overviewDismissJob?.cancel()
@@ -893,7 +949,20 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     // --- Viewport, Usable Rect Rebasing & Fit Drawing (Section 5 & Section 6) ---
 
     fun updateViewport(newViewport: ViewportTransform) {
-        _uiState.update { it.copy(viewport = newViewport) }
+        _uiState.update { st ->
+            val refPpm = st.referencePixelsPerModelUnit ?: newViewport.pixelsPerModelUnit.toDouble()
+            val nextEffective = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+                baseGridInterval = st.gridSnapConfig.gridSnapInterval,
+                currentPixelsPerModelUnit = newViewport.pixelsPerModelUnit.toDouble(),
+                referencePixelsPerModelUnit = refPpm,
+                previousEffectiveInterval = st.effectiveGridSnapInterval
+            )
+            st.copy(
+                viewport = newViewport,
+                referencePixelsPerModelUnit = refPpm,
+                effectiveGridSnapInterval = nextEffective
+            )
+        }
     }
 
     fun updateViewportDimensions(widthPx: Float, heightPx: Float) {
@@ -973,10 +1042,19 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         if (targetEntities.isEmpty()) {
             val resetBounds = BoundingBox2D(0.0, 0.0, 120.0, 80.0)
             val resetVp = st.viewport.fitToUsableViewport(resetBounds, st.usableViewportRect, marginPx = 28f)
+            val refPpm = st.referencePixelsPerModelUnit ?: resetVp.pixelsPerModelUnit.toDouble()
+            val nextEffective = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+                baseGridInterval = st.gridSnapConfig.gridSnapInterval,
+                currentPixelsPerModelUnit = resetVp.pixelsPerModelUnit.toDouble(),
+                referencePixelsPerModelUnit = refPpm,
+                previousEffectiveInterval = st.effectiveGridSnapInterval
+            )
             val msg = "FIT DRAWING • Empty sheet — reset to default view"
             _uiState.update {
                 it.copy(
                     viewport = resetVp,
+                    referencePixelsPerModelUnit = refPpm,
+                    effectiveGridSnapInterval = nextEffective,
                     fitDrawingPolicy = policy,
                     commandPromptBanner = msg
                 )
@@ -994,10 +1072,19 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             usableRect = st.usableViewportRect,
             marginPx = 28f
         )
+        val refPpm = st.referencePixelsPerModelUnit ?: fittedViewport.pixelsPerModelUnit.toDouble()
+        val nextEffective = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseGridInterval = st.gridSnapConfig.gridSnapInterval,
+            currentPixelsPerModelUnit = fittedViewport.pixelsPerModelUnit.toDouble(),
+            referencePixelsPerModelUnit = refPpm,
+            previousEffectiveInterval = st.effectiveGridSnapInterval
+        )
         val msg = "FIT DRAWING • Fitted ${targetEntities.size} visible entities$fallbackNote"
         _uiState.update {
             it.copy(
                 viewport = fittedViewport,
+                referencePixelsPerModelUnit = refPpm,
+                effectiveGridSnapInterval = nextEffective,
                 fitDrawingPolicy = policy,
                 commandPromptBanner = msg
             )
@@ -1017,14 +1104,14 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         newPrecision: PrecisionFormatConfig
     ) {
         val st = _uiState.value
-        prefs.edit()
-            .putString("unit_change_mode", mode.name)
-            .putString("display_unit", targetUnit.name)
-            .putInt("linear_decimals", newPrecision.linearDecimals)
-            .putInt("angular_decimals", newPrecision.angularDecimals)
-            .putBoolean("show_unit_suffix", newPrecision.showUnitSuffix)
-            .putBoolean("suppress_trailing_zeros", newPrecision.suppressTrailingZeros)
-            .apply()
+        prefs.edit {
+            putString("unit_change_mode", mode.name)
+            putString("display_unit", targetUnit.name)
+            putInt("linear_decimals", newPrecision.linearDecimals)
+            putInt("angular_decimals", newPrecision.angularDecimals)
+            putBoolean("show_unit_suffix", newPrecision.showUnitSuffix)
+            putBoolean("suppress_trailing_zeros", newPrecision.suppressTrailingZeros)
+        }
 
         if (mode == UnitChangeMode.CONVERT_DISPLAY_UNITS) {
             recordUndoSnapshot()
@@ -1044,7 +1131,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val origin = Point2D(0.0, 0.0)
             val rescaledEntities = st.entities.map { it.scale(origin, scaleFactor) }
             val rescaledCursor = st.snappedCursorModelPos.scaleFrom(origin, scaleFactor)
-            val msg = "UNITS (Option B Active) • Rescaled model coordinates by ${String.format(Locale.US, "%.4f", scaleFactor)} to ${targetUnit.symbol}"
+            val msg = "UNITS (Option B Active) • Rescaled model coordinates by ${String.format(Locale.ROOT, "%.4f", scaleFactor)} to ${targetUnit.symbol}"
             _uiState.update {
                 it.copy(
                     storageUnit = targetUnit,
@@ -3250,6 +3337,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 entities = cleaned,
                 blocks = imported.blocks.associateBy { b -> b.name },
                 selectedEntityIds = emptySet(),
+                referencePixelsPerModelUnit = null,
+                effectiveGridSnapInterval = it.gridSnapConfig.gridSnapInterval,
                 isQuickDimensionEnabled = false,
                 activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
                 commandPromptBanner = msg,
@@ -3287,6 +3376,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 entities = doc.entities,
                 blocks = doc.blocks.associateBy { b -> b.name },
                 selectedEntityIds = emptySet(),
+                referencePixelsPerModelUnit = null,
+                effectiveGridSnapInterval = doc.gridSnapConfig.gridSnapInterval,
                 isQuickDimensionEnabled = doc.isQuickDimensionEnabled,
                 qdimDensity = doc.qdimDensity,
                 qdimArrangementPreference = doc.qdimArrangementPreference,
@@ -3362,6 +3453,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     blocks = loaded.blocks.associateBy { b -> b.name },
                     selectedEntityIds = emptySet(),
                     previousSelectedEntityIds = emptySet(),
+                    referencePixelsPerModelUnit = null,
+                    effectiveGridSnapInterval = it.gridSnapConfig.gridSnapInterval,
                     isQuickDimensionEnabled = false,
                     canUndo = false,
                     canRedo = false,
@@ -3379,7 +3472,7 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         undoStack.clear()
         redoStack.clear()
         val newId = "proj_${UUID.randomUUID().toString().take(8)}"
-        prefs.edit().putString("display_unit", unit.name).apply()
+        prefs.edit { putString("display_unit", unit.name) }
         val msg = "NEW • Created blank drawing '$name' in ${unit.label} (Quick Dimension OFF)"
         _uiState.update {
             it.copy(
@@ -3393,6 +3486,8 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 blocks = emptyMap(),
                 selectedEntityIds = emptySet(),
                 previousSelectedEntityIds = emptySet(),
+                referencePixelsPerModelUnit = null,
+                effectiveGridSnapInterval = it.gridSnapConfig.gridSnapInterval,
                 isQuickDimensionEnabled = false,
                 canUndo = false,
                 canRedo = false,
@@ -3620,5 +3715,5 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         else -> "Position cursor and tap PICK PT"
     }
 
-    private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)
+    private fun fmt(v: Double): String = String.format(Locale.ROOT, "%.2f", v)
 }

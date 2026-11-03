@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,8 +42,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PlayArrow
@@ -87,7 +87,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -106,6 +105,7 @@ import com.example.cad.model.CadCommandId
 import com.example.cad.model.CadEntity
 import com.example.cad.model.CadLayer
 import com.example.cad.model.CadLineType
+import com.example.cad.model.CadNumberFormatter
 import com.example.cad.model.CadUnit
 import com.example.cad.model.ConstraintType
 import com.example.cad.model.CursorControllerConfig
@@ -837,8 +837,8 @@ fun QuickDimensionDialog(
                         .testTag("qdim_scrollable_body"),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // 1. Operating Mode Rotary / Wheel Selector (Section 5.3 & 5.4)
-                    QDimRotaryWheelSelector(
+                        // 1. Operating Scope Mode Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    QDimHorizontalCardSelector(
                         selectorKey = "mode",
                         title = "1. Operating Scope Mode",
                         items = QDimOperatingMode.entries,
@@ -852,8 +852,8 @@ fun QuickDimensionDialog(
                         onSelect = { mode = it }
                     )
 
-                    // 2. Alignment & Arrangement Rotary / Wheel Selector (Section 5.3 & 5.4)
-                    QDimRotaryWheelSelector(
+                    // 2. Alignment & Arrangement Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    QDimHorizontalCardSelector(
                         selectorKey = "arrangement",
                         title = "2. Alignment & Arrangement Mode (DimensionAlignmentEngine)",
                         items = DimensionArrangementPreference.entries,
@@ -867,8 +867,8 @@ fun QuickDimensionDialog(
                         onSelect = { arrangement = it }
                     )
 
-                    // 3. Dimension Density Policy Rotary / Wheel Selector (Section 5.3 & 5.4)
-                    QDimRotaryWheelSelector(
+                    // 3. Dimension Density Policy Horizontal Option Card Deck (Phase 7.1 & 7.2)
+                    QDimHorizontalCardSelector(
                         selectorKey = "density",
                         title = "3. Dimension Density Policy",
                         items = QDimDensityPolicy.entries,
@@ -894,7 +894,7 @@ fun QuickDimensionDialog(
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
-                                text = "DimensionAlignmentEngine Report • Completeness: ${"%.0f".format(alignmentReport.generationCompletenessScore)}% • Layout: ${"%.0f".format(alignmentReport.layoutQualityScore)}/100",
+                                text = "DimensionAlignmentEngine Report • Completeness: ${String.format(Locale.ROOT, "%.0f", alignmentReport.generationCompletenessScore)}% • Layout: ${String.format(Locale.ROOT, "%.0f", alignmentReport.layoutQualityScore)}/100",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = CadCyanPrimary,
                                 fontWeight = FontWeight.Bold
@@ -924,7 +924,14 @@ fun QuickDimensionDialog(
                     HorizontalDivider(color = CadBorderStrong)
                 }
 
-                // Section 5.2 & 5.6 — Single Logical Scroll-Responsive Footer with Two-Card Action Deck
+                // Section 5.2, 5.6 & Phase 9 — Single Logical Scroll-Responsive Footer with Two-Card Action Deck
+                val footerDeckTimerState = rememberCadDeckIdleTimerState(
+                    deckId = "qdim_footer_action_deck",
+                    isVisibleAndInteractive = true,
+                    peekDirection = CardPeekDirection.ABOVE
+                )
+                val isFooterRearRevealed = footerDeckTimerState.isRearCardRevealed
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -940,9 +947,9 @@ fun QuickDimensionDialog(
                     ) {
                         Text(
                             text = if (isClearCardInFront) {
-                                "Active Card: Clear All (Tap to clear • Hold for Selective Clear • Swipe ↓ to swap)"
+                                "Active Card: Clear All (Tap to clear • Hold for Selective Clear • Swipe ↓/↑ to swap)"
                             } else {
-                                "Active Card: Enable & Generate (Tap to run • Swipe ↓ for Clear All)"
+                                "Active Card: Enable & Generate (Tap to run • Swipe ↓/↑ for Clear All)"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = CadTextSecondary,
@@ -965,10 +972,11 @@ fun QuickDimensionDialog(
                     }
 
                     // Two-Card Action Deck: Green (Enable & Generate) + Red (Clear All)
+                    // Rear card is concealed at rest, revealed for 2.4s after exchange or 1.0s every 75s idle.
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(62.dp)
+                            .height(58.dp)
                             .padding(top = 4.dp)
                             .pointerInput(isClearCardInFront) {
                                 var dragAccumY = 0f
@@ -976,9 +984,10 @@ fun QuickDimensionDialog(
                                     onDragStart = { dragAccumY = 0f },
                                     onVerticalDrag = { change, dragAmount ->
                                         dragAccumY += dragAmount
-                                        if (dragAccumY > 20f) {
+                                        if (abs(dragAccumY) > 20f) {
                                             change.consume()
                                             dragAccumY = 0f
+                                            footerDeckTimerState.onCardExchange(isCommandPromptOrDeck = false)
                                             isClearCardInFront = !isClearCardInFront
                                         }
                                     }
@@ -988,24 +997,43 @@ fun QuickDimensionDialog(
                         contentAlignment = Alignment.Center
                     ) {
                         val enableOffsetY by animateDpAsState(
-                            targetValue = if (!isClearCardInFront) 3.dp else (-5).dp,
+                            targetValue = when {
+                                !isClearCardInFront -> if (isFooterRearRevealed) 2.dp else 0.dp
+                                isFooterRearRevealed -> (-5).dp
+                                else -> 0.dp
+                            },
                             animationSpec = tween(180),
                             label = "QDimEnableCardOffsetY"
                         )
                         val enableScale by animateFloatAsState(
-                            targetValue = if (!isClearCardInFront) 1f else 0.95f,
+                            targetValue = if (!isClearCardInFront) 1f else if (isFooterRearRevealed) 0.95f else 0.92f,
                             animationSpec = tween(180),
                             label = "QDimEnableCardScale"
                         )
+                        val enableAlpha by animateFloatAsState(
+                            targetValue = if (!isClearCardInFront) 1f else if (isFooterRearRevealed) 0.85f else 0f,
+                            animationSpec = tween(180),
+                            label = "QDimEnableCardAlpha"
+                        )
+
                         val clearOffsetY by animateDpAsState(
-                            targetValue = if (isClearCardInFront) 3.dp else (-5).dp,
+                            targetValue = when {
+                                isClearCardInFront -> if (isFooterRearRevealed) 2.dp else 0.dp
+                                isFooterRearRevealed -> (-5).dp
+                                else -> 0.dp
+                            },
                             animationSpec = tween(180),
                             label = "QDimClearCardOffsetY"
                         )
                         val clearScale by animateFloatAsState(
-                            targetValue = if (isClearCardInFront) 1f else 0.95f,
+                            targetValue = if (isClearCardInFront) 1f else if (isFooterRearRevealed) 0.95f else 0.92f,
                             animationSpec = tween(180),
                             label = "QDimClearCardScale"
+                        )
+                        val clearAlpha by animateFloatAsState(
+                            targetValue = if (isClearCardInFront) 1f else if (isFooterRearRevealed) 0.85f else 0f,
+                            animationSpec = tween(180),
+                            label = "QDimClearCardAlpha"
                         )
 
                         // Green Card: Enable & Generate
@@ -1018,7 +1046,7 @@ fun QuickDimensionDialog(
                                 .graphicsLayer {
                                     scaleX = enableScale
                                     scaleY = enableScale
-                                    alpha = if (!isClearCardInFront) 1f else 0.82f
+                                    alpha = enableAlpha
                                 }
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color(0xFF0E2B1E))
@@ -1029,6 +1057,7 @@ fun QuickDimensionDialog(
                                 )
                                 .clickable {
                                     if (isClearCardInFront) {
+                                        footerDeckTimerState.onCardExchange(isCommandPromptOrDeck = false)
                                         isClearCardInFront = false
                                     } else {
                                         onExecuteQDim(mode, density, true, arrangement)
@@ -1044,17 +1073,19 @@ fun QuickDimensionDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = if (isQuickDimensionEnabled) "Update & Refresh Dimensions" else "Enable & Generate Dimensions",
+                                        text = if (isQuickDimensionEnabled) "ENABLE & GENERATE (REFRESH)" else "ENABLE & GENERATE",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = Color(0xFFECFDF5),
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
                                     )
                                     Text(
                                         text = "${mode.commandToken} • ${arrangement.label} • ${density.label}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = CadEmeraldCrossing
+                                        color = CadEmeraldCrossing,
+                                        maxLines = 1
                                     )
                                 }
                                 Text(
@@ -1076,7 +1107,7 @@ fun QuickDimensionDialog(
                                 .graphicsLayer {
                                     scaleX = clearScale
                                     scaleY = clearScale
-                                    alpha = if (isClearCardInFront) 1f else 0.82f
+                                    alpha = clearAlpha
                                 }
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color(0xFF2B1115))
@@ -1087,7 +1118,12 @@ fun QuickDimensionDialog(
                                 )
                                 .combinedClickable(
                                     onClick = {
-                                        showClearAllConfirm = true
+                                        if (!isClearCardInFront) {
+                                            footerDeckTimerState.onCardExchange(isCommandPromptOrDeck = false)
+                                            isClearCardInFront = true
+                                        } else {
+                                            showClearAllConfirm = true
+                                        }
                                     },
                                     onLongClick = {
                                         showSelectiveClearDialog = true
@@ -1102,17 +1138,19 @@ fun QuickDimensionDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "CLEAR ALL DIMENSIONS ($totalDimensionCount)",
+                                        text = "CLEAR ALL ($totalDimensionCount)",
                                         style = MaterialTheme.typography.titleSmall,
                                         color = Color(0xFFFEE2E2),
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
                                     )
                                     Text(
                                         text = "Tap to clear all • Long-press for Category Selective Clear",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = CadCrimsonAlert
+                                        color = CadCrimsonAlert,
+                                        maxLines = 1
                                     )
                                 }
                                 Text(
@@ -1131,10 +1169,13 @@ fun QuickDimensionDialog(
 }
 
 /**
- * Section 5.3 & 5.4 — Compact Single-Button Rotary / Wheel Selector with 2-Second Delayed Speech-Bubble Callout.
+ * Phase 7.1 & 7.2 — Horizontal Multi-Option Card Deck Selector with Non-Layout-Shifting 2-Second Help Callout.
+ * - Replaces the vertical rotary wheel selector with `CadHorizontalOptionCardDeck`.
+ * - Renders the 2-second delayed description callout as a floating overlay inside the fixed-height deck box
+ *   so showing or dismissing the callout causes 0 px vertical layout shift and 0 px scroll jump.
  */
 @Composable
-private fun <T> QDimRotaryWheelSelector(
+private fun <T> QDimHorizontalCardSelector(
     selectorKey: String,
     title: String,
     items: List<T>,
@@ -1148,24 +1189,36 @@ private fun <T> QDimRotaryWheelSelector(
     onSelect: (T) -> Unit
 ) {
     val currentIndex = items.indexOf(selectedItem).coerceAtLeast(0)
-    val prevItem = items[(currentIndex - 1 + items.size) % items.size]
-    val nextItem = items[(currentIndex + 1) % items.size]
-
     var interactionTick by remember { mutableIntStateOf(0) }
     var showDelayedCallout by remember { mutableStateOf(false) }
 
-    // 2-second delayed speech-bubble callout after resting on a selection without scrolling or wheel movement
+    // 2-second delayed speech-bubble callout after resting on a selection without scrolling or card exchange
     LaunchedEffect(selectedItem, interactionTick, scrollActivitySignal) {
         showDelayedCallout = false
         delay(2000L)
         showDelayedCallout = true
     }
 
+    val cardOptions = remember(items, accentColor) {
+        items.map { item ->
+            val rawTitle = itemTitle(item)
+            val shortBadge = rawTitle.substringBefore(" —").take(12).uppercase(Locale.ROOT)
+            CadHorizontalCardOption(
+                value = item,
+                title = rawTitle,
+                subtitle = itemDescription(item),
+                shortBadge = shortBadge,
+                accentColor = accentColor,
+                containerColor = Color(0xFF101923)
+            )
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("qdim_wheel_$selectorKey"),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1176,149 +1229,39 @@ private fun <T> QDimRotaryWheelSelector(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
                 color = CadTextPrimary,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
             )
             Text(
-                text = "${currentIndex + 1}/${items.size} • Wheel / Tap",
+                text = "${currentIndex + 1}/${items.size} • Swipe ↔ / Tap",
                 style = MaterialTheme.typography.labelSmall,
                 color = accentColor
             )
         }
 
-        // Single-Button Rotary / Wheel Selector Surface
-        Surface(
+        // Fixed-height container holding both the horizontal card deck and the non-layout-shifting overlay callout
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.5.dp, accentColor.copy(alpha = 0.75f), RoundedCornerShape(10.dp))
-                .pointerInput(items, currentIndex) {
-                    var dragDeltaY = 0f
-                    detectVerticalDragGestures(
-                        onDragStart = {
-                            dragDeltaY = 0f
-                            interactionTick += 1
-                        },
-                        onVerticalDrag = { change, amount ->
-                            change.consume()
-                            dragDeltaY += amount
-                            if (dragDeltaY <= -22f) {
-                                dragDeltaY = 0f
-                                interactionTick += 1
-                                onSelect(items[(currentIndex + 1) % items.size])
-                            } else if (dragDeltaY >= 22f) {
-                                dragDeltaY = 0f
-                                interactionTick += 1
-                                onSelect(items[(currentIndex - 1 + items.size) % items.size])
-                            }
-                        }
-                    )
-                }
-                .clickable {
-                    interactionTick += 1
-                    onSelect(nextItem)
-                }
-                .testTag("qdim_wheel_button_$selectorKey"),
-            color = CadPanelElevated,
-            shape = RoundedCornerShape(10.dp)
+                .height(88.dp)
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Upper wheel peek (previous option)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "▲ ${itemTitle(prevItem)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadTextMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                interactionTick += 1
-                                onSelect(prevItem)
-                            }
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowUp,
-                        contentDescription = "Previous $title",
-                        tint = CadTextMuted,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clickable {
-                                interactionTick += 1
-                                onSelect(prevItem)
-                            }
-                    )
-                }
+                CadHorizontalOptionCardDeck(
+                    deckId = "qdim_deck_$selectorKey",
+                    options = cardOptions,
+                    selectedValue = selectedItem,
+                    onSelect = { nextItem ->
+                        interactionTick += 1
+                        showDelayedCallout = false
+                        onSelect(nextItem)
+                    },
+                    testTag = "qdim_wheel_button_$selectorKey"
+                )
 
-                // Active center wheel detented slot
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(accentColor.copy(alpha = 0.16f))
-                        .border(1.dp, accentColor, RoundedCornerShape(7.dp))
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = itemTitle(selectedItem),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = CadTextPrimary,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = "ACTIVE",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = accentColor,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // Lower wheel peek (next option)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "▼ ${itemTitle(nextItem)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadTextMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                interactionTick += 1
-                                onSelect(nextItem)
-                            }
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Next $title",
-                        tint = CadTextMuted,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clickable {
-                                interactionTick += 1
-                                onSelect(nextItem)
-                            }
-                    )
-                }
-
-                // Compact index pills so any option can also be jumped to directly by tap or testTag
+                // Direct option chips for instant jump & testTag discovery
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1335,9 +1278,10 @@ private fun <T> QDimRotaryWheelSelector(
                                 .border(1.dp, if (isSel) accentColor else CadBorderHairline, RoundedCornerShape(5.dp))
                                 .clickable {
                                     interactionTick += 1
+                                    showDelayedCallout = false
                                     onSelect(item)
                                 }
-                                .padding(horizontal = 7.dp, vertical = 3.dp)
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
                                 .testTag("$optionTagPrefix$name")
                         ) {
                             Text(
@@ -1352,48 +1296,51 @@ private fun <T> QDimRotaryWheelSelector(
                     }
                 }
             }
-        }
 
-        // Section 5.4 — 2-Second Delayed Speech-Bubble Callout with Pointer
-        AnimatedVisibility(
-            visible = showDelayedCallout,
-            enter = fadeIn(tween(180)),
-            exit = fadeOut(tween(120))
-        ) {
-            Column(
+            // Phase 7.2 — Non-Layout-Shifting Overlay Callout (0 px height change when appearing/disappearing)
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showDelayedCallout,
+                enter = fadeIn(tween(180)),
+                exit = fadeOut(tween(120)),
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showDelayedCallout = false }
-                    .testTag("qdim_callout_bubble_$selectorKey")
+                    .align(Alignment.BottomCenter)
+                    .zIndex(10f)
             ) {
-                // Speech-bubble triangular pointer aimed at the wheel selector above
-                androidx.compose.foundation.Canvas(
-                    modifier = Modifier
-                        .padding(start = 24.dp)
-                        .width(14.dp)
-                        .height(7.dp)
-                ) {
-                    val path = Path().apply {
-                        moveTo(size.width * 0.5f, 0f)
-                        lineTo(0f, size.height)
-                        lineTo(size.width, size.height)
-                        close()
-                    }
-                    drawPath(path = path, color = accentColor)
-                }
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background( Color(0xFF0E1722))
-                        .border(1.dp, accentColor, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                        .clickable { showDelayedCallout = false }
+                        .testTag("qdim_callout_bubble_$selectorKey")
                 ) {
-                    Text(
-                        text = itemDescription(selectedItem),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = CadTextPrimary
-                    )
+                    androidx.compose.foundation.Canvas(
+                        modifier = Modifier
+                            .padding(start = 24.dp)
+                            .width(12.dp)
+                            .height(5.dp)
+                    ) {
+                        val path = Path().apply {
+                            moveTo(size.width * 0.5f, 0f)
+                            lineTo(0f, size.height)
+                            lineTo(size.width, size.height)
+                            close()
+                        }
+                        drawPath(path = path, color = accentColor)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xF20B131D))
+                            .border(1.dp, accentColor, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = itemDescription(selectedItem),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadTextPrimary,
+                            maxLines = 2
+                        )
+                    }
                 }
             }
         }
@@ -1401,11 +1348,14 @@ private fun <T> QDimRotaryWheelSelector(
 }
 
 /**
- * Section 5.7 — Category-First Selective Dimension Removal Window.
- * Implements a two-level selection hierarchy:
- * - Level 1: Dimension Categories (Checked by default; child checkboxes locked while category is checked).
- * - Level 2: Individual Dimension Entities (Unlocked when parent category is unchecked).
+ * Phase 8 — Category-First Selective Dimension Removal Window with Transient Marquee Selection Notification.
+ * - Removes the permanent master-selection status box from the list flow.
+ * - Keeps `Select All` / `Deselect All` (`selective_clear_master_toggle`) in a compact header bar.
+ * - Displays a transient single-line marquee selection banner (`selective_clear_transient_marquee`) as a
+ *   non-layout-shifting overlay ONLY after a selection change, automatically retracting after one marquee pass.
+ * - Preserves `LazyListState` scroll position across category and item toggles (`0 px` jump).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SelectiveDimensionRemovalDialog(
     dimensionEntities: List<CadEntity.DimensionEntity>,
@@ -1422,6 +1372,8 @@ fun SelectiveDimensionRemovalDialog(
         }
     }
 
+    val lazyListState = rememberLazyListState()
+
     // Level 1: Categories checked by default
     var checkedCategories by remember(dimensionEntities) {
         mutableStateOf(groupedByType.map { it.first }.toSet())
@@ -1431,6 +1383,18 @@ fun SelectiveDimensionRemovalDialog(
         mutableStateOf(emptySet<String>())
     }
     var showConfirmAlert by remember { mutableStateOf(false) }
+
+    // Transient marquee notification state (only triggered by user selection changes after initial open)
+    var selectionChangeTick by remember { mutableIntStateOf(0) }
+    var showTransientMarquee by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectionChangeTick) {
+        if (selectionChangeTick > 0) {
+            showTransientMarquee = true
+            delay(2500L)
+            showTransientMarquee = false
+        }
+    }
 
     // Effective IDs selected for removal across both levels
     val effectiveSelectedIds = remember(checkedCategories, individualCheckedIds, groupedByType) {
@@ -1502,8 +1466,11 @@ fun SelectiveDimensionRemovalDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val allCount = dimensionEntities.size
+                val allSelected = allCount > 0 && effectiveSelectedIds.size == allCount
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1517,121 +1484,100 @@ fun SelectiveDimensionRemovalDialog(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Categories are checked by default (locking children). Uncheck a category to unlock and pick individual dimensions.",
+                            text = "Categories lock children when checked • Uncheck category to pick items",
                             style = MaterialTheme.typography.labelSmall,
                             color = CadTextSecondary
                         )
                     }
+
+                    // Compact Select All / Deselect All header action chip (replaces permanent status box)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(CadPanelElevated)
+                            .border(1.dp, CadCyanPrimary.copy(alpha = 0.7f), RoundedCornerShape(7.dp))
+                            .clickable {
+                                if (allSelected) {
+                                    checkedCategories = emptySet()
+                                    individualCheckedIds = emptySet()
+                                } else {
+                                    checkedCategories = groupedByType.map { it.first }.toSet()
+                                    individualCheckedIds = emptySet()
+                                }
+                                selectionChangeTick += 1
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .testTag("selective_clear_master_toggle")
+                    ) {
+                        Text(
+                            text = if (allSelected) "DESELECT ALL" else "SELECT ALL",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "Close Selective Removal", tint = CadTextSecondary)
                     }
                 }
 
-                // Master Select All / Deselect All bar
-                val allCount = dimensionEntities.size
-                val allSelected = allCount > 0 && effectiveSelectedIds.size == allCount
-                Row(
+                // Box wrapping list/empty body + non-layout-shifting transient marquee notification overlay
+                Box(
                     modifier = Modifier
+                        .weight(1f, fill = false)
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(CadPanelElevated)
-                        .border(1.dp, CadBorderHairline, RoundedCornerShape(8.dp))
-                        .clickable {
-                            if (allSelected) {
-                                checkedCategories = emptySet()
-                                individualCheckedIds = emptySet()
-                            } else {
-                                checkedCategories = groupedByType.map { it.first }.toSet()
-                                individualCheckedIds = emptySet()
-                            }
-                        }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .testTag("selective_clear_master_toggle"),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = if (allSelected) "Master Selection: All Categories Selected ($allCount)" else "Master Selection: ${effectiveSelectedIds.size} of $allCount Selected",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = CadTextPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (allSelected) "DESELECT ALL" else "SELECT ALL",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadCyanPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                    if (groupedByType.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No dimensions currently exist on the sheet.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = CadTextSecondary
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            state = lazyListState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("selective_clear_lazy_list"),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(groupedByType, key = { it.first.name }) { (dimType, dims) ->
+                                val isCatChecked = dimType in checkedCategories
+                                val unlockedChildSelectedCount = dims.count { it.id in individualCheckedIds }
+                                val triState = when {
+                                    isCatChecked -> ToggleableState.On
+                                    unlockedChildSelectedCount == 0 -> ToggleableState.Off
+                                    unlockedChildSelectedCount == dims.size -> ToggleableState.On
+                                    else -> ToggleableState.Indeterminate
+                                }
 
-                if (groupedByType.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "No dimensions currently exist on the sheet.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = CadTextSecondary
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(groupedByType, key = { it.first.name }) { (dimType, dims) ->
-                            val isCatChecked = dimType in checkedCategories
-                            val unlockedChildSelectedCount = dims.count { it.id in individualCheckedIds }
-                            val triState = when {
-                                isCatChecked -> ToggleableState.On
-                                unlockedChildSelectedCount == 0 -> ToggleableState.Off
-                                unlockedChildSelectedCount == dims.size -> ToggleableState.On
-                                else -> ToggleableState.Indeterminate
-                            }
-
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(CadPanelElevated)
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isCatChecked) CadCrimsonAlert.copy(alpha = 0.7f) else CadBorderHairline,
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .padding(10.dp)
-                                    .testTag("selective_clear_category_${dimType.name}"),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                // Level 1 Category Header Row
-                                Row(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable {
-                                            if (isCatChecked) {
-                                                // Unchecking category unlocks children (all children initially unchecked so user can pick specific ones)
-                                                checkedCategories = checkedCategories - dimType
-                                                individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
-                                            } else {
-                                                checkedCategories = checkedCategories + dimType
-                                                individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
-                                            }
-                                        },
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(CadPanelElevated)
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (isCatChecked) CadCrimsonAlert.copy(alpha = 0.7f) else CadBorderHairline,
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .padding(10.dp)
+                                        .testTag("selective_clear_category_${dimType.name}"),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    // Level 1 Category Header Row
                                     Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        TriStateCheckbox(
-                                            state = triState,
-                                            onClick = {
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
                                                 if (isCatChecked) {
                                                     checkedCategories = checkedCategories - dimType
                                                     individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
@@ -1639,55 +1585,8 @@ fun SelectiveDimensionRemovalDialog(
                                                     checkedCategories = checkedCategories + dimType
                                                     individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
                                                 }
+                                                selectionChangeTick += 1
                                             },
-                                            modifier = Modifier.testTag("selective_clear_cat_checkbox_${dimType.name}")
-                                        )
-                                        Column(modifier = Modifier.padding(start = 6.dp)) {
-                                            Text(
-                                                text = "${dimType.label} Dimension (${dims.size})",
-                                                style = MaterialTheme.typography.titleSmall,
-                                                color = CadTextPrimary,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                text = if (isCatChecked) {
-                                                    "Category Checked • All ${dims.size} selected (Uncheck category to unlock individual items)"
-                                                } else {
-                                                    "Category Unchecked • Individual items unlocked ($unlockedChildSelectedCount/${dims.size} selected)"
-                                                },
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = if (isCatChecked) CadAmberSnap else CadCyanPrimary
-                                            )
-                                        }
-                                    }
-                                    Icon(
-                                        imageVector = if (isCatChecked) Icons.Default.Lock else Icons.Default.LockOpen,
-                                        contentDescription = if (isCatChecked) "Children Locked" else "Children Unlocked",
-                                        tint = if (isCatChecked) CadAmberSnap else CadCyanPrimary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-
-                                // Level 2 Individual Child Dimension Rows
-                                dims.forEach { dim ->
-                                    val isChildChecked = isCatChecked || (dim.id in individualCheckedIds)
-                                    val formattedMeasurement = formatDimensionPreviewLabel(dim, storageUnit, displayUnit, precision)
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(start = 18.dp)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(if (isChildChecked) Color(0xFF221216) else CadPanelSurface)
-                                            .border(1.dp, CadBorderHairline, RoundedCornerShape(6.dp))
-                                            .clickable(enabled = !isCatChecked) {
-                                                individualCheckedIds = if (dim.id in individualCheckedIds) {
-                                                    individualCheckedIds - dim.id
-                                                } else {
-                                                    individualCheckedIds + dim.id
-                                                }
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            .testTag("selective_clear_item_${dim.id}"),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
@@ -1695,47 +1594,154 @@ fun SelectiveDimensionRemovalDialog(
                                             verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier.weight(1f)
                                         ) {
-                                            Checkbox(
-                                                checked = isChildChecked,
-                                                onCheckedChange = if (!isCatChecked) {
-                                                    { checked ->
-                                                        individualCheckedIds = if (checked) {
-                                                            individualCheckedIds + dim.id
-                                                        } else {
-                                                            individualCheckedIds - dim.id
-                                                        }
+                                            TriStateCheckbox(
+                                                state = triState,
+                                                onClick = {
+                                                    if (isCatChecked) {
+                                                        checkedCategories = checkedCategories - dimType
+                                                        individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
+                                                    } else {
+                                                        checkedCategories = checkedCategories + dimType
+                                                        individualCheckedIds = individualCheckedIds - dims.map { it.id }.toSet()
                                                     }
-                                                } else null,
-                                                enabled = !isCatChecked,
-                                                modifier = Modifier.testTag("selective_clear_item_checkbox_${dim.id}")
+                                                    selectionChangeTick += 1
+                                                },
+                                                modifier = Modifier.testTag("selective_clear_cat_checkbox_${dimType.name}")
                                             )
                                             Column(modifier = Modifier.padding(start = 6.dp)) {
                                                 Text(
-                                                    text = formattedMeasurement,
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    color = if (isCatChecked) CadTextSecondary else CadTextPrimary,
+                                                    text = "${dimType.label} Dimension (${dims.size})",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    color = CadTextPrimary,
                                                     fontWeight = FontWeight.Bold
                                                 )
                                                 Text(
-                                                    text = "${if (dim.isAutoGenerated) "QDIM Auto" else "Manual"} • (${String.format(Locale.US, "%.1f", dim.anchor1.x)}, ${String.format(Locale.US, "%.1f", dim.anchor1.y)})",
+                                                    text = if (isCatChecked) {
+                                                        "Category Checked • All ${dims.size} selected (Uncheck category to unlock individual items)"
+                                                    } else {
+                                                        "Category Unchecked • Individual items unlocked ($unlockedChildSelectedCount/${dims.size} selected)"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = CadTextMuted
+                                                    color = if (isCatChecked) CadAmberSnap else CadCyanPrimary
                                                 )
                                             }
                                         }
-                                        Text(
-                                            text = if (isCatChecked) "LOCKED" else if (isChildChecked) "REMOVE" else "KEEP",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = when {
-                                                isCatChecked -> CadAmberSnap
-                                                isChildChecked -> CadCrimsonAlert
-                                                else -> CadEmeraldCrossing
-                                            },
-                                            fontWeight = FontWeight.Bold
+                                        Icon(
+                                            imageVector = if (isCatChecked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                            contentDescription = if (isCatChecked) "Children Locked" else "Children Unlocked",
+                                            tint = if (isCatChecked) CadAmberSnap else CadCyanPrimary,
+                                            modifier = Modifier.size(16.dp)
                                         )
+                                    }
+
+                                    // Level 2 Individual Child Dimension Rows
+                                    dims.forEach { dim ->
+                                        val isChildChecked = isCatChecked || (dim.id in individualCheckedIds)
+                                        val formattedMeasurement = formatDimensionPreviewLabel(dim, storageUnit, displayUnit, precision)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(start = 18.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(if (isChildChecked) Color(0xFF221216) else CadPanelSurface)
+                                                .border(1.dp, CadBorderHairline, RoundedCornerShape(6.dp))
+                                                .clickable(enabled = !isCatChecked) {
+                                                    individualCheckedIds = if (dim.id in individualCheckedIds) {
+                                                        individualCheckedIds - dim.id
+                                                    } else {
+                                                        individualCheckedIds + dim.id
+                                                    }
+                                                    selectionChangeTick += 1
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                .testTag("selective_clear_item_${dim.id}"),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Checkbox(
+                                                    checked = isChildChecked,
+                                                    onCheckedChange = if (!isCatChecked) {
+                                                        { checked ->
+                                                            individualCheckedIds = if (checked) {
+                                                                individualCheckedIds + dim.id
+                                                            } else {
+                                                                individualCheckedIds - dim.id
+                                                            }
+                                                            selectionChangeTick += 1
+                                                        }
+                                                    } else null,
+                                                    enabled = !isCatChecked,
+                                                    modifier = Modifier.testTag("selective_clear_item_checkbox_${dim.id}")
+                                                )
+                                                Column(modifier = Modifier.padding(start = 6.dp)) {
+                                                    Text(
+                                                        text = formattedMeasurement,
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        color = if (isCatChecked) CadTextSecondary else CadTextPrimary,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    Text(
+                                                        text = "${if (dim.isAutoGenerated) "QDIM Auto" else "Manual"} • (${String.format(Locale.ROOT, "%.1f", dim.anchor1.x)}, ${String.format(Locale.ROOT, "%.1f", dim.anchor1.y)})",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = CadTextMuted
+                                                    )
+                                                }
+                                            }
+                                            Text(
+                                                text = if (isCatChecked) "LOCKED" else if (isChildChecked) "REMOVE" else "KEEP",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = when {
+                                                    isCatChecked -> CadAmberSnap
+                                                    isChildChecked -> CadCrimsonAlert
+                                                    else -> CadEmeraldCrossing
+                                                },
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Phase 8.1 & 8.2 — Transient Marquee Selection Notification Overlay (Zero layout shift)
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showTransientMarquee,
+                        enter = fadeIn(tween(150)),
+                        exit = fadeOut(tween(180)),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .zIndex(10f)
+                    ) {
+                        val marqueeMessage = if (allSelected) {
+                            "All $allCount dimensions selected for removal (${checkedCategories.size} categories locked)"
+                        } else {
+                            "${effectiveSelectedIds.size} of $allCount dimensions selected for removal • ${checkedCategories.size} categories locked"
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xF0101A26))
+                                .border(1.dp, CadCyanPrimary, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .testTag("selective_clear_transient_marquee")
+                        ) {
+                            Text(
+                                text = marqueeMessage,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CadCyanPrimary,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .basicMarquee(iterations = 1, initialDelayMillis = 150)
+                            )
                         }
                     }
                 }
@@ -2211,13 +2217,13 @@ fun DirectCoordinateInputDialog(
     var editSource by rememberSaveable { mutableStateOf(CoordinateEditSource.CARTESIAN_XY) }
     var isRelativeCartesian by rememberSaveable { mutableStateOf(false) }
     var xText by rememberSaveable {
-        mutableStateOf(String.format(Locale.US, "%.2f", currentCursor.x))
+        mutableStateOf(String.format(Locale.ROOT, "%.2f", currentCursor.x))
     }
     var yText by rememberSaveable {
-        mutableStateOf(String.format(Locale.US, "%.2f", currentCursor.y))
+        mutableStateOf(String.format(Locale.ROOT, "%.2f", currentCursor.y))
     }
     var thetaText by rememberSaveable {
-        mutableStateOf(String.format(Locale.US, "%.1f", initialBearing))
+        mutableStateOf(String.format(Locale.ROOT, "%.1f", initialBearing))
     }
     var radialDistanceR by rememberSaveable {
         mutableDoubleStateOf(initialRadius)
@@ -2343,7 +2349,7 @@ fun DirectCoordinateInputDialog(
 
                 if (referencePoint != null) {
                     Text(
-                        text = "Reference Origin: (${String.format(Locale.US, "%.2f", referencePoint.x)}, ${String.format(Locale.US, "%.2f", referencePoint.y)}) ${displayUnit.symbol} • R=${String.format(Locale.US, "%.2f", radialDistanceR)}",
+                        text = "Reference Origin: (${String.format(Locale.ROOT, "%.2f", referencePoint.x)}, ${String.format(Locale.ROOT, "%.2f", referencePoint.y)}) ${displayUnit.symbol} • R=${String.format(Locale.ROOT, "%.2f", radialDistanceR)}",
                         style = MaterialTheme.typography.labelMedium,
                         color = CadAmberSnap
                     )
@@ -2394,12 +2400,12 @@ fun DirectCoordinateInputDialog(
                     val displayX = if (mode == CoordinateInputMode.CARTESIAN_XY) {
                         xText
                     } else {
-                        resolvedPolarPreview?.let { String.format(Locale.US, "%.2f", it.x) } ?: "—"
+                        resolvedPolarPreview?.let { String.format(Locale.ROOT, "%.2f", it.x) } ?: "—"
                     }
                     val displayY = if (mode == CoordinateInputMode.CARTESIAN_XY) {
                         yText
                     } else {
-                        resolvedPolarPreview?.let { String.format(Locale.US, "%.2f", it.y) } ?: "—"
+                        resolvedPolarPreview?.let { String.format(Locale.ROOT, "%.2f", it.y) } ?: "—"
                     }
                     val displayTheta = if (mode == CoordinateInputMode.CARTESIAN_XY) {
                         thetaText
@@ -2408,7 +2414,7 @@ fun DirectCoordinateInputDialog(
                             val ang = if (originRef.distanceTo(pt) > 1e-6) {
                                 ((originRef.angleToDeg(pt) % 360.0) + 360.0) % 360.0
                             } else 0.0
-                            String.format(Locale.US, "%.1f", ang)
+                            String.format(Locale.ROOT, "%.1f", ang)
                         } ?: "—"
                     }
 
@@ -2429,7 +2435,7 @@ fun DirectCoordinateInputDialog(
                                     val ang = if (r > 1e-6) {
                                         ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
                                     } else 0.0
-                                    thetaText = String.format(Locale.US, "%.1f", ang)
+                                    thetaText = String.format(Locale.ROOT, "%.1f", ang)
                                 }
                             }
                         },
@@ -2458,7 +2464,7 @@ fun DirectCoordinateInputDialog(
                                     val ang = if (r > 1e-6) {
                                         ((atan2(dy, dx) * 180.0 / PI) % 360.0 + 360.0) % 360.0
                                     } else 0.0
-                                    thetaText = String.format(Locale.US, "%.1f", ang)
+                                    thetaText = String.format(Locale.ROOT, "%.1f", ang)
                                 }
                             }
                         },
@@ -2486,8 +2492,8 @@ fun DirectCoordinateInputDialog(
                                     val dy = effectiveR * sin(rad)
                                     val resolvedX = if (isRelativeCartesian) dx else originRef.x + dx
                                     val resolvedY = if (isRelativeCartesian) dy else originRef.y + dy
-                                    xText = String.format(Locale.US, "%.2f", resolvedX)
-                                    yText = String.format(Locale.US, "%.2f", resolvedY)
+                                    xText = String.format(Locale.ROOT, "%.2f", resolvedX)
+                                    yText = String.format(Locale.ROOT, "%.2f", resolvedY)
                                 }
                             }
                         },
@@ -2520,7 +2526,7 @@ fun DirectCoordinateInputDialog(
                 )
 
                 Text(
-                    text = "Tip: Edit X/Y directly, or type a Bearing θ (°) to rotate at radial distance R=${String.format(Locale.US, "%.2f", radialDistanceR)} ${displayUnit.symbol}.",
+                    text = "Tip: Edit X/Y directly, or type a Bearing θ (°) to rotate at radial distance R=${String.format(Locale.ROOT, "%.2f", radialDistanceR)} ${displayUnit.symbol}.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CadTextSecondary
                 )
@@ -2683,7 +2689,7 @@ fun ControllerAndSnapSettingsDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "Touchpad Sensitivity: ${String.format(Locale.US, "%.1fx", sensitivity)}",
+                        text = "Touchpad Sensitivity: ${String.format(Locale.ROOT, "%.1fx", sensitivity)}",
                         style = MaterialTheme.typography.labelMedium,
                         color = CadCyanPrimary
                     )
@@ -2757,8 +2763,11 @@ fun ControllerAndSnapSettingsDialog(
                         CadBinaryToggleCard(
                             enabled = polarEnabled,
                             onToggle = { polarEnabled = it },
-                            label = "POLAR",
+                            label = "ENABLE",
+                            enabledStatusText = "ENABLE",
+                            disabledStatusText = "DISABLE",
                             testTag = "settings_polar_tracking_switch",
+                            deckId = "settings_polar_tracking_switch",
                             compact = true
                         )
                     }
@@ -2787,8 +2796,11 @@ fun ControllerAndSnapSettingsDialog(
                         CadBinaryToggleCard(
                             enabled = polarRelativeToLast,
                             onToggle = { polarRelativeToLast = it },
-                            label = "REL SEG",
+                            label = "ENABLE",
+                            enabledStatusText = "ENABLE",
+                            disabledStatusText = "DISABLE",
                             testTag = "polar_relative_reference_switch",
+                            deckId = "polar_relative_reference_switch",
                             compact = true
                         )
                     }
@@ -2816,8 +2828,11 @@ fun ControllerAndSnapSettingsDialog(
                         CadBinaryToggleCard(
                             enabled = polarSnapEnabled,
                             onToggle = { polarSnapEnabled = it },
-                            label = "PSNAP",
+                            label = "ENABLE",
+                            enabledStatusText = "ENABLE",
+                            disabledStatusText = "DISABLE",
                             testTag = "polar_snap_projection_switch",
+                            deckId = "polar_snap_projection_switch",
                             compact = true
                         )
                     }
@@ -2885,7 +2900,8 @@ fun ControllerAndSnapSettingsDialog(
                         fontWeight = FontWeight.Bold
                     )
 
-                    // Section 6.2 & Section 9: Fixed-height keyed OSNAP rows using CadBinaryToggleCard (zero scroll jump)
+                    // Phase 10.2 & 10.3: Fixed-height keyed OSNAP rows using 3-region CadBinaryToggleCard
+                    // Left: stationary [END] badge; Middle: marquee full label; Right: stationary ENABLE/DISABLE state pill
                     OsnapMode.entries.chunked(2).forEach { rowModes ->
                         Row(
                             modifier = Modifier
@@ -2902,9 +2918,12 @@ fun ControllerAndSnapSettingsDialog(
                                         onToggle = { nextOn ->
                                             enabledOsnaps = if (nextOn) enabledOsnaps + mode else enabledOsnaps - mode
                                         },
-                                        label = "[${mode.badgeCode}] ${mode.label}",
-                                        enabledStatusText = "ON",
-                                        disabledStatusText = "OFF",
+                                        label = mode.label,
+                                        badgeText = "[${mode.badgeCode}]",
+                                        enabledStatusText = "ENABLE",
+                                        disabledStatusText = "DISABLE",
+                                        useMarqueeLabel = true,
+                                        deckId = "osnap_toggle_${mode.name}",
                                         testTag = "osnap_toggle_${mode.name}",
                                         modifier = Modifier.weight(1f)
                                     )
@@ -3033,7 +3052,12 @@ fun PropertiesAndConstraintsDialog(
 
                     if (first is CadEntity.LineEntity) {
                         Text(
-                            text = "Start: (${String.format("%.3f", first.start.x)}, ${String.format("%.3f", first.start.y)})\nEnd: (${String.format("%.3f", first.end.x)}, ${String.format("%.3f", first.end.y)})\nLength: ${String.format("%.3f", first.length)}   Angle: ${String.format("%.2f°", first.angleDeg)}",
+                            text = CadNumberFormatter.formatLineDiagnostic(
+                                start = first.start,
+                                end = first.end,
+                                length = first.length,
+                                angleDeg = first.angleDeg
+                            ),
                             style = MaterialTheme.typography.labelMedium,
                             color = CadTextSecondary
                         )
@@ -3228,12 +3252,19 @@ fun DxfAndProjectHubDialog(
                     )
                 }
 
-                // Three-Format (DXF / PDF / SVG) Stacked Export Card Deck (Sections 65, 66 & 67)
+                // Three-Format (DXF / PDF / SVG) Stacked Export Card Deck (Sections 65, 66, 67 & v18 Phase 9)
+                val exportDeckTimerState = rememberCadDeckIdleTimerState(
+                    deckId = "project_hub_export_card_deck",
+                    isVisibleAndInteractive = true,
+                    peekDirection = CardPeekDirection.BELOW
+                )
+                val isExportRearRevealed = exportDeckTimerState.isRearCardRevealed
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(82.dp)
-                        .padding(start = 18.dp, top = 4.dp, bottom = 4.dp)
+                        .padding(start = if (isExportRearRevealed) 18.dp else 0.dp, top = 4.dp, bottom = 4.dp)
                         .pointerInput(frontExportIndex) {
                             val touchSlop = viewConfiguration.touchSlop
                             awaitEachGesture {
@@ -3251,6 +3282,7 @@ fun DxfAndProjectHubDialog(
                                     if (!swipedDown && totalDy >= touchSlop && totalDy > abs(totalDx) * 1.25f) {
                                         swipedDown = true
                                         change.consume()
+                                        exportDeckTimerState.onCardExchange(isCommandPromptOrDeck = false)
                                         frontExportIndex = (frontExportIndex + 1) % formats.size
                                         break
                                     }
@@ -3270,24 +3302,28 @@ fun DxfAndProjectHubDialog(
                     formats.forEachIndexed { idx, spec ->
                         val depth = (idx - frontExportIndex + formats.size) % formats.size
                         val isFront = depth == 0
-                        val targetOffsetX = when (depth) {
-                            0 -> 0.dp
-                            1 -> (-9).dp
+                        val targetOffsetX = when {
+                            isFront -> 0.dp
+                            !isExportRearRevealed -> 0.dp
+                            depth == 1 -> (-9).dp
                             else -> (-17).dp
                         }
-                        val targetOffsetY = when (depth) {
-                            0 -> 0.dp
-                            1 -> 4.dp
+                        val targetOffsetY = when {
+                            isFront -> 0.dp
+                            !isExportRearRevealed -> 0.dp
+                            depth == 1 -> 4.dp
                             else -> 8.dp
                         }
-                        val targetRotation = when (depth) {
-                            0 -> 0f
-                            1 -> -5f
+                        val targetRotation = when {
+                            isFront -> 0f
+                            !isExportRearRevealed -> 0f
+                            depth == 1 -> -5f
                             else -> -9f
                         }
-                        val targetAlpha = when (depth) {
-                            0 -> 1f
-                            1 -> 0.72f
+                        val targetAlpha = when {
+                            isFront -> 1f
+                            !isExportRearRevealed -> 0f
+                            depth == 1 -> 0.72f
                             else -> 0.46f
                         }
                         val animOffsetX by animateDpAsState(targetOffsetX, tween(180), label = "ExportDeckOffsetX_${spec.name}")

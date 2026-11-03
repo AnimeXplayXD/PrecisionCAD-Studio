@@ -12,6 +12,9 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import androidx.core.content.FileProvider
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.withClip
+import androidx.core.graphics.withSave
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
 import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.kernel.CadGeometryKernel
@@ -80,7 +83,7 @@ object CadDxfInterchange {
         fun u(v: Double): String = fmt(v * unitRatio)
 
         var nextHandleId = 0x10
-        fun nextHandle(): String = (nextHandleId++).toString(16).uppercase(Locale.US)
+        fun nextHandle(): String = (nextHandleId++).toString(16).uppercase(Locale.ROOT)
 
         val (_, bounds) = visibleEntitiesAndBounds(payload)
 
@@ -506,7 +509,7 @@ object CadDxfInterchange {
         while (idx < pairs.size) {
             val (code, value) = pairs[idx]
             if (code == 0 && value == "SECTION" && idx + 1 < pairs.size && pairs[idx + 1].first == 2) {
-                val secName = pairs[idx + 1].second.uppercase()
+                val secName = pairs[idx + 1].second.uppercase(Locale.ROOT)
                 inHeaderSection = secName == "HEADER"
                 inTablesSection = secName == "TABLES"
                 inBlocksSection = secName == "BLOCKS"
@@ -712,7 +715,7 @@ object CadDxfInterchange {
             }
         }
 
-        val entityType = pairs[startIdx].second.uppercase()
+        val entityType = pairs[startIdx].second.uppercase(Locale.ROOT)
         var idx = startIdx + 1
         var layer = "0"
         var x1 = 0.0
@@ -980,7 +983,7 @@ object CadDxfInterchange {
         val layerMap = payload.layers.associateBy { it.name }
         for (ent in visibleEntities) {
             val layer = layerMap[ent.layerName]
-            val hex = String.format("#%06X", ((ent.colorHexOverride ?: layer?.colorHex ?: 0xFFF8FAFC) and 0xFFFFFF))
+            val hex = String.format(Locale.ROOT, "#%06X", ((ent.colorHexOverride ?: layer?.colorHex ?: 0xFFF8FAFC) and 0xFFFFFF))
             val lw = fmt((ent.lineWeightMmOverride ?: layer?.lineWeightMm ?: 0.25f).toDouble())
             when (ent) {
                 is CadEntity.LineEntity -> sb.appendLine(
@@ -1063,11 +1066,11 @@ object CadDxfInterchange {
         val currentTitle = sheetSetup.titleBlockTitle.trim()
 
         return when {
-            !isGenericExportFileName && (currentTitle.uppercase(Locale.US) in defaultPlaceholderTitles || currentTitle.equals(baseFromFileName, ignoreCase = true)) ->
+            !isGenericExportFileName && (currentTitle.uppercase(Locale.ROOT) in defaultPlaceholderTitles || currentTitle.equals(baseFromFileName, ignoreCase = true)) ->
                 baseFromFileName
-            !isGenericExportFileName && baseFromFileName.isNotBlank() && currentTitle.uppercase(Locale.US) in defaultPlaceholderTitles ->
+            !isGenericExportFileName && baseFromFileName.isNotBlank() && currentTitle.uppercase(Locale.ROOT) in defaultPlaceholderTitles ->
                 baseFromFileName
-            currentTitle.isNotBlank() && currentTitle.uppercase(Locale.US) !in defaultPlaceholderTitles ->
+            currentTitle.isNotBlank() && currentTitle.uppercase(Locale.ROOT) !in defaultPlaceholderTitles ->
                 CadPcadPersistence.canonicalBasename(currentTitle)
             !isGenericExportFileName && baseFromFileName.isNotBlank() ->
                 baseFromFileName
@@ -1088,7 +1091,7 @@ object CadDxfInterchange {
         }
         val normalizedPdfFileName = "$cleanBase.pdf"
         val effectiveTitle = if (
-            payload.sheetSetup.titleBlockTitle.trim().uppercase(Locale.US) in defaultPlaceholderTitles
+            payload.sheetSetup.titleBlockTitle.trim().uppercase(Locale.ROOT) in defaultPlaceholderTitles
         ) {
             cleanBase
         } else {
@@ -1122,7 +1125,7 @@ object CadDxfInterchange {
         }
 
         if (!wroteNativePdf) {
-            val bitmap = Bitmap.createBitmap(pageW, pageH, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(pageW, pageH, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             renderPlottedSheetToCanvas(canvas, pageW, pageH, syncedPayload)
             FileOutputStream(outFile).use { out ->
@@ -1163,6 +1166,11 @@ object CadDxfInterchange {
         if (payload.sheetSetup.showTitleBlock) {
             val tbLeft = pageW - marginPx - tbW
             val tbTop = pageH - marginPx - tbH
+            val tbFillPaint = Paint().apply {
+                color = Color.rgb(18, 28, 42)
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(tbLeft, tbTop, pageW - marginPx, pageH - marginPx, tbFillPaint)
             canvas.drawRect(tbLeft, tbTop, pageW - marginPx, pageH - marginPx, borderPaint)
             val tbTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.rgb(226, 232, 240)
@@ -1344,20 +1352,18 @@ object CadDxfInterchange {
                         ent.basePoint.x + cos(rad) * max(bounds.width, bounds.height) * 2.0,
                         ent.basePoint.y + sin(rad) * max(bounds.width, bounds.height) * 2.0
                     )
-                    canvas.save()
-                    canvas.clipRect(marginPx, marginPx, pageW - marginPx, pageH - marginPx)
-                    canvas.drawLine(tx(ent.basePoint.x), ty(ent.basePoint.y), tx(farPt.x), ty(farPt.y), geoPaint)
-                    canvas.restore()
+                    canvas.withClip(marginPx, marginPx, pageW - marginPx, pageH - marginPx) {
+                        drawLine(tx(ent.basePoint.x), ty(ent.basePoint.y), tx(farPt.x), ty(farPt.y), geoPaint)
+                    }
                 }
                 is CadEntity.XLineEntity -> {
                     val rad = Math.toRadians(ent.angleDeg)
                     val span = max(bounds.width, bounds.height) * 2.0
                     val p1 = Point2D(ent.rootPoint.x - cos(rad) * span, ent.rootPoint.y - sin(rad) * span)
                     val p2 = Point2D(ent.rootPoint.x + cos(rad) * span, ent.rootPoint.y + sin(rad) * span)
-                    canvas.save()
-                    canvas.clipRect(marginPx, marginPx, pageW - marginPx, pageH - marginPx)
-                    canvas.drawLine(tx(p1.x), ty(p1.y), tx(p2.x), ty(p2.y), geoPaint)
-                    canvas.restore()
+                    canvas.withClip(marginPx, marginPx, pageW - marginPx, pageH - marginPx) {
+                        drawLine(tx(p1.x), ty(p1.y), tx(p2.x), ty(p2.y), geoPaint)
+                    }
                 }
                 is CadEntity.DonutEntity -> {
                     val rMid = ((ent.innerRadius + ent.outerRadius) * 0.5 * scale).toFloat()
@@ -1384,18 +1390,17 @@ object CadDxfInterchange {
                             val topPx = ty(hb.maxY)
                             val botPx = ty(hb.minY)
                             val span = (rightPx - leftPx) + (botPx - topPx)
-                            canvas.save()
-                            canvas.clipPath(boundaryPath)
-                            geoPaint.strokeWidth = 0.65f
-                            var offset = -span
-                            while (offset <= span) {
-                                canvas.drawLine(leftPx + offset, botPx, leftPx + offset + (botPx - topPx), topPx, geoPaint)
-                                if (ent.pattern == HatchPattern.ANSI37) {
-                                    canvas.drawLine(leftPx + offset, topPx, leftPx + offset + (botPx - topPx), botPx, geoPaint)
+                            canvas.withClip(boundaryPath) {
+                                geoPaint.strokeWidth = 0.65f
+                                var offset = -span
+                                while (offset <= span) {
+                                    drawLine(leftPx + offset, botPx, leftPx + offset + (botPx - topPx), topPx, geoPaint)
+                                    if (ent.pattern == HatchPattern.ANSI37) {
+                                        drawLine(leftPx + offset, topPx, leftPx + offset + (botPx - topPx), botPx, geoPaint)
+                                    }
+                                    offset += step
                                 }
-                                offset += step
                             }
-                            canvas.restore()
                         }
                         canvas.drawPath(boundaryPath, geoPaint)
                     }
@@ -1409,13 +1414,13 @@ object CadDxfInterchange {
                         typeface = Typeface.MONOSPACE
                     }
                     val lines = ent.text.lines()
-                    canvas.save()
-                    canvas.translate(tx(ent.position.x), ty(ent.position.y))
-                    canvas.rotate(-ent.rotationDeg.toFloat())
-                    for ((lineIdx, lineStr) in lines.withIndex()) {
-                        canvas.drawText(lineStr, 0f, lineIdx * tp.textSize * 1.2f, tp)
+                    canvas.withSave {
+                        translate(tx(ent.position.x), ty(ent.position.y))
+                        rotate(-ent.rotationDeg.toFloat())
+                        for ((lineIdx, lineStr) in lines.withIndex()) {
+                            drawText(lineStr, 0f, lineIdx * tp.textSize * 1.2f, tp)
+                        }
                     }
-                    canvas.restore()
                 }
                 is CadEntity.LeaderEntity -> {
                     val leaderColor = geoPaint.color
@@ -1624,16 +1629,16 @@ object CadDxfInterchange {
                     val textW = textPaint.measureText(plan.labelText)
                     val textH = textPaint.textSize
 
-                    canvas.save()
-                    canvas.translate(labelX, labelY)
-                    if (abs(plan.textRotationDeg) > 0.5) {
-                        // Invert CAD CCW angle for Android CW canvas rotation
-                        canvas.rotate(-plan.textRotationDeg.toFloat())
+                    canvas.withSave {
+                        translate(labelX, labelY)
+                        if (abs(plan.textRotationDeg) > 0.5) {
+                            // Invert CAD CCW angle for Android CW canvas rotation
+                            rotate(-plan.textRotationDeg.toFloat())
+                        }
+                        fillPaint.color = Color.rgb(12, 18, 28)
+                        drawRect(-textW * 0.54f, -textH * 0.95f, textW * 0.54f, textH * 0.25f, fillPaint)
+                        drawText(plan.labelText, 0f, 0f, textPaint)
                     }
-                    fillPaint.color = Color.rgb(12, 18, 28)
-                    canvas.drawRect(-textW * 0.54f, -textH * 0.95f, textW * 0.54f, textH * 0.25f, fillPaint)
-                    canvas.drawText(plan.labelText, 0f, 0f, textPaint)
-                    canvas.restore()
                 }
             }
         }
@@ -1662,7 +1667,7 @@ object CadDxfInterchange {
 
     private fun fmt(v: Double): String {
         val safe = if (v.isFinite()) v else 0.0
-        return String.format(Locale.US, "%.4f", safe)
+        return String.format(Locale.ROOT, "%.4f", safe)
     }
 
     private fun colorHexToAci(hex: Long): Int = when (hex and 0xFFFFFF) {

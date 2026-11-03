@@ -1164,5 +1164,5 @@ object DimensionAlignmentEngine {
         return BoundingBox2D(p.x - w * 0.5, p.y - h * 0.5, p.x + w * 0.5, p.y + h * 0.5)
     }
 
-    private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)
+    private fun fmt(v: Double): String = String.format(Locale.ROOT, "%.2f", v)
 }

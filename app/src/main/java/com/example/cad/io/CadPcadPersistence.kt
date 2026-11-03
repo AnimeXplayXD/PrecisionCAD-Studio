@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import java.util.Locale
 import com.example.cad.dimension.DimensionArrangementPreference
 import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.dimension.QDimDensityPolicy
@@ -337,7 +338,7 @@ object CadPcadPersistence {
      */
     fun canonicalBasename(rawName: String): String {
         var cleaned = rawName.trim()
-        val lower = cleaned.lowercase()
+        val lower = cleaned.lowercase(Locale.ROOT)
         when {
             lower.endsWith(".pcad") -> cleaned = cleaned.dropLast(5).trim()
             lower.endsWith(".pdf") -> cleaned = cleaned.dropLast(4).trim()

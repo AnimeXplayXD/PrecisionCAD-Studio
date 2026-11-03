@@ -5,6 +5,54 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
+ * Shared locale-independent CAD numerical formatter (Section 3.2).
+ * Always uses [Locale.ROOT] so engineering coordinates, lengths, and bearings
+ * use "." as the decimal separator regardless of the user's system locale.
+ */
+object CadNumberFormatter {
+    fun formatFixed(value: Double, decimals: Int = 3): String {
+        val safe = if (value.isFinite() && abs(value) >= 1e-12) value else 0.0
+        val clampedDecimals = decimals.coerceIn(0, 8)
+        return String.format(Locale.ROOT, "%.${clampedDecimals}f", safe)
+    }
+
+    fun formatDecimal(
+        value: Double,
+        decimals: Int = 3,
+        suppressTrailingZeros: Boolean = false
+    ): String {
+        val raw = formatFixed(value, decimals)
+        return if (suppressTrailingZeros && raw.contains('.')) {
+            raw.trimEnd('0').trimEnd('.')
+        } else {
+            raw
+        }
+    }
+
+    fun formatAngleDeg(
+        angleDeg: Double,
+        decimals: Int = 2,
+        withDegreeSymbol: Boolean = true
+    ): String {
+        val safe = if (angleDeg.isFinite() && abs(angleDeg) >= 1e-12) angleDeg else 0.0
+        val clampedDecimals = decimals.coerceIn(0, 6)
+        val num = String.format(Locale.ROOT, "%.${clampedDecimals}f", safe)
+        return if (withDegreeSymbol) "$num°" else num
+    }
+
+    fun formatLineDiagnostic(
+        start: Point2D,
+        end: Point2D,
+        length: Double,
+        angleDeg: Double
+    ): String {
+        return "Start: (${formatFixed(start.x, 3)}, ${formatFixed(start.y, 3)})\n" +
+            "End: (${formatFixed(end.x, 3)}, ${formatFixed(end.y, 3)})\n" +
+            "Length: ${formatFixed(length, 3)}   Angle: ${formatAngleDeg(angleDeg, 2, true)}"
+    }
+}
+
+/**
  * Supported drawing units with physical conversion to millimetres (mm).
  */
 enum class CadUnit(
@@ -30,17 +78,8 @@ enum class CadUnit(
 
 /**
  * Explicit distinction when changing units on an existing drawing:
- * - DISPLAY_ONLY: Geometry retains its physical size; coordinates/dimensions are converted for display
- *   (or rescaled so physical size stays identical while expressed in the new unit).
- *   Wait: let's follow Section 3.2 of the specification carefully:
- *   Mode A (CHANGE_DISPLAYED_UNITS_PRESERVE_PHYSICAL_SIZE):
- *     "The underlying geometry retains its physical size. Coordinates, dimensions, and measurements
- *      are converted for display. Example: a line measuring 100 mm is displayed as 10 cm after changing
- *      the display unit."
- *   Mode B (RESCALE_MODEL_COORDINATES):
- *     "The actual model-space coordinates are converted by a scale factor so that their numerical values
- *      are re-expressed in the new unit while preserving the same physical size." (Or reinterpret / scale
- *      model coordinates directly).
+ * - CONVERT_DISPLAY_UNITS: Stored model coordinates remain untouched; display readouts convert.
+ * - RESCALE_MODEL_GEOMETRY: Stored model coordinates are scaled by the conversion factor.
  */
 enum class UnitChangeMode(val title: String, val explanation: String) {
     CONVERT_DISPLAY_UNITS(
@@ -100,7 +139,7 @@ data class PrecisionFormatConfig(
     ): String {
         val converted = rawModelValue * (storageUnit.toMillimetersFactor / displayUnit.toMillimetersFactor)
         val cleanVal = if (abs(converted) < 1e-9) 0.0 else converted
-        var formatted = String.format(Locale.US, "%.${linearDecimals.coerceIn(0, 6)}f", cleanVal)
+        var formatted = String.format(Locale.ROOT, "%.${linearDecimals.coerceIn(0, 6)}f", cleanVal)
         if (suppressTrailingZeros && formatted.contains('.')) {
             formatted = formatted.trimEnd('0').trimEnd('.')
         }
@@ -119,13 +158,13 @@ data class PrecisionFormatConfig(
     ): String {
         val converted = rawModelValue * (storageUnit.toMillimetersFactor / displayUnit.toMillimetersFactor)
         val cleanVal = if (abs(converted) < 1e-9) 0.0 else converted
-        val num = String.format(Locale.US, "%.${linearDecimals.coerceIn(0, 6)}f", cleanVal)
+        val num = String.format(Locale.ROOT, "%.${linearDecimals.coerceIn(0, 6)}f", cleanVal)
         return if (showUnitSuffix) "$num ${displayUnit.symbol}" else num
     }
 
     fun formatAngle(angleDeg: Double): String {
         val clean = if (abs(angleDeg) < 1e-7) 0.0 else angleDeg
-        val num = String.format(Locale.US, "%.${angularDecimals.coerceIn(0, 4)}f", clean)
+        val num = String.format(Locale.ROOT, "%.${angularDecimals.coerceIn(0, 4)}f", clean)
         return "$num°"
     }
 }
@@ -238,4 +277,3 @@ data class CursorControllerConfig(
 )
 
 typealias VirtualControllerConfig = CursorControllerConfig
-

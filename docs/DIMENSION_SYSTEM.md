@@ -1,36 +1,35 @@
-# Quick Dimension (`QDIM`), Alignment & Selective Dimension Removal
+# Quick Dimension (`QDIM`), Card Selectors & Selective Dimension Removal
 
-## 1. Two-Pass Quick Dimension & Alignment Solver (`QuickDimensionEngine`)
+## 1. Two-Pass Quick Dimension & Alignment Solver (`AutoDimensionEngine` & `DimensionAlignmentEngine`)
 
 1. **Pass 1 — Geometric Feature & Alignment Extraction**:
    - Scans target entities (selected entities or all visible geometry) to extract horizontal/vertical spans, circle diameters (`⌀`), arc/fillet radii (`R`), chamfer bevel notes (`C`), and angular vertex relationships (`°`).
-   - Detects near-collinear horizontal/vertical coordinates, near-equal radii, and concentric centers within engineering tolerance to produce a `QuickAlignmentReport`.
+   - Evaluates symmetric margins, equal hole patterns, and collinear alignments within engineering tolerance to produce a `DimensionAlignmentReport`.
 2. **Pass 2 — 1D Interval-Graph Lane Allocation & 2D AABB Collision Avoidance**:
    - Assigns each linear dimension to an outward offset tier (`tierIndex`) using interval-graph coloring so parallel extension/dimension lines never overlap.
-   - Evaluates 2D Axis-Aligned Bounding Boxes (`AABB`) for dimension text labels and shifts `textOffsetAlongLine` or promotes the dimension tier when a collision with geometry or another label is detected.
+   - Evaluates 2D Axis-Aligned Bounding Boxes (`AABB`) for dimension text labels and leader rays so callouts avoid colliding with holes and geometry.
 
 ---
 
-## 2. QDIM Dialog Architecture
+## 2. QDIM Dialog & Horizontal Card-Based Option Selectors
 
-- **Continuous Dark Engineering Surface**: Eliminates nested inner black boxes in favor of a unified scrollable dark surface with scroll-responsive compacting header (`qdim_scroll_header`) and footer (`qdim_scroll_footer`).
-- **Rotary / Wheel Selectors with 2-Second Delayed Callout**:
-  - Compact single-button wheel selectors for **Dimension Mode** (`qdim_wheel_mode`), **Arrangement** (`qdim_wheel_arrangement`), and **Density Policy** (`qdim_wheel_density`).
-  - Pressing and holding for 2 seconds reveals a contextual speech-bubble callout (`qdim_callout_bubble_*`) explaining the active engineering option.
+- **Bounded Scroll Surface**: Uses a single hoisted `rememberScrollState()` with threshold-pinned header (`qdim_scroll_header`, including a compact rotating header refresh icon `qdim_header_refresh_icon_button`) and footer (`qdim_scroll_footer`).
+- **Three Horizontal Swipeable Card Decks (`QDimHorizontalCardSelector` / `CadHorizontalOptionCardDeck`)**:
+  1. **Operating Scope Mode** (`qdim_wheel_mode`)
+  2. **Alignment & Arrangement Mode** (`qdim_wheel_arrangement`)
+  3. **Dimension Density Policy** (`qdim_wheel_density`)
+  - Horizontal left/right swipes advance or rewind one option at a time using the shared card-stack transition, while vertical drags pass cleanly to the parent dialog scroll container.
+- **Non-Layout-Shifting Delayed Callout Overlay**:
+  - After resting on an option for 2 seconds, a floating speech-bubble callout overlay (`Popup`) explains the selected option without altering card height, pushing sibling sections, or changing the dialog scroll position.
 - **Two-Card Footer Action Deck (`qdim_footer_action_deck`)**:
-  - **Green Foreground Card (`execute_qdim_confirm_button`)**: *Enable & Generate*.
-  - **Red Rear Card (`clear_all_dimensions_button`)**: *Clear All*.
-  - Swiping down swaps the front and rear cards without executing; tapping the active front card triggers its action; short-tapping *Clear All* opens a confirmation dialog; **long-pressing *Clear All*** (or tapping `qdim_open_selective_clear_button`) opens the **Category-First Selective Dimension Removal** window.
+  - Green foreground **ENABLE & GENERATE** (`execute_qdim_confirm_button`) and red **CLEAR ALL** (`clear_all_dimensions_button`), governed by an isolated `CadDeckIdleTimerState`.
+  - Downward swipe exchanges the front and rear cards without executing; tapping *Clear All* opens destructive confirmation; long-pressing *Clear All* opens Selective Dimension Removal.
 
 ---
 
-## 3. Category-First Selective Dimension Removal
+## 3. Selective Dimension Removal: Stable Scroll & Transient Marquee Notice
 
-- Groups all drawing dimensions into six engineering categories:
-  1. **Linear — Horizontal**
-  2. **Linear — Vertical**
-  3. **Linear — Aligned**
-  4. **Radius (`R`)**
-  5. **Diameter (`⌀`)**
-  6. **Angular (`°`)**
-- Supports category-level bulk selection, individual dimension inspection/toggling, and single-step undoable deletion (`removeSelectedDimensionsConfirmed(dimensionIdsToRemove)`).
+- Preserves the V17 category-first hierarchy (all 6 categories checked and locked by default; unchecking a category unlocks individual child dimensions; supports checked, unchecked, and indeterminate category states).
+- **Header Select All / Deselect All Action (`selective_clear_master_toggle_button`)**: Located in the fixed dialog header outside the scrolling list so toggling never resizes the list viewport.
+- **Transient Single-Line Marquee Notification (`selective_clear_transient_marquee`)**:
+  - Appears as a floating overlay only after an actual user selection change (e.g., `5 of 7 dimensions selected for removal`), completes one readable marquee cycle before smooth retraction, and never shifts or resets `LazyListState` scroll position.

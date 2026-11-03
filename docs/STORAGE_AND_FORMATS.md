@@ -1,4 +1,4 @@
-# Native `.pcad` Persistence & DXF / PDF / SVG Formats
+# Native `.pcad` Persistence, Interchange Formats & Updater Staging
 
 ## 1. Native `.pcad` Project Format (`schemaVersion = 2`)
 
@@ -12,24 +12,18 @@ A `.pcad` document preserves:
 
 ---
 
-## 2. Two Distinct Save Operations
+## 2. Two Distinct Project Save Operations
 
 ### A. Automatic Quick Save (App-Private Crash-Safe Storage)
-- Writes to `<context.filesDir>/pcad_autosave/quick_save_working.pcad`.
-- Uses an atomic write-and-swap protocol:
-  1. Serializes JSON to `quick_save_working.pcad.tmp` and flushes (`fd.sync()`).
-  2. Copies the previous valid `quick_save_working.pcad` to `quick_save_working.pcad.bak`.
-  3. Atomically renames `.tmp` to `quick_save_working.pcad`.
-- Triggered automatically on debounced drawing mutations so work is never lost on unexpected process termination.
+- Writes to `<context.filesDir>/pcad_autosave/quick_save_working.pcad` using an atomic `.tmp` -> `.bak` -> rename swap protocol.
 
 ### B. Explicit Save (`Documents/PrecisionCAD/<basename>.pcad`)
-- Writes directly to `Documents/PrecisionCAD/<basename>.pcad` (via `MediaStore.Files` with `RELATIVE_PATH = "Documents/PrecisionCAD"` on Android 10+ and direct directory fallback).
-- Retains the resolved URI/file handle (`lastExplicitSaveUri`) so subsequent explicit saves update the same `.pcad` file cleanly without prompting a folder picker.
+- Writes directly to `Documents/PrecisionCAD/<basename>.pcad` (via `MediaStore.Files` on Android 10+ and direct directory fallback).
+- Synchronizes the canonical basename (`Geo.pcad` -> `TITLE: Geo` in title block and `Geo.pdf` on plotted PDF export).
 
 ---
 
-## 3. Authoritative Project Basename & Plotted PDF Title Rule
+## 3. In-App Updater Staging Storage (Separate from Project Storage)
 
-The saved project basename (`CadPcadPersistence.canonicalBasename(name)`) is the single source of truth across `.pcad` persistence, title-block rendering, and plotted PDF export:
-- Saving project `Geo` writes `Documents/PrecisionCAD/Geo.pcad`.
-- Exporting a plotted PDF from `Geo.pcad` generates `Geo.pdf` and renders `TITLE: Geo` inside the sheet title block (`CadDxfInterchange.exportToPdfFile`).
+- Downloaded release APKs are staged exclusively under app-private internal storage at `<context.filesDir>/updates/` (`.part` temporary file during HTTPS streaming, promoted to `PrecisionCAD-Studio-v<versionName>-b<versionCode>-release.apk` only after passing all 10 `CadApkVerifier` checks).
+- Retaining or cleaning up staged update APKs never touches `<context.filesDir>/pcad_autosave/`, the Room project database (`precision_cad_studio.db`), SharedPreferences, or `Documents/PrecisionCAD/`.

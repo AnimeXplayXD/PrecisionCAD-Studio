@@ -49,8 +49,19 @@ class ExampleRobolectricTest {
 
         composeTestRule.waitForIdle()
 
-        // 1. Verify First-Run Home Screen and enter workspace via New Drawing
+        // 1. Verify First-Run Home Screen, Top-Right Update Status Icon, and Release Catalogue Dialog (Phase 12)
         composeTestRule.onNodeWithTag("cad_home_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_update_status_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_update_status_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("release_catalogue_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_title").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_action_deck").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_primary_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("release_catalogue_cancel_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Enter workspace via New Drawing
         composeTestRule.onNodeWithTag("home_new_drawing_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
@@ -66,14 +77,14 @@ class ExampleRobolectricTest {
 
         // 3. Verify Vertical-Peek Two-Card Controller Mode Selector (Joystick <-> Touchpad)
         composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("controller_mode_touchpad").performClick()
+        composeTestRule.onNodeWithTag("controller_mode_card_selector").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("controller_touchpad_surface").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("controller_mode_joystick").performClick()
+        composeTestRule.onNodeWithTag("controller_mode_card_selector").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("controller_joystick_surface").assertIsDisplayed()
 
-        // 4. Section 3.3 & Section 2: Verify activating a CAD command from the Tool Drawer does NOT force
+        // 4. Verify activating a CAD command from the Tool Drawer does NOT force
         // command_action_card_stack open while commandLineInput is empty and keyboard is closed, AND
         // verify sub-option switching preserves picked step points and live preview!
         composeTestRule.onNodeWithTag("bottom_tools_toggle_button").performClick()
@@ -107,7 +118,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("command_card_cancel").performClick()
         composeTestRule.waitForIdle()
 
-        // 5. Section 7: Verify Direct Coordinate Input Dialog with Editable Polar Bearing θ (°)
+        // 5. Verify Direct Coordinate Input Dialog with Editable Polar Bearing θ (°)
         composeTestRule.onNodeWithTag("cursor_coord_theta_text").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("coord_input_x_field").assertIsDisplayed()
@@ -119,7 +130,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("coord_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 6. Section 6 & Section 9: Verify Controller & OSNAP Settings Dialog with hoisted scroll & CadBinaryToggleCard
+        // 6. Section 12: Verify Controller & OSNAP Settings Dialog with hoisted scroll, ENABLE/DISABLE cards, and 3-region OSNAP marquee cards
         composeTestRule.onNodeWithTag("controller_settings_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("controller_snap_settings_dialog").assertIsDisplayed()
@@ -130,7 +141,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("controller_settings_close_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 7. Section 5: Verify Quick Dimension (QDIM) Dialog Rotary Wheels, Two-Card Footer Deck, and Selective Dimension Removal
+        // 7. Section 10 & 11: Verify Quick Dimension (QDIM) Horizontal Card Selectors, Two-Card Footer Deck, and Selective Dimension Removal
         composeTestRule.onNodeWithTag("top_qdim_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("qdim_scroll_header").assertIsDisplayed()
@@ -138,20 +149,27 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("qdim_wheel_mode").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_wheel_arrangement").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("qdim_wheel_density").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("qdim_wheel_density").performTouchInput { swipeLeft() }
+        composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("qdim_footer_action_deck").assertIsDisplayed()
         composeTestRule.onNodeWithTag("execute_qdim_confirm_button").performClick()
         composeTestRule.waitForIdle()
 
-        // Re-open QDIM dialog after generating dimensions to verify Selective Dimension Removal dialog
+        // Re-open QDIM dialog after generating dimensions to verify Selective Dimension Removal dialog,
+        // header SELECT ALL / DESELECT ALL chip, and non-layout-shifting transient marquee notification
         composeTestRule.onNodeWithTag("top_qdim_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("qdim_open_selective_clear_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("qdim_selective_clear_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("selective_clear_master_toggle").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("selective_clear_master_toggle").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("selective_clear_transient_marquee").assertIsDisplayed()
         composeTestRule.onNodeWithTag("selective_dim_cancel_button").performClick()
         composeTestRule.waitForIdle()
 
-        // 8. Section 4: Verify Automatic Quick Save (.pcad), Explicit Save (Documents/PrecisionCAD/Geo.pcad), and Geo.pdf Title Sync
+        // 8. Verify Automatic Quick Save (.pcad), Explicit Save (Documents/PrecisionCAD/Geo.pcad), and Geo.pdf Title Sync
         val basePayload = CadTemplateFactory.createSixHoleMountingPlate()
         val qdimEntities = AutoDimensionEngine.generateQuickDimensions(
             allEntities = basePayload.entities,

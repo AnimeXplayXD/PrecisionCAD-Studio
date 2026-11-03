@@ -1,6 +1,7 @@
 package com.example.cad.data
 
 import android.content.Context
+import androidx.core.content.edit
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -122,7 +123,7 @@ class CadProjectRepository(
                 deleteProject(proj.projectId)
             }
         }
-        prefs.edit().putBoolean("v16_legacy_templates_cleaned", true).apply()
+        prefs.edit { putBoolean("v16_legacy_templates_cleaned", true) }
     }
 
     suspend fun saveProjectDocument(

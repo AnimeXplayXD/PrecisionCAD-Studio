@@ -617,18 +617,20 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `TC-POLAR-43 verify v15 Visual-Only Polar Tracking R, live bearing theta, acquired polar guide theta_p (90, 126, 180 deg), and PolarSnap`() {
+    fun `TC-POLAR-43 verify v18 Visual Polar Tracking R, live bearing theta, narrow visual acquisition theta_p, and independent PolarSnap`() {
         val basePoint = Point2D(50.0, 50.0)
         val config = com.example.cad.model.GridAndSnapConfig(
             polarTrackingEnabled = true,
             polarSnapEnabled = false,
             polarTrackingAngleDeg = 45.0,
-            polarAdditionalAnglesDeg = listOf(126.0),
+            polarAdditionalAnglesDeg = listOf(22.5),
+            polarSnapCustomAnglesDeg = listOf(126.0),
             polarAcquisitionToleranceDeg = 5.0
         )
 
-        // 1. Near 90 degrees (cursor at 89.2 deg, R = 40.0): live theta = 89.2 deg, acquired polarAngleDeg = 90.0 deg
-        val cursorNear90 = basePoint.polarOffset(40.0, 89.2)
+        // 1. Within visual acquisition tolerance of 90 degrees (cursor at 89.80 deg, R = 40.0):
+        //    live theta = 89.80 deg, acquired visual polarAngleDeg = 90.0 deg
+        val cursorNear90 = basePoint.polarOffset(40.0, 89.80)
         val preview90 = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = basePoint,
             rawCursorPoint = cursorNear90,
@@ -637,12 +639,14 @@ class ExampleUnitTest {
         )
         assertNotNull(preview90)
         assertEquals(40.0, preview90!!.radialDistanceR, 1e-3)
-        assertEquals(89.2, preview90.actualAngleThetaDeg!!, 1e-2)
+        assertEquals(89.80, preview90.actualAngleThetaDeg!!, 1e-2)
         assertTrue(preview90.isPolarGuideAcquired)
         assertEquals(90.0, preview90.activePolarAngleDeg!!, 1e-3)
 
-        // 2. Near custom additional angle 126 degrees (cursor at 124.8 deg, R = 60.0): live theta = 124.8 deg, acquired polarAngleDeg = 126.0 deg
-        val cursorNear126 = basePoint.polarOffset(60.0, 124.8)
+        // 2. Near custom PolarSnap angle 126 degrees (cursor at 124.5 deg, R = 60.0):
+        //    PolarSnap acquires 126.0 deg (within 5 deg snap tolerance), while Visual Polar Tracking
+        //    does NOT falsely snap to 126 deg because 124.5 deg is outside the 0.35 deg visual corridor!
+        val cursorNear126 = basePoint.polarOffset(60.0, 124.5)
         val preview126 = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = basePoint,
             rawCursorPoint = cursorNear126,
@@ -651,12 +655,12 @@ class ExampleUnitTest {
         )
         assertNotNull(preview126)
         assertEquals(60.0, preview126!!.radialDistanceR, 1e-3)
-        assertEquals(124.8, preview126.actualAngleThetaDeg!!, 1e-2)
-        assertTrue(preview126.isPolarGuideAcquired)
-        assertEquals(126.0, preview126.activePolarAngleDeg!!, 1e-3)
+        assertEquals(124.5, preview126.actualAngleThetaDeg!!, 1e-2)
+        assertFalse(preview126.isPolarGuideAcquired)
+        assertEquals(126.0, preview126.activePolarSnapAngleDeg!!, 1e-3)
 
-        // 3. Near 180 degrees (cursor at 181.5 deg, R = 75.0): live theta = 181.5 deg, acquired polarAngleDeg = 180.0 deg
-        val cursorNear180 = basePoint.polarOffset(75.0, 181.5)
+        // 3. Within visual acquisition tolerance of 180 degrees (cursor at 180.20 deg, R = 75.0)
+        val cursorNear180 = basePoint.polarOffset(75.0, 180.20)
         val preview180 = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = basePoint,
             rawCursorPoint = cursorNear180,
@@ -664,13 +668,11 @@ class ExampleUnitTest {
             previousBasePoint = null
         )
         assertNotNull(preview180)
-        assertEquals(181.5, preview180!!.actualAngleThetaDeg!!, 1e-2)
+        assertEquals(180.20, preview180!!.actualAngleThetaDeg!!, 1e-2)
         assertTrue(preview180.isPolarGuideAcquired)
         assertEquals(180.0, preview180.activePolarAngleDeg!!, 1e-3)
 
-        // 4. Outside PolarSnap acquisition tolerance (e.g., 108 deg is > 5 deg from 90, 126, 135):
-        //    In v17 (Section 6.5), Visual Polar Tracking covers all 0°..359° whole-number bearings (108.0°),
-        //    while PolarSnap constraint remains null (activePolarSnapAngleDeg == null).
+        // 4. Exact whole-number bearing 108.0 deg acquires visual 108.0 deg while PolarSnap remains null
         val cursorFree = basePoint.polarOffset(50.0, 108.0)
         val previewFree = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = basePoint,
@@ -685,7 +687,7 @@ class ExampleUnitTest {
         assertEquals(108.0, previewFree.activePolarAngleDeg!!, 1e-3)
         assertEquals(null, previewFree.activePolarSnapAngleDeg)
 
-        // 5. Optional PolarSnap projects candidate point onto acquired polar guide ray without mutating raw cursor input
+        // 5. Optional PolarSnap projects candidate point onto acquired 126.0 deg PolarSnap ray
         val (snappedWithPolar, _) = CadSnapAndCoordEngine.resolveCursorSnap(
             rawModelCursor = cursorNear126,
             referencePoint = basePoint,
@@ -1004,9 +1006,9 @@ class ExampleUnitTest {
         assertEquals(listOf(126.0, 152.5), restored.gridSnapConfig.polarSnapCustomAnglesDeg)
         assertEquals(listOf(22.5, 126.5), restored.gridSnapConfig.polarAdditionalAnglesDeg)
 
-        // 3. Separated Visual Polar Tracking (0°..359° whole numbers + fractional custom) vs PolarSnap (Section 6.5)
+        // 3. Separated Visual Polar Tracking (0°..359° whole numbers + fractional custom) vs PolarSnap
         val refPt = Point2D(0.0, 0.0)
-        // Visual guide acquires any whole-number bearing (e.g. 37°) even when 37° is NOT in PolarSnap presets
+        // Visual guide acquires whole-number bearing 37° when within 0.35° even though 37° is NOT in PolarSnap presets
         val cursorAt37 = refPt.polarOffset(50.0, 37.0)
         val visualPreview37 = CadSnapAndCoordEngine.computePolarTrackingPreview(
             basePoint = refPt,
@@ -1029,6 +1031,359 @@ class ExampleUnitTest {
         )
         assertEquals(45.0, refPt.angleToDeg(snappedPt), 1e-3)
     }
+
+    @Test
+    fun `TC-V18-01 verify Locale-Independent CadNumberFormatter and PrecisionFormatConfig across US, GERMANY, bn-IN, and tr-TR`() {
+        val originalLocale = java.util.Locale.getDefault()
+        val testLocales = listOf(
+            java.util.Locale.US,
+            java.util.Locale.GERMANY,
+            java.util.Locale.forLanguageTag("bn-IN"),
+            java.util.Locale.forLanguageTag("tr-TR")
+        )
+        val prec = PrecisionFormatConfig(linearDecimals = 2, angularDecimals = 2, showUnitSuffix = false)
+        try {
+            for (loc in testLocales) {
+                java.util.Locale.setDefault(loc)
+                assertEquals("13.62", com.example.cad.model.CadNumberFormatter.formatFixed(13.62, 2))
+                assertEquals("13.620", com.example.cad.model.CadNumberFormatter.formatFixed(13.62, 3))
+                assertEquals("135.25°", com.example.cad.model.CadNumberFormatter.formatAngleDeg(135.25, 2, true))
+                assertEquals("13.62", prec.formatLinear(13.62, CadUnit.MM, CadUnit.MM))
+                assertEquals("45.50°", prec.formatAngle(45.5))
+
+                val diag = com.example.cad.model.CadNumberFormatter.formatLineDiagnostic(
+                    start = Point2D(13.62, 24.5),
+                    end = Point2D(100.125, 80.0),
+                    length = 104.25,
+                    angleDeg = 37.5
+                )
+                assertTrue(diag.contains("(13.620, 24.500)"))
+                assertTrue(diag.contains("(100.125, 80.000)"))
+                assertTrue(diag.contains("Length: 104.250"))
+                assertTrue(diag.contains("Angle: 37.50°"))
+                assertFalse("Decimal comma must never appear in $loc", diag.contains("13,620"))
+            }
+        } finally {
+            java.util.Locale.setDefault(originalLocale)
+        }
+    }
+
+    @Test
+    fun `TC-V18-02 verify Zoom-Adaptive Grid Snap effective step quantization, hysteresis, jump guard, and ORTHO independence`() {
+        // 1. At reference zoom (Z == Z_0), effective interval equals configured base interval (10.0)
+        val step1x = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseInterval = 10.0,
+            currentPixelsPerModelUnit = 4.0f,
+            referencePixelsPerModelUnit = 4.0
+        )
+        assertEquals(10.0, step1x, 1e-6)
+
+        // 2. At 2x zoom in (currentZ = 8.0, refZ = 4.0 -> rawTarget = 5.0), effective interval halves to 5.0
+        val step2x = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseInterval = 10.0,
+            currentPixelsPerModelUnit = 8.0f,
+            referencePixelsPerModelUnit = 4.0
+        )
+        assertEquals(5.0, step2x, 1e-6)
+
+        // 3. At 4x zoom in (currentZ = 16.0, refZ = 4.0 -> rawTarget = 2.5), effective interval scales to 2.5
+        val step4x = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseInterval = 10.0,
+            currentPixelsPerModelUnit = 16.0f,
+            referencePixelsPerModelUnit = 4.0
+        )
+        assertEquals(2.5, step4x, 1e-6)
+
+        // 4. At 10x zoom in (currentZ = 40.0, refZ = 4.0 -> rawTarget = 1.0), effective interval scales to 1.0
+        val step10x = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseInterval = 10.0,
+            currentPixelsPerModelUnit = 40.0f,
+            referencePixelsPerModelUnit = 4.0
+        )
+        assertEquals(1.0, step10x, 1e-6)
+
+        // 5. Hysteresis guard: slight zoom fluctuation within 12% retains previousEffectiveInterval (5.0)
+        val stepHysteresis = CadSnapAndCoordEngine.computeEffectiveGridSnapInterval(
+            baseInterval = 10.0,
+            currentPixelsPerModelUnit = 8.4f,
+            referencePixelsPerModelUnit = 4.0,
+            previousEffectiveInterval = 5.0
+        )
+        assertEquals(5.0, stepHysteresis, 1e-6)
+
+        // 6. Usable-viewport boundary guard: if snapping would push a visible cursor outside UsableViewportRect, keep rawPoint
+        val vp = ViewportTransform(panScreenX = 100f, panScreenY = 500f, pixelsPerModelUnit = 10.0f)
+        val usable = UsableViewportRect(leftPx = 105f, topPx = 50f, rightPx = 800f, bottomPx = 600f)
+        // rawPoint at x = 0.6 -> screenX = 100 + 6 = 106 (inside usable.leftPx = 105),
+        // nearest grid at step 5.0 is x = 0.0 -> screenX = 100 (outside usable.leftPx = 105)
+        val guardedPt = CadSnapAndCoordEngine.applyZoomAdaptiveGridSnap(
+            rawPoint = Point2D(0.6, 10.0),
+            baseInterval = 5.0,
+            viewport = vp,
+            referencePixelsPerModelUnit = 10.0,
+            usableRect = usable
+        )
+        assertEquals(0.6, guardedPt.x, 1e-5)
+
+        // 7. ORTHO + Zoom-Adaptive Grid Snap: dominant axis stays locked to referencePoint while free axis snaps to effective grid
+        val refPt = Point2D(12.34, 27.89)
+        val rawMoved = Point2D(26.1, 28.2)
+        val (orthoGridSnapped, _) = CadSnapAndCoordEngine.resolveCursorSnap(
+            rawModelCursor = rawMoved,
+            referencePoint = refPt,
+            entities = emptyList(),
+            snapConfig = com.example.cad.model.GridAndSnapConfig(
+                osnapEnabled = false,
+                polarSnapEnabled = false,
+                orthoEnabled = true,
+                gridSnapEnabled = true,
+                gridSnapInterval = 10.0
+            ),
+            viewport = ViewportTransform(panScreenX = 200f, panScreenY = 400f, pixelsPerModelUnit = 16.0f),
+            referencePixelsPerModelUnit = 4.0
+        )
+        // Effective grid step at 4x zoom is 2.5 -> X snaps 26.1 to 25.0, while Y remains locked to refPt.y (27.89)!
+        assertEquals(25.0, orthoGridSnapped.x, 1e-4)
+        assertEquals(refPt.y, orthoGridSnapped.y, 1e-6)
+    }
+
+    @Test
+    fun `TC-V18-03 verify Visual Polar Tracking release hysteresis, stale 135 deg disappearance, and Relative-to-Last-Segment basis`() {
+        val basePt = Point2D(0.0, 0.0)
+        val prevPt = Point2D(-50.0, -50.0) // segment from (-50,-50) to (0,0) has bearing 45°
+        val cfg = com.example.cad.model.GridAndSnapConfig(
+            polarTrackingEnabled = true,
+            polarSnapEnabled = false,
+            polarAdditionalAnglesDeg = listOf(22.5),
+            polarSnapCustomAnglesDeg = listOf(126.0)
+        )
+
+        // 1. At raw angle 135.1 deg (within 0.35 deg acquire tolerance of 135 deg), visual 135 deg guide is acquired
+        val p135_1 = basePt.polarOffset(80.0, 135.1)
+        val prev1 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePt,
+            rawCursorPoint = p135_1,
+            snapConfig = cfg
+        )
+        assertNotNull(prev1)
+        assertTrue(prev1!!.isPolarGuideAcquired)
+        assertEquals(135.0, prev1.activePolarAngleDeg!!, 1e-3)
+
+        // 2. At raw angle 135.45 deg (between 0.35 deg acquire and 0.55 deg release), retained when previouslyAcquired = 135.0
+        val p135_45 = basePt.polarOffset(80.0, 135.45)
+        val prevRetained = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePt,
+            rawCursorPoint = p135_45,
+            snapConfig = cfg,
+            previouslyAcquiredVisualAngleDeg = 135.0
+        )
+        assertTrue(prevRetained!!.isPolarGuideAcquired)
+        assertEquals(135.0, prevRetained.activePolarAngleDeg!!, 1e-3)
+
+        // 3. At raw angle 127.4 deg (away from 135 deg and away from integer 127 deg by 0.4 > 0.35), stale 135 deg guide disappears!
+        val p127_4 = basePt.polarOffset(80.0, 127.4)
+        val prevStaleGone = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePt,
+            rawCursorPoint = p127_4,
+            snapConfig = cfg,
+            previouslyAcquiredVisualAngleDeg = 135.0
+        )
+        assertFalse(prevStaleGone!!.isPolarGuideAcquired)
+        assertEquals(null, prevStaleGone.activePolarAngleDeg)
+
+        // 4. Custom fractional visual angle 22.5 deg acquires visually without being inserted into PolarSnap
+        val p22_5 = basePt.polarOffset(80.0, 22.5)
+        val prev22_5 = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePt,
+            rawCursorPoint = p22_5,
+            snapConfig = cfg
+        )
+        assertTrue(prev22_5!!.isPolarGuideAcquired)
+        assertEquals(22.5, prev22_5.activePolarAngleDeg!!, 1e-3)
+        assertFalse(CadSnapAndCoordEngine.buildPolarSnapAngles(cfg).contains(22.5))
+
+        // 5. Relative-to-last-segment uses prior segment bearing (45 deg) and labels basis "Last Segment"
+        val pWorld75 = basePt.polarOffset(60.0, 75.0) // 30 deg relative to 45 deg segment
+        val prevRel = CadSnapAndCoordEngine.computePolarTrackingPreview(
+            basePoint = basePt,
+            rawCursorPoint = pWorld75,
+            snapConfig = cfg.copy(polarRelativeToLastSegment = true),
+            previousBasePoint = prevPt
+        )
+        assertEquals("Last Segment", prevRel!!.referenceBasisLabel)
+        assertEquals(45.0, prevRel.referenceAngleDeg, 1e-3)
+        assertEquals(30.0, prevRel.actualAngleThetaDeg!!, 1e-3)
+        assertEquals(30.0, prevRel.activePolarAngleDeg!!, 1e-3)
+        assertEquals(75.0, prevRel.worldPolarAngleDeg!!, 1e-3)
+    }
+
+    @Test
+    fun `TC-V18-04 verify Section-Local CadDeckIdleTimerState isolation, CommandDeckVisible rule, and binary label normalization`() {
+        val deckA = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_a")
+        val deckB = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_b")
+
+        assertEquals(75_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_INTERVAL_MS)
+        assertEquals(1_000L, com.example.ui.components.CadDeckIdleTimerState.IDLE_PEEK_HOLD_MS)
+        assertEquals(2_400L, com.example.ui.components.CadDeckIdleTimerState.POST_EXCHANGE_REVEAL_MS)
+
+        // Initially at rest: rear card is completely concealed on both decks
+        assertFalse(deckA.isRearCardVisible)
+        assertFalse(deckB.isRearCardVisible)
+
+        // Direct card exchange on Deck A triggers post-exchange reveal on Deck A ONLY; Deck B remains untouched
+        val genB0 = deckB.interactionGeneration
+        deckA.onCardExchanged()
+        assertTrue(deckA.isPostExchangeRevealActive)
+        assertTrue(deckA.isRearCardVisible)
+        assertFalse(deckB.isRearCardVisible)
+        assertEquals(genB0, deckB.interactionGeneration)
+
+        // Cancelling eligibility (e.g., dialog hidden) immediately clears reveal/peek state
+        deckA.cancelAllVisualPeeks()
+        assertFalse(deckA.isRearCardVisible)
+
+        // Section 9.8 & 13.2 Command Send/Cancel visibility matrix
+        assertTrue(com.example.ui.components.CadDeckIdleTimerState.isCommandDeckVisible(keyboardVisible = true, commandText = ""))
+        assertTrue(com.example.ui.components.CadDeckIdleTimerState.isCommandDeckVisible(keyboardVisible = true, commandText = "LINE"))
+        assertTrue(com.example.ui.components.CadDeckIdleTimerState.isCommandDeckVisible(keyboardVisible = false, commandText = "LINE"))
+        assertFalse(com.example.ui.components.CadDeckIdleTimerState.isCommandDeckVisible(keyboardVisible = false, commandText = ""))
+
+        // Section 9.3 & 12.1 Binary toggle label normalization
+        assertEquals("ENABLE", com.example.ui.components.CadDeckIdleTimerState.normalizeBinaryStateLabel(true, "ON"))
+        assertEquals("DISABLE", com.example.ui.components.CadDeckIdleTimerState.normalizeBinaryStateLabel(false, "OFF"))
+        assertEquals("ENABLE", com.example.ui.components.CadDeckIdleTimerState.normalizeBinaryStateLabel(true, "POLAR"))
+        assertEquals("DISABLE", com.example.ui.components.CadDeckIdleTimerState.normalizeBinaryStateLabel(false, "PSNAP"))
+    }
+
+    @Test
+    fun `TC-V18-05 verify GitHub Release Parser, HomeUpdateIconVisualState badge rules, and UpdatesBehindCount`() {
+        // 1. Home update icon visual rules (Section 14.5 & 16.9):
+        //    0 -> White, no badge; 1 -> Gold, no badge; >1 -> Gold, integer count beside icon
+        val icon0 = com.example.cad.update.HomeUpdateIconVisualState.fromUpdatesBehindCount(0)
+        assertEquals(com.example.cad.update.HomeUpdateIconColor.WHITE, icon0.iconColor)
+        assertFalse(icon0.showBadgeCount)
+        assertEquals(null, icon0.badgeCountText)
+
+        val icon1 = com.example.cad.update.HomeUpdateIconVisualState.fromUpdatesBehindCount(1)
+        assertEquals(com.example.cad.update.HomeUpdateIconColor.GOLD, icon1.iconColor)
+        assertFalse(icon1.showBadgeCount)
+        assertEquals(null, icon1.badgeCountText)
+
+        val icon3 = com.example.cad.update.HomeUpdateIconVisualState.fromUpdatesBehindCount(3)
+        assertEquals(com.example.cad.update.HomeUpdateIconColor.GOLD, icon3.iconColor)
+        assertTrue(icon3.showBadgeCount)
+        assertEquals("3", icon3.badgeCountText)
+
+        // 2. Parse GitHub Releases JSON containing installed (b18), two newer stable (b19, b20),
+        //    a prerelease (b21), a draft (b22), and a wrong-package release
+        val sampleReleasesJson = """
+            [
+              {
+                "id": 105,
+                "tag_name": "v1.22.0-b22",
+                "name": "Draft Release",
+                "draft": true,
+                "prerelease": false,
+                "published_at": "2026-11-05T10:00:00Z",
+                "body": "## New\n- Draft item",
+                "assets": []
+              },
+              {
+                "id": 104,
+                "tag_name": "v1.21.0-rc1-b21",
+                "name": "PrecisionCAD Studio v1.21.0-rc1",
+                "draft": false,
+                "prerelease": true,
+                "published_at": "2026-11-04T10:00:00Z",
+                "body": "## New\n- Preview feature\n<!-- PRECISIONCAD-RELEASE-METADATA\npackageId: com.precisioncad.studio\nversionName: 1.21.0-rc1\nversionCode: 21\nassetName: PrecisionCAD-Studio-v1.21.0-rc1-b21-release.apk\nsha256: aaaa\nchannel: prerelease\n-->",
+                "assets": [
+                  {
+                    "name": "PrecisionCAD-Studio-v1.21.0-rc1-b21-release.apk",
+                    "browser_download_url": "https://github.com/AnimeXplayXD/PrecisionCAD-Studio/releases/download/v1.21.0-rc1-b21/PrecisionCAD-Studio-v1.21.0-rc1-b21-release.apk",
+                    "size": 18400000,
+                    "content_type": "application/vnd.android.package-archive"
+                  }
+                ]
+              },
+              {
+                "id": 103,
+                "tag_name": "v1.20.0-b20",
+                "name": "PrecisionCAD Studio v1.20.0",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-11-03T12:00:00Z",
+                "body": "## New\n- Zoom-adaptive Grid Snap\n- GitHub Release Catalogue\n\n## Fixes\n- Paper Space title-block opacity\n\n## Optimisations\n- Section-local card timers\n\n---\n\n<!-- PRECISIONCAD-RELEASE-METADATA\npackageId: com.precisioncad.studio\nversionName: 1.20.0\nversionCode: 20\nassetName: PrecisionCAD-Studio-v1.20.0-b20-release.apk\ncommitSha: 0123456789abcdef\nsha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nchannel: stable\n-->",
+                "assets": [
+                  {
+                    "name": "PrecisionCAD-Studio-v1.20.0-b20-release.apk",
+                    "browser_download_url": "https://github.com/AnimeXplayXD/PrecisionCAD-Studio/releases/download/v1.20.0-b20/PrecisionCAD-Studio-v1.20.0-b20-release.apk",
+                    "size": 18250000,
+                    "content_type": "application/vnd.android.package-archive"
+                  }
+                ]
+              },
+              {
+                "id": 102,
+                "tag_name": "v1.19.0-b19",
+                "name": "PrecisionCAD Studio v1.19.0",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-11-02T12:00:00Z",
+                "body": "## Fixes\n- Locale.ROOT formatting\n\n<!-- PRECISIONCAD-RELEASE-METADATA\npackageId: com.precisioncad.studio\nversionName: 1.19.0\nversionCode: 19\nassetName: PrecisionCAD-Studio-v1.19.0-b19-release.apk\nsha256: bbbb\nchannel: stable\n-->",
+                "assets": [
+                  {
+                    "name": "PrecisionCAD-Studio-v1.19.0-b19-release.apk",
+                    "browser_download_url": "https://github.com/AnimeXplayXD/PrecisionCAD-Studio/releases/download/v1.19.0-b19/PrecisionCAD-Studio-v1.19.0-b19-release.apk",
+                    "size": 18100000,
+                    "content_type": "application/vnd.android.package-archive"
+                  }
+                ]
+              },
+              {
+                "id": 101,
+                "tag_name": "v1.18.0-b18",
+                "name": "PrecisionCAD Studio v1.18.0",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-11-01T12:00:00Z",
+                "body": "## New\n- Baseline release\n\n<!-- PRECISIONCAD-RELEASE-METADATA\npackageId: com.precisioncad.studio\nversionName: 1.18.0\nversionCode: 18\nassetName: PrecisionCAD-Studio-v1.18.0-b18-release.apk\nsha256: cccc\nchannel: stable\n-->",
+                "assets": [
+                  {
+                    "name": "PrecisionCAD-Studio-v1.18.0-b18-release.apk",
+                    "browser_download_url": "https://github.com/AnimeXplayXD/PrecisionCAD-Studio/releases/download/v1.18.0-b18/PrecisionCAD-Studio-v1.18.0-b18-release.apk",
+                    "size": 18000000,
+                    "content_type": "application/vnd.android.package-archive"
+                  }
+                ]
+              }
+            ]
+        """.trimIndent()
+
+        val catalogueWithPre = com.example.cad.update.CadReleaseParser.parseReleasesJson(
+            jsonArrayString = sampleReleasesJson,
+            installedVersionCode = 18,
+            includePrereleases = true
+        )
+        // Draft is excluded; 4 published records remain (21 prerelease, 20 latest stable, 19 intermediate stable, 18 installed)
+        assertEquals(4, catalogueWithPre.size)
+        val latestStable = catalogueWithPre.first { it.isLatestStable }
+        assertEquals(20, latestStable.versionCode)
+        assertEquals("1.20.0", latestStable.versionName)
+        assertEquals("2026-11-03", latestStable.publishedDateFormatted)
+        assertEquals(3, latestStable.sections.size)
+
+        val installedEntry = catalogueWithPre.first { it.isInstalledVersion }
+        assertEquals(18, installedEntry.versionCode)
+
+        // Eligible stable updates behind installed (18) are 19 and 20 -> count = 2 (prerelease 21 is excluded)
+        val behindCount = com.example.cad.update.CadReleaseParser.computeUpdatesBehindCount(
+            releases = catalogueWithPre,
+            installedVersionCode = 18,
+            includePrereleases = false
+        )
+        assertEquals(2, behindCount)
+    }
 }
+
 
 

@@ -1,0 +1,89 @@
+name: Informational Licensing Inventory (Non-Blocking)
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  licensing-inventory:
+    name: Generate Source & Dependency Licensing Inventory (Informational Only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK Platform 37.2 & Build-Tools 37.0.0
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-37.2" \
+            "build-tools;37.0.0"
+
+      - name: Setup Gradle Wrapper
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
+      - name: Prepare .env File for Build Graph Resolution
+        run: |
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+          fi
+
+      - name: Install Pinned ScanCode Toolkit (v32.3.0)
+        continue-on-error: true
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "scancode-toolkit==32.3.0"
+
+      - name: Generate Licensing Inventory Reports
+        continue-on-error: true
+        run: |
+          python3 scripts/generate_licensing_inventory.py --output-dir reports/licensing
+
+      - name: Publish Inventory Summary to Job Summary
+        if: always()
+        run: |
+          if [ -f "reports/licensing/licensing-inventory-summary.md" ]; then
+            cat reports/licensing/licensing-inventory-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Informational Licensing Inventory: INCOMPLETE" >> "$GITHUB_STEP_SUMMARY"
+            echo "Report generation did not complete; see step logs for tool diagnostics." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Licensing Inventory Reports Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: precisioncad-licensing-inventory-${{ github.sha }}
+          path: reports/licensing/
+          if-no-files-found: warn
+          retention-days: 30

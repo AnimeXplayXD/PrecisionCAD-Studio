@@ -28,7 +28,7 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      - name: Install required Android SDK packages
+      - name: Install required Android SDK packages (API 37.2 & Build-Tools 37.0.0)
         shell: bash
         run: |
           set +o pipefail
@@ -36,13 +36,14 @@ jobs:
           set -o pipefail
           sdkmanager --install \
             "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+            "platforms;android-37.2" \
+            "build-tools;37.0.0"
 
-      - name: Setup Gradle 9.3.1
+      - name: Setup Gradle Wrapper
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
+
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
 
       - name: Prepare .env File for Secrets Gradle Plugin
         run: |
@@ -50,8 +51,10 @@ jobs:
             cp .env.example .env
           fi
 
-      - name: Prepare Debug & Release Signing Keystores for Lint Configuration
+      - name: Prepare Disposable Non-Production Keystores for Lint Variant Evaluation Only
         run: |
+          # Note: Used exclusively so AGP can evaluate variant signingConfig file paths during lintRelease.
+          # Never used to sign or publish any Release APK.
           if [ -f "debug.keystore.base64" ]; then
             base64 --decode debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
@@ -66,27 +69,26 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          if [ ! -f "${GITHUB_WORKSPACE}/my-upload-key.jks" ]; then
-            FALLBACK_PASS="precisioncad_release_2026"
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-              -storetype JKS \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -alias upload \
-              -storepass "$FALLBACK_PASS" \
-              -keypass "$FALLBACK_PASS" \
-              -dname "CN=PrecisionCAD Studio, OU=Engineering, O=PrecisionCAD, L=Tokyo, S=Tokyo, C=JP"
-            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
-            echo "STORE_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=upload" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
-          fi
+          THROW_KEY="${RUNNER_TEMP}/lint-throwaway-nonprod.jks"
+          THROW_PASS="lint_only_nonprod_throwaway"
+          keytool -genkeypair -v \
+            -keystore "$THROW_KEY" \
+            -storetype JKS \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 365 \
+            -alias upload \
+            -storepass "$THROW_PASS" \
+            -keypass "$THROW_PASS" \
+            -dname "CN=Lint Throwaway Non-Production, OU=CI, O=NonProd, L=Local, S=NA, C=US"
+          echo "KEYSTORE_PATH=${THROW_KEY}" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${THROW_PASS}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=upload" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${THROW_PASS}" >> "$GITHUB_ENV"
 
-      - name: Run Android Lint (lintRelease)
+      - name: Run Android Lint (./gradlew :app:lintRelease)
         run: |
-          gradle lintRelease --no-daemon --stacktrace
+          ./gradlew :app:lintRelease --no-daemon --stacktrace
 
       - name: Upload Lint Report Artifacts
         if: always()

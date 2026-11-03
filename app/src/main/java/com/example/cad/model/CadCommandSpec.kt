@@ -1,5 +1,7 @@
 package com.example.cad.model
 
+import java.util.Locale
+
 enum class CadCommandCategory(val label: String) {
     DRAW("Draw (2D Geometry)"),
     MODIFY("Modify & Edit"),
@@ -79,7 +81,7 @@ enum class CadCommandId(
 
     companion object {
         fun fromText(input: String): CadCommandId? {
-            val token = input.trim().uppercase()
+            val token = input.trim().uppercase(Locale.ROOT)
             if (token.isEmpty()) return null
             // 1. Check exact primary alias or commandName on CadCommandId
             entries.firstOrNull {
@@ -118,7 +120,7 @@ object CadCommandCompatibilityCatalog {
      * Unrelated commands that do not match the prefix are excluded.
      */
     fun rankSuggestionsForPrefix(rawQuery: String): List<CadCommandCompatibilitySpec> {
-        val q = rawQuery.trim().uppercase()
+        val q = rawQuery.trim().uppercase(Locale.ROOT)
         if (q.isEmpty()) return emptyList()
         // If user is typing a coordinate expression (contains ',', '<', '@', or starts with digit/minus), do not show command suggestions
         if (q.startsWith("@") || q.contains(",") || q.contains("<") || q.first().isDigit() || q.startsWith("-")) {
@@ -130,10 +132,10 @@ object CadCommandCompatibilityCatalog {
         val matches = mutableListOf<RankedSpec>()
         for (spec in allSpecs) {
             val cmd = spec.id
-            val cmdName = cmd.commandName.uppercase()
-            val primaryAlias = cmd.primaryAlias.uppercase()
-            val shortLabel = cmd.shortLabel.uppercase()
-            val upperAliases = spec.aliases.map { it.uppercase() }
+            val cmdName = cmd.commandName.uppercase(Locale.ROOT)
+            val primaryAlias = cmd.primaryAlias.uppercase(Locale.ROOT)
+            val shortLabel = cmd.shortLabel.uppercase(Locale.ROOT)
+            val upperAliases = spec.aliases.map { it.uppercase(Locale.ROOT) }
 
             val tier: Int? = when {
                 primaryAlias == q -> 1

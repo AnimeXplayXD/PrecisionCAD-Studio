@@ -16,20 +16,28 @@ on:
       build_variant:
         description: 'APK variant to build (release, debug, or both)'
         required: true
-        default: 'both'
+        default: 'release'
         type: choice
         options:
-          - both
           - release
           - debug
+          - both
       version_name_override:
-        description: 'Optional versionName override (e.g., 1.2.0)'
+        description: 'Optional versionName override (e.g., 1.18.0)'
         required: false
         default: ''
         type: string
+      publish_release:
+        description: 'Publish signed Release APK to GitHub Releases (requires release variant + signing secrets)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
+
+env:
+  PRIMARY_RELEASE_BRANCH: main
 
 jobs:
   build-signed-apk:
@@ -39,6 +47,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -51,7 +61,7 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      - name: Install required Android SDK packages
+      - name: Install required Android SDK packages (API 37.2 & Build-Tools 37.0.0)
         shell: bash
         run: |
           set +o pipefail
@@ -59,22 +69,62 @@ jobs:
           set -o pipefail
           sdkmanager --install \
             "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+            "platforms;android-37.2" \
+            "build-tools;37.0.0"
 
-      - name: Setup Gradle 9.3.1
+      - name: Setup Gradle Wrapper
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
 
-      - name: Compute Automated Version Code & Version Name
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
+      - name: Compute Automated Version Code, Version Name & Monotonicity Check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          BASE_CODE=$(grep -E '^VERSION_CODE=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "1")
+          BASE_CODE=$(grep -E '^VERSION_CODE=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "18")
           MAJOR=$(grep -E '^VERSION_MAJOR=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "1")
-          MINOR=$(grep -E '^VERSION_MINOR=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "0")
+          MINOR=$(grep -E '^VERSION_MINOR=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "18")
           PATCH=$(grep -E '^VERSION_PATCH=' version.properties 2>/dev/null | cut -d'=' -f2 || echo "0")
 
           COMPUTED_VERSION_CODE=$((BASE_CODE + GITHUB_RUN_NUMBER))
+
+          # Query latest published stable release versionCode if any exists in GitHub Releases
+          LATEST_PUBLISHED_CODE=0
+          RELEASES_JSON=$(curl -sfL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30" || echo "[]")
+          PARSED_MAX_CODE=$(python3 -c '
+          import json, re, sys
+          try:
+              releases = json.loads(sys.stdin.read())
+          except Exception:
+              releases = []
+          max_code = 0
+          for rel in releases:
+              if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+                  continue
+              body = rel.get("body") or ""
+              m = re.search(r"versionCode:\s*(\d+)", body)
+              if m:
+                  max_code = max(max_code, int(m.group(1)))
+              tag = rel.get("tag_name") or ""
+              m2 = re.search(r"-b(\d+)$", tag)
+              if m2:
+                  max_code = max(max_code, int(m2.group(1)))
+          print(max_code)
+          ' <<< "$RELEASES_JSON")
+
+          if [ -n "$PARSED_MAX_CODE" ] && [ "$PARSED_MAX_CODE" -gt 0 ]; then
+            LATEST_PUBLISHED_CODE="$PARSED_MAX_CODE"
+          fi
+
+          if [ "$COMPUTED_VERSION_CODE" -le "$LATEST_PUBLISHED_CODE" ]; then
+            echo "ERROR: Computed versionCode ($COMPUTED_VERSION_CODE) is not strictly greater than latest published stable versionCode ($LATEST_PUBLISHED_CODE)."
+            exit 1
+          fi
+
           if [ -n "${{ github.event.inputs.version_name_override }}" ]; then
             COMPUTED_VERSION_NAME="${{ github.event.inputs.version_name_override }}"
           elif [[ "${GITHUB_REF_NAME}" == v* ]]; then
@@ -83,18 +133,26 @@ jobs:
             COMPUTED_VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}.${GITHUB_RUN_NUMBER}"
           fi
 
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
           if [[ "${GITHUB_REF_NAME}" == v* ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
           else
-            RELEASE_TAG="v${COMPUTED_VERSION_NAME}-b${COMPUTED_VERSION_CODE}"
+            RELEASE_TAG="v${COMPUTED_VERSION_NAME}-b${COMPUTED_VERSION_CODE}-${SHORT_SHA}"
+          fi
+
+          COMMIT_SUBJECT=$(git log -1 --pretty=%s | tr -d '\r')
+          if [ -z "$COMMIT_SUBJECT" ]; then
+            COMMIT_SUBJECT="PrecisionCAD Studio v${COMPUTED_VERSION_NAME} (build ${COMPUTED_VERSION_CODE})"
           fi
 
           echo "VERSION_CODE=${COMPUTED_VERSION_CODE}" >> "$GITHUB_ENV"
           echo "VERSION_NAME=${COMPUTED_VERSION_NAME}" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE_TITLE=${COMMIT_SUBJECT}" >> "$GITHUB_ENV"
+
           echo "### PrecisionCAD Studio Build Version" >> "$GITHUB_STEP_SUMMARY"
           echo "- **applicationId**: \`com.precisioncad.studio\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **versionCode**: \`${COMPUTED_VERSION_CODE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **versionCode**: \`${COMPUTED_VERSION_CODE}\` (previous max stable: \`${LATEST_PUBLISHED_CODE}\`)" >> "$GITHUB_STEP_SUMMARY"
           echo "- **versionName**: \`${COMPUTED_VERSION_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **releaseTag**: \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
 
@@ -120,81 +178,96 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Prepare Release Signing Keystore (my-upload-key.jks)
+      - name: Prepare Persistent Release Signing Keystore (Fail-Closed Policy)
+        if: ${{ github.event_name != 'pull_request' && github.event.inputs.build_variant != 'debug' }}
         env:
           SECRET_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 }}
           SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
           SECRET_KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS }}
           SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
         run: |
-          if [ -n "$SECRET_KEYSTORE_BASE64" ] && [ -n "$SECRET_STORE_PASSWORD" ] && [ -n "$SECRET_KEY_PASSWORD" ]; then
-            echo "Using repository release signing secrets for release APK signing..."
-            echo "$SECRET_KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
-            RESOLVED_ALIAS="${SECRET_KEY_ALIAS:-upload}"
-            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
-            echo "STORE_PASSWORD=${SECRET_STORE_PASSWORD}" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=${RESOLVED_ALIAS}" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> "$GITHUB_ENV"
-          else
-            echo "Generating deterministic release keystore (alias: upload) for CI build verification..."
-            FALLBACK_PASS="precisioncad_release_2026"
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-              -storetype JKS \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -alias upload \
-              -storepass "$FALLBACK_PASS" \
-              -keypass "$FALLBACK_PASS" \
-              -dname "CN=PrecisionCAD Studio, OU=Engineering, O=PrecisionCAD, L=Tokyo, S=Tokyo, C=JP"
-            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
-            echo "STORE_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=upload" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
+          if [ -z "$SECRET_KEYSTORE_BASE64" ] || [ -z "$SECRET_STORE_PASSWORD" ] || [ -z "$SECRET_KEY_PASSWORD" ]; then
+            echo "ERROR: Missing required production release signing secrets (KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD)."
+            echo "Production Release builds fail closed and never generate a replacement signing key."
+            exit 1
           fi
 
+          KEYSTORE_FILE="${RUNNER_TEMP}/precisioncad-release.jks"
+          echo "$SECRET_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          RESOLVED_ALIAS="${SECRET_KEY_ALIAS:-upload}"
+
+          if [ -n "$EXPECTED_CERT_SHA256" ]; then
+            ACTUAL_CERT_SHA256=$(keytool -list -v -keystore "$KEYSTORE_FILE" -storepass "$SECRET_STORE_PASSWORD" -alias "$RESOLVED_ALIAS" \
+              | grep -i "SHA256:" | head -n 1 | awk '{print $2}' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+            CLEAN_EXPECTED=$(echo "$EXPECTED_CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')
+            if [ "$ACTUAL_CERT_SHA256" != "$CLEAN_EXPECTED" ]; then
+              echo "ERROR: Release keystore SHA-256 certificate fingerprint does not match expected trusted fingerprint."
+              exit 1
+            fi
+          fi
+
+          echo "KEYSTORE_PATH=${KEYSTORE_FILE}" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${SECRET_STORE_PASSWORD}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${RESOLVED_ALIAS}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> "$GITHUB_ENV"
+
+      - name: Run Unit Tests & Release Lint Before Assembly
+        run: |
+          ./gradlew :app:testDebugUnitTest :app:lintRelease --no-daemon --stacktrace
+
       - name: Build Signed Release APK
-        if: ${{ github.event.inputs.build_variant != 'debug' }}
+        if: ${{ github.event_name != 'pull_request' && github.event.inputs.build_variant != 'debug' }}
         run: |
-          gradle :app:assembleRelease --no-daemon --stacktrace
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
-      - name: Build Signed Debug APK
-        if: ${{ github.event.inputs.build_variant != 'release' }}
+      - name: Build Debug APK
+        if: ${{ github.event_name == 'pull_request' || github.event.inputs.build_variant == 'debug' || github.event.inputs.build_variant == 'both' }}
         run: |
-          gradle :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Verify Single APK Output, Signatures & Generate SHA256SUMS.txt
+      - name: Verify Single APK Output, Signatures & Generate Release Metadata
         run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
           rm -f SHA256SUMS.txt
 
-          if [ "${{ github.event.inputs.build_variant }}" != "debug" ]; then
+          if [ "${{ github.event_name }}" != "pull_request" ] && [ "${{ github.event.inputs.build_variant }}" != "debug" ]; then
             RELEASE_APK_COUNT=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | wc -l)
             if [ "$RELEASE_APK_COUNT" -ne 1 ]; then
               echo "ERROR: Expected exactly 1 release APK, found $RELEASE_APK_COUNT"
               exit 1
             fi
-            echo "Verifying Signed Release APK:"
-            "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
-            RELEASE_CANONICAL="PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-signed-release.apk"
-            cp app/build/outputs/apk/release/app-release.apk "$RELEASE_CANONICAL"
-            cp app/build/outputs/apk/release/app-release.apk PrecisionCAD-Studio-release-signed.apk
-            sha256sum "$RELEASE_CANONICAL" >> SHA256SUMS.txt
+            RAW_RELEASE_APK=$(find app/build/outputs/apk/release -maxdepth 1 -name "*.apk" | head -n 1)
+            "$APKSIGNER" verify --verbose --print-certs "$RAW_RELEASE_APK"
+
+            BADGING=$("$AAPT2" dump badging "$RAW_RELEASE_APK")
+            echo "$BADGING" | grep -q "package: name='com.precisioncad.studio'" || {
+              echo "ERROR: APK package ID is not com.precisioncad.studio"
+              exit 1
+            }
+
+            RELEASE_APK_NAME="PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-release.apk"
+            cp "$RAW_RELEASE_APK" "$RELEASE_APK_NAME"
+            RELEASE_SHA256=$(sha256sum "$RELEASE_APK_NAME" | awk '{print $1}')
+            echo "${RELEASE_SHA256}  ${RELEASE_APK_NAME}" >> SHA256SUMS.txt
+            echo "RELEASE_APK_NAME=${RELEASE_APK_NAME}" >> "$GITHUB_ENV"
+            echo "RELEASE_SHA256=${RELEASE_SHA256}" >> "$GITHUB_ENV"
           fi
 
-          if [ "${{ github.event.inputs.build_variant }}" != "release" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event.inputs.build_variant }}" = "debug" ] || [ "${{ github.event.inputs.build_variant }}" = "both" ]; then
             DEBUG_APK_COUNT=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | wc -l)
             if [ "$DEBUG_APK_COUNT" -ne 1 ]; then
               echo "ERROR: Expected exactly 1 debug APK, found $DEBUG_APK_COUNT"
               exit 1
             fi
-            echo "Verifying Signed Debug APK:"
-            "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk
-            DEBUG_CANONICAL="PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-debug.apk"
-            cp app/build/outputs/apk/debug/app-debug.apk "$DEBUG_CANONICAL"
-            cp app/build/outputs/apk/debug/app-debug.apk PrecisionCAD-Studio-debug-signed.apk
-            sha256sum "$DEBUG_CANONICAL" >> SHA256SUMS.txt
+            RAW_DEBUG_APK=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n 1)
+            "$APKSIGNER" verify --verbose --print-certs "$RAW_DEBUG_APK"
+            DEBUG_APK_NAME="PrecisionCAD-Studio-v${VERSION_NAME}-b${VERSION_CODE}-debug.apk"
+            cp "$RAW_DEBUG_APK" "$DEBUG_APK_NAME"
+            DEBUG_SHA256=$(sha256sum "$DEBUG_APK_NAME" | awk '{print $1}')
+            echo "${DEBUG_SHA256}  ${DEBUG_APK_NAME}" >> SHA256SUMS.txt
+            echo "DEBUG_APK_NAME=${DEBUG_APK_NAME}" >> "$GITHUB_ENV"
           fi
 
           if [ -f "SHA256SUMS.txt" ]; then
@@ -204,36 +277,128 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload Signed Release APK Artifact
-        if: ${{ github.event.inputs.build_variant != 'debug' }}
+      - name: Upload Direct Signed Release APK Artifact (Single File, Unarchived)
+        if: ${{ github.event_name != 'pull_request' && github.event.inputs.build_variant != 'debug' }}
         uses: actions/upload-artifact@v4
         with:
-          name: PrecisionCAD-Studio-Signed-Release-APK-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}
-          path: |
-            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-signed-release.apk
-            SHA256SUMS.txt
+          name: ${{ env.RELEASE_APK_NAME }}
+          path: ${{ env.RELEASE_APK_NAME }}
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload Signed Debug APK Artifact
-        if: ${{ github.event.inputs.build_variant != 'release' }}
+      - name: Upload Direct Debug APK Artifact (Single File, Unarchived)
+        if: ${{ github.event_name == 'pull_request' || github.event.inputs.build_variant == 'debug' || github.event.inputs.build_variant == 'both' }}
         uses: actions/upload-artifact@v4
         with:
-          name: PrecisionCAD-Studio-Debug-APK-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}
-          path: |
-            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-debug.apk
-            SHA256SUMS.txt
+          name: ${{ env.DEBUG_APK_NAME }}
+          path: ${{ env.DEBUG_APK_NAME }}
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Publish Signed APKs to Public GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+      - name: Upload SHA256 Checksums Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-SHA256SUMS.txt
+          path: SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Generate Structured Release Body & Machine-Readable Metadata
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event.inputs.build_variant != 'debug' &&
+          (
+            (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+          )
+        run: |
+          python3 - << 'EOF'
+          import os, subprocess, re
+
+          prev_tag = ""
+          try:
+              tags = subprocess.check_output(["git", "tag", "--sort=-creatordate"], text=True).splitlines()
+              cur_tag = os.environ.get("RELEASE_TAG", "")
+              for t in tags:
+                  if t.strip() and t.strip() != cur_tag:
+                      prev_tag = t.strip()
+                      break
+          except Exception:
+              prev_tag = ""
+
+          log_range = f"{prev_tag}..HEAD" if prev_tag else "-n 15"
+          cmd = ["git", "log", "--pretty=%s"] + ( [log_range] if prev_tag else ["-n", "15"] )
+          try:
+              subjects = [s.strip() for s in subprocess.check_output(cmd, text=True).splitlines() if s.strip()]
+          except Exception:
+              subjects = [os.environ.get("RELEASE_TITLE", "Release update")]
+
+          groups = {"New": [], "Fixes": [], "Optimisations": [], "Security": [], "Other": []}
+          for s in subjects:
+              low = s.lower()
+              if any(k in low for k in ["sec", "cve", "vuln", "auth", "verify", "signature", "digest"]):
+                  groups["Security"].append(s)
+              elif any(k in low for k in ["fix", "bug", "resolv", "repair", "hotfix", "regress", "lint"]):
+                  groups["Fixes"].append(s)
+              elif any(k in low for k in ["perf", "optim", "speed", "cache", "fast", "memory"]):
+                  groups["Optimisations"].append(s)
+              elif any(k in low for k in ["feat", "add", "new", "implement", "introduce", "support"]):
+                  groups["New"].append(s)
+              else:
+                  groups["Other"].append(s)
+
+          lines = []
+          for heading in ["New", "Fixes", "Optimisations", "Security", "Other"]:
+              items = groups[heading]
+              if items:
+                  lines.append(f"## {heading}")
+                  for item in items:
+                      lines.append(f"- {item}")
+                  lines.append("")
+
+          if not lines:
+              lines = ["## Other", f"- {os.environ.get('RELEASE_TITLE', 'PrecisionCAD Studio release')}", ""]
+
+          version_name = os.environ["VERSION_NAME"]
+          version_code = os.environ["VERSION_CODE"]
+          asset_name = os.environ["RELEASE_APK_NAME"]
+          commit_sha = os.environ["GITHUB_SHA"]
+          sha256_hex = os.environ["RELEASE_SHA256"]
+
+          lines.extend([
+              "---",
+              "",
+              "<!-- PRECISIONCAD-RELEASE-METADATA",
+              "packageId: com.precisioncad.studio",
+              f"versionName: {version_name}",
+              f"versionCode: {version_code}",
+              f"assetName: {asset_name}",
+              f"commitSha: {commit_sha}",
+              f"sha256: {sha256_hex}",
+              "channel: stable",
+              "-->"
+          ])
+
+          with open("RELEASE_NOTES.md", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          EOF
+
+      - name: Publish Single Production Release APK to Public GitHub Release
+        if: >-
+          github.event_name != 'pull_request' &&
+          github.event.inputs.build_variant != 'debug' &&
+          (
+            (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+          )
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: PrecisionCAD Studio ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TITLE }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
           files: |
-            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-signed-release.apk
-            PrecisionCAD-Studio-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}-debug.apk
-            SHA256SUMS.txt
-          generate_release_notes: true
+            ${{ env.RELEASE_APK_NAME }}
+          generate_release_notes: false

@@ -1,10 +1,16 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,15 +36,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
@@ -398,6 +403,11 @@ fun VirtualCursorControllerDeck(
                             modifier = Modifier.size(18.dp)
                         )
                     }
+                    val collapseChevronRotation by animateFloatAsState(
+                        targetValue = if (config.isCollapsed) 0f else 180f,
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        label = "CollapseChevronRotation"
+                    )
                     IconButton(
                         onClick = onToggleCollapse,
                         modifier = Modifier
@@ -405,20 +415,33 @@ fun VirtualCursorControllerDeck(
                             .testTag("controller_collapse_button")
                     ) {
                         Icon(
-                            imageVector = if (config.isCollapsed) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            imageVector = Icons.Default.ExpandLess,
                             contentDescription = if (config.isCollapsed) "Expand Cursor Controller" else "Collapse Cursor Controller",
                             tint = CadTextSecondary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier
+                                .size(18.dp)
+                                .graphicsLayer { rotationZ = collapseChevronRotation }
                         )
                     }
                 }
             }
 
-            if (!config.isCollapsed) {
-                Spacer(modifier = Modifier.height(6.dp))
+            AnimatedVisibility(
+                visible = !config.isCollapsed,
+                enter = expandVertically(
+                    expandFrom = Alignment.Bottom,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                exit = shrinkVertically(
+                    shrinkTowards = Alignment.Bottom,
+                    animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing)
+                ) + fadeOut(animationSpec = tween(durationMillis = 150))
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                // Step Increment Selector Strip (Available in both modes per Section 39.1)
-                Row(
+                    // Step Increment Selector Strip (Available in both modes per Section 39.1)
+                    Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
@@ -773,6 +796,7 @@ fun VirtualCursorControllerDeck(
                         }
                     }
                 }
+                }
             }
         }
     }
@@ -803,7 +827,7 @@ private fun StepNudgePad(
         ) {
             // LEFT (-X)
             NudgeButton(
-                icon = Icons.Default.KeyboardArrowLeft,
+                icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                 contentDescription = "Step Cursor -X",
                 tag = "nudge_left_button",
                 onClick = { onStepNudge(-stepIncrement, 0.0) }
@@ -816,7 +840,7 @@ private fun StepNudgePad(
             )
             // RIGHT (+X)
             NudgeButton(
-                icon = Icons.Default.KeyboardArrowRight,
+                icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = "Step Cursor +X",
                 tag = "nudge_right_button",
                 onClick = { onStepNudge(stepIncrement, 0.0) }
@@ -859,11 +883,11 @@ private fun NudgeButton(
 }
 
 /**
- * Section 8 — Touchpad / Joystick Vertical-Peek Two-Card Selector.
- * - Replaces the two adjacent mode tabs with a single vertical-peek two-card selector.
- * - Active mode card is in front (`zIndex = 1f`, `offsetY = 2.dp`); alternate mode card peeks from above (`zIndex = 0f`, `offsetY = (-3).dp`).
- * - Touchpad card uses restrained PrecisionCAD blue (`Color(0xFF0C2330)` + `CadCyanPrimary`).
- * - Joystick card uses restrained PrecisionCAD gold (`Color(0xFF282010)` + `CadAmberSnap`).
+ * Section 8 & v18 Phase 9 — Touchpad / Joystick Vertical-Peek Two-Card Selector.
+ * - Uses isolated section-local `CadDeckIdleTimerState` (`deckId = "controller_mode_deck"`).
+ * - At rest: only the front card is visible; the rear card is completely concealed (`offsetY = 0.dp`, `scale = 0.92f`, `alpha = 0f`).
+ * - Post-exchange: rear card peeks from above (`offsetY = (-4).dp`, `scale = 0.94f`, `alpha = 0.88f`) for `2,400ms`, then hides.
+ * - Idle reminder: after `75s` of deck-local inactivity, rear card peeks from above for `1,000ms`, then hides.
  * - Tap-only interaction with animation-in-flight lock (`transition.currentState != transition.targetState`); no swipe gesture.
  */
 @Composable
@@ -876,29 +900,56 @@ fun ControllerModeVerticalPeekCardSelector(
     val transition = updateTransition(targetState = isTouchpad, label = "ControllerModePeekTransition")
     val isAnimating = transition.currentState != transition.targetState
     val interactionSource = remember { MutableInteractionSource() }
+    val deckTimerState = rememberCadDeckIdleTimerState(
+        deckId = "controller_mode_deck",
+        isVisibleAndInteractive = true,
+        peekDirection = CardPeekDirection.ABOVE
+    )
+    val isRearRevealed = deckTimerState.isRearCardRevealed
 
-    val touchpadOffsetY by transition.animateDp(
-        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+    val touchpadTargetOffsetY = when {
+        isTouchpad -> if (isRearRevealed) 2.dp else 0.dp
+        isRearRevealed -> (-4).dp
+        else -> 0.dp
+    }
+    val touchpadOffsetY by animateDpAsState(
+        targetValue = touchpadTargetOffsetY,
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
         label = "TouchpadOffsetY"
-    ) { tp -> if (tp) 2.dp else (-3).dp }
-
+    )
     val touchpadScale by transition.animateFloat(
         transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
         label = "TouchpadScale"
-    ) { tp -> if (tp) 1.0f else 0.94f }
+    ) { tp -> if (tp) 1.0f else if (isRearRevealed) 0.94f else 0.92f }
+    val touchpadAlpha by animateFloatAsState(
+        targetValue = if (isTouchpad) 1f else if (isRearRevealed) 0.88f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "TouchpadAlpha"
+    )
 
-    val joystickOffsetY by transition.animateDp(
-        transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
+    val joystickTargetOffsetY = when {
+        !isTouchpad -> if (isRearRevealed) 2.dp else 0.dp
+        isRearRevealed -> (-4).dp
+        else -> 0.dp
+    }
+    val joystickOffsetY by animateDpAsState(
+        targetValue = joystickTargetOffsetY,
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
         label = "JoystickOffsetY"
-    ) { tp -> if (!tp) 2.dp else (-3).dp }
-
+    )
     val joystickScale by transition.animateFloat(
         transitionSpec = { tween(durationMillis = 200, easing = FastOutSlowInEasing) },
         label = "JoystickScale"
-    ) { tp -> if (!tp) 1.0f else 0.94f }
+    ) { tp -> if (!tp) 1.0f else if (isRearRevealed) 0.94f else 0.92f }
+    val joystickAlpha by animateFloatAsState(
+        targetValue = if (!isTouchpad) 1f else if (isRearRevealed) 0.88f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "JoystickAlpha"
+    )
 
     val toggleMode: () -> Unit = {
         if (!isAnimating) {
+            deckTimerState.onCardExchange(isCommandPromptOrDeck = false)
             val next = if (isTouchpad) {
                 VirtualControllerMode.VELOCITY_JOYSTICK
             } else {
@@ -914,9 +965,9 @@ fun ControllerModeVerticalPeekCardSelector(
             .height(34.dp)
             .semantics {
                 contentDescription = if (isTouchpad) {
-                    "Controller Mode: Touchpad active (Joystick peeking above)"
+                    "Controller Mode: Touchpad active"
                 } else {
-                    "Controller Mode: Joystick active (Touchpad peeking above)"
+                    "Controller Mode: Joystick active"
                 }
             }
             .clickable(
@@ -936,7 +987,7 @@ fun ControllerModeVerticalPeekCardSelector(
                 .graphicsLayer {
                     scaleX = touchpadScale
                     scaleY = touchpadScale
-                    alpha = if (isTouchpad) 1f else 0.85f
+                    alpha = touchpadAlpha
                 }
                 .fillMaxWidth()
                 .height(27.dp)
@@ -947,16 +998,14 @@ fun ControllerModeVerticalPeekCardSelector(
                     color = if (isTouchpad) CadCyanPrimary else CadCyanPrimary.copy(alpha = 0.55f),
                     shape = RoundedCornerShape(6.dp)
                 )
-                .clickable(
-                    enabled = !isAnimating,
-                    onClick = {
-                        if (!isAnimating) {
-                            if (isTouchpad) {
-                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
-                            } else {
-                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
-                            }
-                        }
+                .then(
+                    if (isTouchpad) {
+                        Modifier.clickable(
+                            enabled = !isAnimating,
+                            onClick = toggleMode
+                        )
+                    } else {
+                        Modifier
                     }
                 )
                 .padding(horizontal = 7.dp)
@@ -990,7 +1039,7 @@ fun ControllerModeVerticalPeekCardSelector(
                 .graphicsLayer {
                     scaleX = joystickScale
                     scaleY = joystickScale
-                    alpha = if (!isTouchpad) 1f else 0.85f
+                    alpha = joystickAlpha
                 }
                 .fillMaxWidth()
                 .height(27.dp)
@@ -1001,16 +1050,14 @@ fun ControllerModeVerticalPeekCardSelector(
                     color = if (!isTouchpad) CadAmberSnap else CadAmberSnap.copy(alpha = 0.55f),
                     shape = RoundedCornerShape(6.dp)
                 )
-                .clickable(
-                    enabled = !isAnimating,
-                    onClick = {
-                        if (!isAnimating) {
-                            if (!isTouchpad) {
-                                onModeChange(VirtualControllerMode.RELATIVE_TOUCHPAD)
-                            } else {
-                                onModeChange(VirtualControllerMode.VELOCITY_JOYSTICK)
-                            }
-                        }
+                .then(
+                    if (!isTouchpad) {
+                        Modifier.clickable(
+                            enabled = !isAnimating,
+                            onClick = toggleMode
+                        )
+                    } else {
+                        Modifier
                     }
                 )
                 .padding(horizontal = 7.dp)
@@ -1037,4 +1084,5 @@ fun ControllerModeVerticalPeekCardSelector(
         }
     }
 }
+
 

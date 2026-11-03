@@ -56,7 +56,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoFixHigh
@@ -69,10 +71,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -87,12 +87,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -118,6 +120,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.cad.data.CadProjectMetadataEntity
@@ -130,19 +135,25 @@ import com.example.cad.model.CadCommandCategory
 import com.example.cad.model.CadCommandCompatibilityCatalog
 import com.example.cad.model.CadCommandId
 import com.example.cad.model.CadEntity
+import com.example.cad.model.CadNumberFormatter
 import com.example.cad.model.CadUnit
 import com.example.cad.model.HatchPattern
 import com.example.cad.model.Point2D
 import com.example.cad.model.UnitChangeMode
 import com.example.cad.model.VirtualControllerMode
 import com.example.cad.model.WorkspaceSpace
+import com.example.cad.update.CadReleaseEntry
+import com.example.cad.update.CadUpdateUiState
 import java.util.Locale
+import com.example.ui.components.CadDeckIdleTimerState
+import com.example.ui.components.CadReleaseCatalogueDialog
 import com.example.ui.components.CadViewportCanvas
 import com.example.ui.components.CommandCompatibilityMatrixDialog
 import com.example.ui.components.ControllerAndSnapSettingsDialog
 import com.example.ui.components.ControllerDockState
 import com.example.ui.components.DirectCoordinateInputDialog
 import com.example.ui.components.DxfAndProjectHubDialog
+import com.example.ui.components.HomeUpdateStatusIcon
 import com.example.ui.components.LayerAndBlockManagerDialog
 import com.example.ui.components.PropertiesAndConstraintsDialog
 import com.example.ui.components.QuickDimensionDialog
@@ -177,8 +188,24 @@ fun CadWorkspaceScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val savedProjects by viewModel.savedProjects.collectAsStateWithLifecycle()
+    val releaseCatalogue by viewModel.releaseCatalogue.collectAsStateWithLifecycle()
+    val updatesBehindCount by viewModel.updatesBehindCount.collectAsStateWithLifecycle()
+    val updateUiState by viewModel.updateUiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val density = LocalDensity.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onHostActivityResumed()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Dialog states preserved across orientation changes
     var showUnitsDialog by rememberSaveable { mutableStateOf(false) }
@@ -240,6 +267,9 @@ fun CadWorkspaceScreen(
         CadHomeScreen(
             savedProjects = savedProjects,
             displayUnit = uiState.displayUnit,
+            updatesBehindCount = updatesBehindCount,
+            updateUiState = updateUiState,
+            onOpenReleaseCatalogue = viewModel::openReleaseCatalogue,
             onNewBlankDrawing = { name, unit ->
                 viewModel.startNewBlankDrawing(name, unit)
             },
@@ -259,6 +289,18 @@ fun CadWorkspaceScreen(
                 viewModel.deleteSavedProject(projectId)
             }
         )
+        if (uiState.isReleaseCatalogueOpen) {
+            CadReleaseCatalogueDialog(
+                releases = releaseCatalogue,
+                updatesBehindCount = updatesBehindCount,
+                updateUiState = updateUiState,
+                onRefreshCatalogue = viewModel::refreshReleaseCatalogue,
+                onDownloadRelease = viewModel::startUpdateDownload,
+                onRequestInstall = viewModel::requestInstallVerifiedUpdate,
+                onCancelOrReset = viewModel::cancelUpdateAction,
+                onDismiss = viewModel::closeReleaseCatalogue
+            )
+        }
         return
     }
 
@@ -386,13 +428,14 @@ fun CadWorkspaceScreen(
                     )
                 }
 
-                // 3. Bottom Overlay Stack: Separated into Upper Command Region (.imePadding) + Lower Stationary Controller Region (No .imePadding)
-                // Section 3 (v17): Upper command region rises above software keyboard; lower controller deck stays anchored at screen bottom.
+                // 3. Bottom Overlay Stack: Separated into Upper Command Region (Single Authoritative IME Offset) + Lower Stationary Controller Region (No .imePadding)
+                // Phase 11.2 (v18): Single authoritative bottom-offset calculation (`maxOf(controllerDeckHeightPx, imeBottomPx)`)
+                // eliminates double IME compensation while keeping the lower controller dock anchored at screen bottom.
                 var controllerDeckHeightPx by remember { mutableFloatStateOf(with(density) { 188.dp.toPx() }) }
                 var upperCommandRegionHeightPx by remember { mutableFloatStateOf(with(density) { 92.dp.toPx() }) }
                 val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
-                val restBottomOffsetDp = with(density) {
-                    (controllerDeckHeightPx - imeBottomPx).coerceAtLeast(0f).toDp()
+                val upperRegionBottomOffsetDp = with(density) {
+                    maxOf(controllerDeckHeightPx, imeBottomPx).toDp()
                 }
 
                 LaunchedEffect(controllerDeckHeightPx, upperCommandRegionHeightPx) {
@@ -435,13 +478,12 @@ fun CadWorkspaceScreen(
                     )
                 }
 
-                // 3B. Upper Command Region (OverviewOverlayCard + ContextualCommandAndOptionsDock — rises with .imePadding())
+                // 3B. Upper Command Region (OverviewOverlayCard + ContextualCommandAndOptionsDock — single authoritative bottom offset)
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(bottom = restBottomOffsetDp)
-                        .imePadding()
+                        .padding(bottom = upperRegionBottomOffsetDp)
                         .zIndex(2f)
                         .onSizeChanged { upperCommandRegionHeightPx = it.height.toFloat() }
                         .testTag("upper_command_ime_region")
@@ -1358,7 +1400,7 @@ private fun TopEngineeringHeaderBar(
                     .testTag("top_command_matrix_button"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.ListAlt, contentDescription = "Command Compatibility Matrix", tint = CadEmeraldCrossing, modifier = Modifier.size(14.dp))
+                Icon(Icons.AutoMirrored.Filled.ListAlt, contentDescription = "Command Compatibility Matrix", tint = CadEmeraldCrossing, modifier = Modifier.size(14.dp))
                 Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = "MATRIX",
@@ -1453,8 +1495,13 @@ private fun ViewportFloatingStatusHud(
             tag = "hud_toggle_grid",
             onClick = onToggleGrid
         )
+        val effectiveGridStr = CadNumberFormatter.formatDecimal(
+            uiState.effectiveGridSnapInterval,
+            decimals = 2,
+            suppressTrailingZeros = true
+        )
         HudToggleBadge(
-            label = "GSNAP (${uiState.gridSnapConfig.gridSnapInterval})",
+            label = "GSNAP ($effectiveGridStr)",
             active = uiState.gridSnapConfig.gridSnapEnabled,
             activeBg = OpaqueCyanBadgeBg,
             activeColor = CadCyanPrimary,
@@ -1485,9 +1532,9 @@ private fun ViewportFloatingStatusHud(
                 val trackLabel = if (uiState.polarPreview.activePolarAngleDeg % 1.0 == 0.0) {
                     "${uiState.polarPreview.activePolarAngleDeg.toInt()}°"
                 } else {
-                    String.format(Locale.US, "%.1f°", uiState.polarPreview.activePolarAngleDeg)
+                    String.format(Locale.ROOT, "%.1f°", uiState.polarPreview.activePolarAngleDeg)
                 }
-                "POLAR [θ=${String.format(Locale.US, "%.0f°", uiState.polarPreview.actualAngleThetaDeg ?: 0.0)} • θₚ=$trackLabel$polarSnapSuffix]"
+                "POLAR [θ=${String.format(Locale.ROOT, "%.0f°", uiState.polarPreview.actualAngleThetaDeg ?: 0.0)} • θₚ=$trackLabel$polarSnapSuffix]"
             } else {
                 "POLAR (0°–359°$polarSnapSuffix)"
             },
@@ -2010,209 +2057,223 @@ private fun ContextualCommandAndOptionsDock(
         CadCommandCompatibilityCatalog.rankSuggestionsForPrefix(commandLineInput).take(6)
     }
 
-    Surface(
+    // Phase 9.1 (v18): Unbordered floating container so the CAD canvas remains visible behind floating controls
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, CadBorderHairline),
-        color = CadPanelSurface
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .testTag("contextual_command_and_options_dock"),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        // TIER 1 (Top of Bottom Stack): Persistent Function / Action Bar (No outer container border; floating chips over canvas)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .testTag("function_action_bar"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // TIER 1 (Top of Bottom Stack): Persistent Function / Action Bar (No trailing prompt text)
+            // + Action Launcher button
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(OpaqueAmberBadgeBg)
+                    .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
+                    .clickable(onClick = onOpenActionLauncher)
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .testTag("action_launcher_fab"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "Open Action Launcher",
+                    tint = CadAmberSnap,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = "+ LAUNCHER",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CadAmberSnap,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Tool Browser Toggle (No arrow icon)
+            OpaqueChipButton(
+                label = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) "Close Tools" else "Tools Browser",
+                active = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
+                activeBg = OpaqueCyanBadgeBg,
+                activeBorder = CadCyanPrimary,
+                textColor = CadTextPrimary,
+                tag = "bottom_tools_toggle_button",
+                onClick = onToggleToolDrawer
+            )
+
+            // PICK PT affordance in Function Bar when awaiting point or in Relative Touchpad mode
+            if (isRunningActiveCommand || uiState.controllerConfig.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
+                OpaqueChipButton(
+                    label = "PICK PT",
+                    active = true,
+                    activeBg = OpaqueCyanBadgeBg,
+                    activeBorder = CadCyanPrimary,
+                    textColor = CadCyanPrimary,
+                    tag = "function_bar_pick_point_button",
+                    onClick = onPickPointAtCursor
+                )
+            }
+
+            OpaqueChipButton(
+                label = "FIT",
+                active = false,
+                activeBg = CadPanelElevated,
+                activeBorder = CadBorderHairline,
+                textColor = CadTextPrimary,
+                tag = "function_bar_fit_button",
+                onClick = onFitDrawing
+            )
+
+            OpaqueChipButton(
+                label = if (uiState.isQuickDimensionEnabled) "QDIM: ON" else "QDIM",
+                active = uiState.isQuickDimensionEnabled,
+                activeBg = OpaqueEmeraldBadgeBg,
+                activeBorder = CadEmeraldCrossing,
+                textColor = if (uiState.isQuickDimensionEnabled) CadEmeraldCrossing else CadTextPrimary,
+                tag = "function_bar_qdim_button",
+                onClick = onOpenQDimDialog
+            )
+
+            // Selection quick actions when objects are selected
+            if (uiState.selectedEntityIds.isNotEmpty()) {
+                OpaqueChipButton(
+                    label = "Props (${uiState.selectedEntityIds.size})",
+                    active = true,
+                    activeBg = OpaqueAmberBadgeBg,
+                    activeBorder = CadAmberSnap,
+                    textColor = CadAmberSnap,
+                    onClick = onOpenProperties
+                )
+                OpaqueChipButton(
+                    label = "Erase",
+                    active = true,
+                    activeBg = OpaqueRedBadgeBg,
+                    activeBorder = CadRedAlert,
+                    textColor = CadRedAlert,
+                    onClick = onDeleteSelected
+                )
+                OpaqueChipButton(
+                    label = "Deselect",
+                    active = false,
+                    activeBg = CadPanelElevated,
+                    activeBorder = CadBorderHairline,
+                    textColor = CadTextSecondary,
+                    onClick = onClearSelection
+                )
+            }
+        }
+
+        // Ranked Prefix Autocomplete Strip (when typing a command prefix)
+        if (commandLineInput.isNotBlank() && rankedSuggestions.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .testTag("function_action_bar"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .testTag("command_suggestion_strip"),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // + Action Launcher button
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(OpaqueAmberBadgeBg)
-                        .border(1.dp, CadAmberSnap, RoundedCornerShape(6.dp))
-                        .clickable(onClick = onOpenActionLauncher)
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                        .testTag("action_launcher_fab"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Open Action Launcher",
-                        tint = CadAmberSnap,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = "+ LAUNCHER",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CadAmberSnap,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // Tool Browser Toggle (No arrow icon)
-                OpaqueChipButton(
-                    label = if (uiState.toolDrawerState == ToolDrawerState.EXPANDED) "Close Tools" else "Tools Browser",
-                    active = uiState.toolDrawerState == ToolDrawerState.EXPANDED,
-                    activeBg = OpaqueCyanBadgeBg,
-                    activeBorder = CadCyanPrimary,
-                    textColor = CadTextPrimary,
-                    tag = "bottom_tools_toggle_button",
-                    onClick = onToggleToolDrawer
-                )
-
-                // PICK PT affordance in Function Bar when awaiting point or in Relative Touchpad mode
-                if (isRunningActiveCommand || uiState.controllerConfig.mode == VirtualControllerMode.RELATIVE_TOUCHPAD) {
-                    OpaqueChipButton(
-                        label = "PICK PT",
-                        active = true,
-                        activeBg = OpaqueCyanBadgeBg,
-                        activeBorder = CadCyanPrimary,
-                        textColor = CadCyanPrimary,
-                        tag = "function_bar_pick_point_button",
-                        onClick = onPickPointAtCursor
-                    )
-                }
-
-                OpaqueChipButton(
-                    label = "FIT",
-                    active = false,
-                    activeBg = CadPanelElevated,
-                    activeBorder = CadBorderHairline,
-                    textColor = CadTextPrimary,
-                    tag = "function_bar_fit_button",
-                    onClick = onFitDrawing
-                )
-
-                OpaqueChipButton(
-                    label = if (uiState.isQuickDimensionEnabled) "QDIM: ON" else "QDIM",
-                    active = uiState.isQuickDimensionEnabled,
-                    activeBg = OpaqueEmeraldBadgeBg,
-                    activeBorder = CadEmeraldCrossing,
-                    textColor = if (uiState.isQuickDimensionEnabled) CadEmeraldCrossing else CadTextPrimary,
-                    tag = "function_bar_qdim_button",
-                    onClick = onOpenQDimDialog
-                )
-
-                // Selection quick actions when objects are selected
-                if (uiState.selectedEntityIds.isNotEmpty()) {
-                    OpaqueChipButton(
-                        label = "Props (${uiState.selectedEntityIds.size})",
-                        active = true,
-                        activeBg = OpaqueAmberBadgeBg,
-                        activeBorder = CadAmberSnap,
-                        textColor = CadAmberSnap,
-                        onClick = onOpenProperties
-                    )
-                    OpaqueChipButton(
-                        label = "Erase",
-                        active = true,
-                        activeBg = OpaqueRedBadgeBg,
-                        activeBorder = CadRedAlert,
-                        textColor = CadRedAlert,
-                        onClick = onDeleteSelected
-                    )
-                    OpaqueChipButton(
-                        label = "Deselect",
-                        active = false,
-                        activeBg = CadPanelElevated,
-                        activeBorder = CadBorderHairline,
-                        textColor = CadTextSecondary,
-                        onClick = onClearSelection
-                    )
-                }
-            }
-
-            // Ranked Prefix Autocomplete Strip (when typing a command prefix)
-            if (commandLineInput.isNotBlank() && rankedSuggestions.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .testTag("command_suggestion_strip"),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    rankedSuggestions.forEachIndexed { idx, spec ->
-                        val isTopMatch = idx == 0
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (isTopMatch) OpaqueAmberBadgeBg else CadPanelElevated)
-                                .border(
-                                    1.dp,
-                                    if (isTopMatch) CadAmberSnap else CadCyanPrimary,
-                                    RoundedCornerShape(6.dp)
-                                )
-                                .clickable { onSelectCommand(spec.id) }
-                                .padding(horizontal = 9.dp, vertical = 4.dp)
-                                .testTag("suggestion_chip_${spec.id.commandName}")
-                        ) {
-                            Text(
-                                text = "${spec.id.commandName} (${spec.id.primaryAlias})",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isTopMatch) CadAmberSnap else CadCyanPrimary,
-                                fontWeight = FontWeight.Bold
+                rankedSuggestions.forEachIndexed { idx, spec ->
+                    val isTopMatch = idx == 0
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (isTopMatch) OpaqueAmberBadgeBg else CadPanelElevated)
+                            .border(
+                                1.dp,
+                                if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                                RoundedCornerShape(6.dp)
                             )
-                        }
+                            .clickable { onSelectCommand(spec.id) }
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                            .testTag("suggestion_chip_${spec.id.commandName}")
+                    ) {
+                        Text(
+                            text = "${spec.id.commandName} (${spec.id.primaryAlias})",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isTopMatch) CadAmberSnap else CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
+        }
 
-            // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
-            // Section 3.3 (v17):
-            // commandBarEngaged = commandImeVisible || commandText.isNotEmpty()
-            // commandBarIdle    = !commandImeVisible && commandText.isEmpty()
-            // A running CAD command by itself must NEVER keep the Send/Cancel action-card compartment visible.
-            val density = LocalDensity.current
-            val focusManager = LocalFocusManager.current
-            val imeBottomPx = WindowInsets.ime.getBottom(density)
-            var isCommandFieldFocused by remember { mutableStateOf(false) }
-            var wasImeOpenWhileFocused by remember { mutableStateOf(false) }
+        // TIER 2 (Middle of Bottom Stack): Persistent Command Input & Coordinate Entry Bar
+        // Phase 9.2 & Phase 10.6 (v18):
+        // CommandDeckVisible = isImeVisible || commandLineInput.isNotEmpty()
+        val density = LocalDensity.current
+        val focusManager = LocalFocusManager.current
+        val scope = rememberCoroutineScope()
+        val commandDeckTimer = remember(scope) { CadDeckIdleTimerState(scope) }
+        val imeBottomPx = WindowInsets.ime.getBottom(density)
+        var isCommandFieldFocused by remember { mutableStateOf(false) }
+        var wasImeOpenWhileFocused by remember { mutableStateOf(false) }
 
-            LaunchedEffect(imeBottomPx, isCommandFieldFocused) {
-                if (!isCommandFieldFocused) {
-                    wasImeOpenWhileFocused = false
-                } else if (imeBottomPx > 0) {
-                    wasImeOpenWhileFocused = true
-                } else if (wasImeOpenWhileFocused && imeBottomPx == 0) {
-                    // Software keyboard was dismissed while focused
-                    wasImeOpenWhileFocused = false
-                    isCommandFieldFocused = false
-                    focusManager.clearFocus(force = true)
-                    if (commandLineInput.isEmpty()) {
-                        onCloseCommandEditing()
-                    }
+        LaunchedEffect(imeBottomPx, isCommandFieldFocused) {
+            if (!isCommandFieldFocused) {
+                wasImeOpenWhileFocused = false
+            } else if (imeBottomPx > 0) {
+                wasImeOpenWhileFocused = true
+            } else if (wasImeOpenWhileFocused && imeBottomPx == 0) {
+                // Software keyboard was dismissed while focused
+                wasImeOpenWhileFocused = false
+                isCommandFieldFocused = false
+                focusManager.clearFocus(force = true)
+                if (commandLineInput.isEmpty()) {
+                    onCloseCommandEditing()
                 }
             }
+        }
 
-            val commandImeVisible = isCommandFieldFocused &&
-                (imeBottomPx > 0 || !wasImeOpenWhileFocused) &&
-                uiState.commandPanelState is CommandPanelState.Editing
-            val isCommandEntryEngaged = commandImeVisible || commandLineInput.isNotEmpty()
+        val commandImeVisible = isCommandFieldFocused &&
+            (imeBottomPx > 0 || !wasImeOpenWhileFocused) &&
+            uiState.commandPanelState is CommandPanelState.Editing
+        val isCommandDeckVisible = CadDeckIdleTimerState.isCommandDeckVisible(
+            isImeVisible = commandImeVisible,
+            commandLineInput = commandLineInput
+        )
 
-            var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
-            LaunchedEffect(isCommandEntryEngaged) {
-                if (!isCommandEntryEngaged) {
-                    isSendCardInFront = true
-                }
+        var isSendCardInFront by rememberSaveable { mutableStateOf(true) }
+        LaunchedEffect(isCommandDeckVisible) {
+            if (isCommandDeckVisible) {
+                commandDeckTimer.startOrReset()
+            } else {
+                isSendCardInFront = true
+                commandDeckTimer.stop()
             }
+        }
 
-            Row(
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("persistent_command_entry_bar"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Surface(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("persistent_command_entry_bar"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .weight(1f)
+                    .border(1.dp, CadBorderStrong, RoundedCornerShape(8.dp)),
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xD80A0F14)
             ) {
                 OutlinedTextField(
                     value = commandLineInput,
-                    onValueChange = onCommandLineInputChange,
+                    onValueChange = { nextText ->
+                        commandDeckTimer.onUserInteraction()
+                        onCommandLineInputChange(nextText)
+                    },
                     placeholder = {
                         Text(
                             text = "Command or X,Y coordinates (L, PL, C, F, QDIM, 100,150, @25,-10)",
@@ -2232,11 +2293,12 @@ private fun ContextualCommandAndOptionsDock(
                     }),
                     textStyle = MaterialTheme.typography.labelMedium.copy(color = CadTextPrimary),
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .height(46.dp)
                         .onFocusChanged { focusState ->
                             isCommandFieldFocused = focusState.isFocused
                             if (focusState.isFocused) {
+                                commandDeckTimer.onUserInteraction()
                                 onOpenCommandEditing()
                             } else if (commandLineInput.isEmpty()) {
                                 onCloseCommandEditing()
@@ -2244,169 +2306,208 @@ private fun ContextualCommandAndOptionsDock(
                         }
                         .testTag("command_line_input_field")
                 )
+            }
 
-                // Stacked Send / Cancel Action-Card Control on Right Side of Command Bar (only when commandBarEngaged)
-                AnimatedVisibility(
-                    visible = isCommandEntryEngaged,
-                    enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(180)),
-                    exit = fadeOut(animationSpec = tween(160)) + shrinkHorizontally(animationSpec = tween(160))
-                ) {
-                    val sendOffsetX by animateDpAsState(
-                        targetValue = if (isSendCardInFront) 0.dp else (-6).dp,
-                        animationSpec = tween(180),
-                        label = "SendCardOffsetX"
-                    )
-                    val sendRotation by animateFloatAsState(
-                        targetValue = if (isSendCardInFront) 0f else -7f,
-                        animationSpec = tween(180),
-                        label = "SendCardRotation"
-                    )
-                    val sendScale by animateFloatAsState(
-                        targetValue = if (isSendCardInFront) 1f else 0.91f,
-                        animationSpec = tween(180),
-                        label = "SendCardScale"
-                    )
-                    val sendAlpha by animateFloatAsState(
-                        targetValue = if (isSendCardInFront) 1f else 0.68f,
-                        animationSpec = tween(180),
-                        label = "SendCardAlpha"
-                    )
+            // Stacked Send / Cancel Action-Card Control on Right Side of Command Bar
+            // Visible ONLY when CommandDeckVisible == true; rear card concealed at rest with 75s idle peek & 2.4s post-exchange reveal
+            AnimatedVisibility(
+                visible = isCommandDeckVisible,
+                enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(animationSpec = tween(180)),
+                exit = fadeOut(animationSpec = tween(160)) + shrinkHorizontally(animationSpec = tween(160))
+            ) {
+                val isRearRevealed = commandDeckTimer.isRearCardRevealed
+                val sendOffsetX by animateDpAsState(
+                    targetValue = when {
+                        isSendCardInFront -> 0.dp
+                        isRearRevealed -> (-6).dp
+                        else -> 0.dp
+                    },
+                    animationSpec = tween(180),
+                    label = "SendCardOffsetX"
+                )
+                val sendRotation by animateFloatAsState(
+                    targetValue = when {
+                        isSendCardInFront -> 0f
+                        isRearRevealed -> -7f
+                        else -> 0f
+                    },
+                    animationSpec = tween(180),
+                    label = "SendCardRotation"
+                )
+                val sendScale by animateFloatAsState(
+                    targetValue = when {
+                        isSendCardInFront -> 1f
+                        isRearRevealed -> 0.91f
+                        else -> 0.86f
+                    },
+                    animationSpec = tween(180),
+                    label = "SendCardScale"
+                )
+                val sendAlpha by animateFloatAsState(
+                    targetValue = when {
+                        isSendCardInFront -> 1f
+                        isRearRevealed -> 0.72f
+                        else -> 0f
+                    },
+                    animationSpec = tween(180),
+                    label = "SendCardAlpha"
+                )
 
-                    val cancelOffsetX by animateDpAsState(
-                        targetValue = if (!isSendCardInFront) 0.dp else (-6).dp,
-                        animationSpec = tween(180),
-                        label = "CancelCardOffsetX"
-                    )
-                    val cancelRotation by animateFloatAsState(
-                        targetValue = if (!isSendCardInFront) 0f else -7f,
-                        animationSpec = tween(180),
-                        label = "CancelCardRotation"
-                    )
-                    val cancelScale by animateFloatAsState(
-                        targetValue = if (!isSendCardInFront) 1f else 0.91f,
-                        animationSpec = tween(180),
-                        label = "CancelCardScale"
-                    )
-                    val cancelAlpha by animateFloatAsState(
-                        targetValue = if (!isSendCardInFront) 1f else 0.68f,
-                        animationSpec = tween(180),
-                        label = "CancelCardAlpha"
-                    )
+                val cancelOffsetX by animateDpAsState(
+                    targetValue = when {
+                        !isSendCardInFront -> 0.dp
+                        isRearRevealed -> (-6).dp
+                        else -> 0.dp
+                    },
+                    animationSpec = tween(180),
+                    label = "CancelCardOffsetX"
+                )
+                val cancelRotation by animateFloatAsState(
+                    targetValue = when {
+                        !isSendCardInFront -> 0f
+                        isRearRevealed -> -7f
+                        else -> 0f
+                    },
+                    animationSpec = tween(180),
+                    label = "CancelCardRotation"
+                )
+                val cancelScale by animateFloatAsState(
+                    targetValue = when {
+                        !isSendCardInFront -> 1f
+                        isRearRevealed -> 0.91f
+                        else -> 0.86f
+                    },
+                    animationSpec = tween(180),
+                    label = "CancelCardScale"
+                )
+                val cancelAlpha by animateFloatAsState(
+                    targetValue = when {
+                        !isSendCardInFront -> 1f
+                        isRearRevealed -> 0.72f
+                        else -> 0f
+                    },
+                    animationSpec = tween(180),
+                    label = "CancelCardAlpha"
+                )
 
-                    Box(
-                        modifier = Modifier
-                            .width(50.dp)
-                            .height(42.dp)
-                            .pointerInput(Unit) {
-                                awaitEachGesture {
-                                    val down = awaitFirstDown(
-                                        requireUnconsumed = false,
-                                        pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
-                                    )
-                                    val startPos = down.position
-                                    val touchSlop = viewConfiguration.touchSlop.coerceAtLeast(10f)
-                                    var swapped = false
-                                    while (true) {
-                                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-                                        val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
-                                        if (change == null || !change.pressed) break
-                                        val dx = change.position.x - startPos.x
-                                        val dy = change.position.y - startPos.y
-                                        if (!swapped && dy >= touchSlop && dy > abs(dx) * 1.25f) {
-                                            swapped = true
-                                            change.consume()
-                                            isSendCardInFront = !isSendCardInFront
-                                            break
-                                        }
+                Box(
+                    modifier = Modifier
+                        .width(50.dp)
+                        .height(42.dp)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(
+                                    requireUnconsumed = false,
+                                    pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                                )
+                                val startPos = down.position
+                                val touchSlop = viewConfiguration.touchSlop.coerceAtLeast(10f)
+                                var swapped = false
+                                while (true) {
+                                    val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
+                                    if (change == null || !change.pressed) break
+                                    val dx = change.position.x - startPos.x
+                                    val dy = change.position.y - startPos.y
+                                    if (!swapped && dy >= touchSlop && dy > abs(dx) * 1.25f) {
+                                        swapped = true
+                                        change.consume()
+                                        isSendCardInFront = !isSendCardInFront
+                                        commandDeckTimer.onOrderExchanged()
+                                        break
                                     }
                                 }
-                            }
-                            .testTag("command_action_card_stack"),
-                        contentAlignment = Alignment.CenterEnd
-                    ) {
-                        // Cancel Card (Red X — peeks behind on the left when Send is front; foreground when swapped)
-                        Surface(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .offset(x = cancelOffsetX, y = if (!isSendCardInFront) 0.dp else 1.dp)
-                                .zIndex(if (!isSendCardInFront) 2f else 1f)
-                                .graphicsLayer {
-                                    rotationZ = cancelRotation
-                                    scaleX = cancelScale
-                                    scaleY = cancelScale
-                                    alpha = cancelAlpha
-                                }
-                                .border(
-                                    1.2.dp,
-                                    CadRedAlert,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable {
-                                    if (!isSendCardInFront) {
-                                        if (isRunningActiveCommand) {
-                                            onCancelCommand()
-                                        }
-                                        isCommandFieldFocused = false
-                                        focusManager.clearFocus(force = true)
-                                        onCloseCommandEditing()
-                                    } else {
-                                        isSendCardInFront = false
-                                    }
-                                }
-                                .testTag("command_card_cancel"),
-                            shape = RoundedCornerShape(8.dp),
-                            color = OpaqueRedBadgeBg
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Cancel Active Command or Clear Input",
-                                    tint = CadRedAlert,
-                                    modifier = Modifier.size(17.dp)
-                                )
                             }
                         }
-
-                        // Send Card (Green Send Arrow — foreground by default; peeks behind on the left when swapped)
-                        Surface(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .offset(x = sendOffsetX, y = if (isSendCardInFront) 0.dp else 1.dp)
-                                .zIndex(if (isSendCardInFront) 2f else 1f)
-                                .graphicsLayer {
-                                    rotationZ = sendRotation
-                                    scaleX = sendScale
-                                    scaleY = sendScale
-                                    alpha = sendAlpha
-                                }
-                                .border(
-                                    1.2.dp,
-                                    CadEmeraldCrossing,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable {
-                                    if (isSendCardInFront) {
-                                        if (commandLineInput.isNotBlank()) {
-                                            onSubmitCommandLine()
-                                            isCommandFieldFocused = false
-                                            focusManager.clearFocus(force = true)
-                                        }
-                                    } else {
-                                        isSendCardInFront = true
-                                    }
-                                }
-                                .testTag("command_card_send"),
-                            shape = RoundedCornerShape(8.dp),
-                            color = OpaqueEmeraldBadgeBg
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Send,
-                                    contentDescription = "Execute Command or Coordinate",
-                                    tint = CadEmeraldCrossing,
-                                    modifier = Modifier.size(17.dp)
-                                )
+                        .testTag("command_action_card_stack"),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    // Cancel Card (Red X — concealed at rest when Send is front; foreground when exchanged)
+                    Surface(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .offset(x = cancelOffsetX, y = if (!isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp)
+                            .zIndex(if (!isSendCardInFront) 2f else 1f)
+                            .graphicsLayer {
+                                rotationZ = cancelRotation
+                                scaleX = cancelScale
+                                scaleY = cancelScale
+                                alpha = cancelAlpha
                             }
+                            .border(
+                                1.2.dp,
+                                CadRedAlert,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .clickable(enabled = !isSendCardInFront || isRearRevealed) {
+                                if (!isSendCardInFront) {
+                                    commandDeckTimer.onUserInteraction()
+                                    if (isRunningActiveCommand) {
+                                        onCancelCommand()
+                                    }
+                                    isCommandFieldFocused = false
+                                    focusManager.clearFocus(force = true)
+                                    onCloseCommandEditing()
+                                } else {
+                                    isSendCardInFront = false
+                                    commandDeckTimer.onOrderExchanged()
+                                }
+                            }
+                            .testTag("command_card_cancel"),
+                        shape = RoundedCornerShape(8.dp),
+                        color = OpaqueRedBadgeBg
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel Active Command or Clear Input",
+                                tint = CadRedAlert,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
+
+                    // Send Card (Green Send Arrow — foreground by default; concealed at rest when exchanged)
+                    Surface(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .offset(x = sendOffsetX, y = if (isSendCardInFront) 0.dp else if (isRearRevealed) 1.dp else 0.dp)
+                            .zIndex(if (isSendCardInFront) 2f else 1f)
+                            .graphicsLayer {
+                                rotationZ = sendRotation
+                                scaleX = sendScale
+                                scaleY = sendScale
+                                alpha = sendAlpha
+                            }
+                            .border(
+                                1.2.dp,
+                                CadEmeraldCrossing,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .clickable(enabled = isSendCardInFront || isRearRevealed) {
+                                if (isSendCardInFront) {
+                                    commandDeckTimer.onUserInteraction()
+                                    if (commandLineInput.isNotBlank()) {
+                                        onSubmitCommandLine()
+                                        isCommandFieldFocused = false
+                                        focusManager.clearFocus(force = true)
+                                    }
+                                } else {
+                                    isSendCardInFront = true
+                                    commandDeckTimer.onOrderExchanged()
+                                }
+                            }
+                            .testTag("command_card_send"),
+                        shape = RoundedCornerShape(8.dp),
+                        color = OpaqueEmeraldBadgeBg
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Execute Command or Coordinate",
+                                tint = CadEmeraldCrossing,
+                                modifier = Modifier.size(17.dp)
+                            )
                         }
                     }
                 }
@@ -2460,11 +2561,7 @@ private fun ActiveCommandContextBar(
         if (uiState.activeCommand == CadCommandId.POLYGON) {
             "VAL=${uiState.commandParameterValue.toInt().coerceIn(3, 64)}"
         } else {
-            val formattedVal = if (uiState.commandParameterValue % 1.0 == 0.0) {
-                String.format(Locale.US, "%.2f", uiState.commandParameterValue)
-            } else {
-                String.format(Locale.US, "%.2f", uiState.commandParameterValue)
-            }
+            val formattedVal = String.format(Locale.ROOT, "%.2f", uiState.commandParameterValue)
             "VAL=$formattedVal ${uiState.displayUnit.symbol}"
         }
     } else null
@@ -3132,6 +3229,9 @@ private fun ActionLauncherDialog(
 private fun CadHomeScreen(
     savedProjects: List<CadProjectMetadataEntity>,
     displayUnit: CadUnit,
+    updatesBehindCount: Int,
+    updateUiState: CadUpdateUiState,
+    onOpenReleaseCatalogue: () -> Unit,
     onNewBlankDrawing: (String, CadUnit) -> Unit,
     onOpenDxfFilePicker: () -> Unit,
     onImportDxfContent: (String) -> Unit,
@@ -3166,7 +3266,7 @@ private fun CadHomeScreen(
                 .padding(horizontal = 18.dp, vertical = 22.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // App Branding Header
+            // App Branding Header + Top-Right Home Update Status & Release Catalogue Icon (Phase 12)
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3174,20 +3274,34 @@ private fun CadHomeScreen(
                 shape = RoundedCornerShape(12.dp),
                 color = CadPanelSurface
             ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "PRECISIONCAD STUDIO",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = CadCyanPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "2D Engineering CAD Workspace • Exact Double-Precision Geometry • DXF / PDF / SVG",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = CadTextSecondary
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "PRECISIONCAD STUDIO",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = CadCyanPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "2D Engineering CAD Workspace • Exact Double-Precision Geometry • DXF / PDF / SVG",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CadTextSecondary
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    HomeUpdateStatusIcon(
+                        updatesBehindCount = updatesBehindCount,
+                        updateUiState = updateUiState,
+                        onClick = onOpenReleaseCatalogue
                     )
                 }
             }

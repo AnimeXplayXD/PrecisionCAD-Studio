@@ -30,6 +30,8 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.withClip
+import androidx.core.graphics.withSave
 import com.example.cad.dimension.AdaptiveAnnotationRenderer
 import com.example.cad.dimension.DimensionStyleConfig
 import com.example.cad.kernel.CadGeometryKernel
@@ -61,6 +63,7 @@ import com.example.ui.theme.CadGridMinor
 import com.example.ui.theme.CadModelSpaceBg
 import com.example.ui.theme.CadPaperSpaceBg
 import com.example.ui.theme.CadSheetPaperFill
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -249,6 +252,12 @@ fun CadViewportCanvas(
             textAlign = Paint.Align.CENTER
         }
     }
+    val titleBlockTextPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.MONOSPACE
+            textAlign = Paint.Align.LEFT
+        }
+    }
 
     Box(
         modifier = modifier
@@ -376,9 +385,9 @@ fun CadViewportCanvas(
                 size = size
             )
 
-            // 2. Paper Space Sheet Frame & Title Block
+            // 2. Paper Space Sheet Fill, Border & Printable Margin (drawn BEFORE grid)
             if (workspaceSpace == WorkspaceSpace.PAPER_SPACE) {
-                drawPaperSpaceSheet(sheetSetup, displayUnit, viewport, textPaint)
+                drawPaperSpaceSheetBase(sheetSetup, viewport)
             }
 
             // 3. Adaptive Grid & Origin Axes
@@ -386,6 +395,11 @@ fun CadViewportCanvas(
                 drawAdaptiveGrid(gridSnapConfig, viewport)
             }
             drawOriginAxes(viewport)
+
+            // 4. Paper Space Title Block Opaque Island, Separators & Zoom-Independent Typography (drawn AFTER grid)
+            if (workspaceSpace == WorkspaceSpace.PAPER_SPACE && sheetSetup.showTitleBlock) {
+                drawPaperSpaceTitleBlockPass(sheetSetup, displayUnit, viewport, titleBlockTextPaint)
+            }
 
             // 4. Stored Document Entities (with Viewport-Bounds Culling + Overscan Margin)
             val visibleModelRect = viewport.visibleModelBounds(
@@ -599,11 +613,13 @@ private fun DrawScope.drawOriginAxes(viewport: ViewportTransform) {
     )
 }
 
-private fun DrawScope.drawPaperSpaceSheet(
+/**
+ * Section 6.2 Pass 2 & 3 — Draws the Paper Space sheet fill, outer sheet border,
+ * and printable margin frame BEFORE the adaptive grid pass.
+ */
+private fun DrawScope.drawPaperSpaceSheetBase(
     sheetSetup: SheetSetupConfig,
-    displayUnit: CadUnit,
-    viewport: ViewportTransform,
-    textPaint: Paint
+    viewport: ViewportTransform
 ) {
     val scaleInv = (1.0 / sheetSetup.plotScaleRatio).coerceIn(0.05, 50.0)
     val sheetWModel = sheetSetup.effectiveWidthMm * scaleInv
@@ -614,11 +630,13 @@ private fun DrawScope.drawPaperSpaceSheet(
     val pBottomRight = viewport.modelToScreen(Point2D(sheetWModel, 0.0))
     val sheetRect = Rect(pTopLeft.x, pTopLeft.y, pBottomRight.x, pBottomRight.y)
 
+    // Pass 2: Paper sheet fill
     drawRect(
         color = CadSheetPaperFill,
         topLeft = sheetRect.topLeft,
         size = sheetRect.size
     )
+    // Pass 3: Paper sheet border & printable margin frame
     drawRect(
         color = Color(0xFF64748B),
         topLeft = sheetRect.topLeft,
@@ -626,7 +644,6 @@ private fun DrawScope.drawPaperSpaceSheet(
         style = Stroke(width = 2f)
     )
 
-    // Printable Margin Frame
     val mTopLeft = viewport.modelToScreen(Point2D(marginModel, sheetHModel - marginModel))
     val mBottomRight = viewport.modelToScreen(Point2D(sheetWModel - marginModel, marginModel))
     drawRect(
@@ -635,56 +652,136 @@ private fun DrawScope.drawPaperSpaceSheet(
         size = Size(mBottomRight.x - mTopLeft.x, mBottomRight.y - mTopLeft.y),
         style = Stroke(width = 1.4f)
     )
+}
 
-    // Engineering Title Block in bottom-right corner of printable frame
-    if (sheetSetup.showTitleBlock) {
-        val tbWModel = sheetWModel * 0.36
-        val tbHModel = sheetHModel * 0.14
-        val tbTopLeft = viewport.modelToScreen(
-            Point2D(sheetWModel - marginModel - tbWModel, marginModel + tbHModel)
+/**
+ * Section 6.2 & 6.3 Pass 5, 6 & 7 — Draws the Paper Space Title Block AFTER the adaptive grid
+ * and coordinate axes so its opaque background completely masks any grid lines beneath it,
+ * and renders title-block text with zoom-independent screen-space typography.
+ */
+private fun DrawScope.drawPaperSpaceTitleBlockPass(
+    sheetSetup: SheetSetupConfig,
+    displayUnit: CadUnit,
+    viewport: ViewportTransform,
+    titleBlockTextPaint: Paint
+) {
+    if (!sheetSetup.showTitleBlock) return
+    val scaleInv = (1.0 / sheetSetup.plotScaleRatio).coerceIn(0.05, 50.0)
+    val sheetWModel = sheetSetup.effectiveWidthMm * scaleInv
+    val sheetHModel = sheetSetup.effectiveHeightMm * scaleInv
+    val marginModel = sheetSetup.marginMm * scaleInv
+
+    val mBottomRight = viewport.modelToScreen(Point2D(sheetWModel - marginModel, marginModel))
+    val tbWModel = sheetWModel * 0.36
+    val tbHModel = sheetHModel * 0.14
+    val tbTopLeft = viewport.modelToScreen(
+        Point2D(sheetWModel - marginModel - tbWModel, marginModel + tbHModel)
+    )
+    val tbWidthPx = (mBottomRight.x - tbTopLeft.x).coerceAtLeast(0f)
+    val tbHeightPx = (mBottomRight.y - tbTopLeft.y).coerceAtLeast(0f)
+    if (tbWidthPx < 4f || tbHeightPx < 4f) return
+
+    val tbSize = Size(width = tbWidthPx, height = tbHeightPx)
+
+    // Pass 5: Opaque title-block background fill masking grid & axes beneath it
+    drawRect(
+        color = Color(0xFF141D2B),
+        topLeft = tbTopLeft,
+        size = tbSize
+    )
+
+    // Pass 6: Title-block outline & horizontal row separators
+    drawRect(
+        color = Color(0xFF94A3B8),
+        topLeft = tbTopLeft,
+        size = tbSize,
+        style = Stroke(width = 1.5f)
+    )
+
+    // Pass 7: Zoom-independent screen-space typography (dp converted to px via Compose density)
+    val titleFontSizePx = 14.dp.toPx()
+    val metaFontSizePx = 10.5.dp.toPx()
+    val horizontalPadPx = 8.dp.toPx()
+    val topPadPx = 6.dp.toPx()
+    val lineGapPx = 4.dp.toPx()
+
+    // Deterministic line omission / clipping when zoomed far out so font never shrinks to illegibility
+    if (tbWidthPx < 36.dp.toPx() || tbHeightPx < (titleFontSizePx + topPadPx)) {
+        return
+    }
+
+    val row1SeparatorY = tbTopLeft.y + topPadPx + titleFontSizePx + lineGapPx
+    val row2SeparatorY = row1SeparatorY + lineGapPx + metaFontSizePx + lineGapPx
+
+    if (tbHeightPx >= (row1SeparatorY - tbTopLeft.y) + metaFontSizePx + topPadPx) {
+        drawLine(
+            color = Color(0xFF334155),
+            start = Offset(tbTopLeft.x, row1SeparatorY),
+            end = Offset(tbTopLeft.x + tbWidthPx, row1SeparatorY),
+            strokeWidth = 1f
         )
-        val tbSize = Size(
-            width = mBottomRight.x - tbTopLeft.x,
-            height = mBottomRight.y - tbTopLeft.y
+    }
+    if (tbHeightPx >= (row2SeparatorY - tbTopLeft.y) + metaFontSizePx + topPadPx) {
+        drawLine(
+            color = Color(0xFF334155),
+            start = Offset(tbTopLeft.x, row2SeparatorY),
+            end = Offset(tbTopLeft.x + tbWidthPx, row2SeparatorY),
+            strokeWidth = 1f
         )
-        drawRect(
-            color = Color(0xFF141D2B),
-            topLeft = tbTopLeft,
-            size = tbSize
-        )
-        drawRect(
-            color = Color(0xFF94A3B8),
-            topLeft = tbTopLeft,
-            size = tbSize,
-            style = Stroke(width = 1.5f)
-        )
-        drawContext.canvas.nativeCanvas.apply {
-            textPaint.color = android.graphics.Color.rgb(226, 232, 240)
-            textPaint.textSize = (tbSize.height * 0.20f).coerceIn(9f, 18f)
-            textPaint.textAlign = Paint.Align.LEFT
+    }
+
+    val maxTextWidthPx = (tbWidthPx - horizontalPadPx * 2f).coerceAtLeast(8f)
+
+    drawContext.canvas.nativeCanvas.withClip(
+        tbTopLeft.x + 2f,
+        tbTopLeft.y + 2f,
+        tbTopLeft.x + tbWidthPx - 2f,
+        tbTopLeft.y + tbHeightPx - 2f
+    ) {
+        titleBlockTextPaint.textAlign = Paint.Align.LEFT
+        titleBlockTextPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        titleBlockTextPaint.textSize = titleFontSizePx
+        titleBlockTextPaint.color = android.graphics.Color.rgb(226, 232, 240)
+
+        val titleBaselineY = tbTopLeft.y + topPadPx + titleFontSizePx * 0.86f
+        val clippedTitle = clipTextToWidth(sheetSetup.titleBlockTitle, titleBlockTextPaint, maxTextWidthPx)
+        drawText(clippedTitle, tbTopLeft.x + horizontalPadPx, titleBaselineY, titleBlockTextPaint)
+
+        titleBlockTextPaint.typeface = Typeface.MONOSPACE
+        titleBlockTextPaint.textSize = metaFontSizePx
+        titleBlockTextPaint.color = android.graphics.Color.rgb(148, 163, 184)
+
+        val meta1BaselineY = row1SeparatorY + lineGapPx + metaFontSizePx * 0.88f
+        if (meta1BaselineY + 3f <= tbTopLeft.y + tbHeightPx) {
+            val metaLine1 = "${sheetSetup.titleBlockDrawingNo} • ${sheetSetup.titleBlockRevision} • SCALE ${sheetSetup.scaleLabel}"
             drawText(
-                sheetSetup.titleBlockTitle,
-                tbTopLeft.x + 10f,
-                tbTopLeft.y + tbSize.height * 0.32f,
-                textPaint
+                clipTextToWidth(metaLine1, titleBlockTextPaint, maxTextWidthPx),
+                tbTopLeft.x + horizontalPadPx,
+                meta1BaselineY,
+                titleBlockTextPaint
             )
-            textPaint.textSize = (tbSize.height * 0.16f).coerceIn(8f, 14f)
-            textPaint.color = android.graphics.Color.rgb(148, 163, 184)
+        }
+
+        val meta2BaselineY = row2SeparatorY + lineGapPx + metaFontSizePx * 0.88f
+        if (meta2BaselineY + 3f <= tbTopLeft.y + tbHeightPx) {
+            val metaLine2 = "${sheetSetup.preset.label} • UNITS: ${displayUnit.symbol} • ${sheetSetup.draftingStandard.name}"
             drawText(
-                "${sheetSetup.titleBlockDrawingNo} • ${sheetSetup.titleBlockRevision} • SCALE ${sheetSetup.scaleLabel}",
-                tbTopLeft.x + 10f,
-                tbTopLeft.y + tbSize.height * 0.62f,
-                textPaint
+                clipTextToWidth(metaLine2, titleBlockTextPaint, maxTextWidthPx),
+                tbTopLeft.x + horizontalPadPx,
+                meta2BaselineY,
+                titleBlockTextPaint
             )
-            drawText(
-                "${sheetSetup.preset.label} • UNITS: ${displayUnit.symbol} • ${sheetSetup.draftingStandard.name}",
-                tbTopLeft.x + 10f,
-                tbTopLeft.y + tbSize.height * 0.88f,
-                textPaint
-            )
-            textPaint.textAlign = Paint.Align.CENTER
         }
     }
+}
+
+private fun clipTextToWidth(text: String, paint: Paint, maxWidthPx: Float): String {
+    if (text.isEmpty() || paint.measureText(text) <= maxWidthPx) return text
+    var end = text.length
+    while (end > 1 && paint.measureText(text, 0, end) > maxWidthPx) {
+        end--
+    }
+    return text.substring(0, end)
 }
 
 private fun DrawScope.drawCadEntity(
@@ -864,8 +961,7 @@ private fun DrawScope.drawCadEntity(
         is CadEntity.TextEntity -> {
             val s = viewport.modelToScreen(entity.position)
             val fontSizePx = (entity.height * viewport.pixelsPerModelUnit).toFloat().coerceIn(11f, 36f)
-            drawContext.canvas.nativeCanvas.apply {
-                save()
+            drawContext.canvas.nativeCanvas.withSave {
                 translate(s.x, s.y)
                 rotate(-entity.rotationDeg.toFloat())
                 textPaint.color = toAndroidColor(baseColor)
@@ -875,7 +971,6 @@ private fun DrawScope.drawCadEntity(
                     drawText(line, 0f, idx * (fontSizePx * 1.2f), textPaint)
                 }
                 textPaint.textAlign = Paint.Align.CENTER
-                restore()
             }
         }
 
@@ -889,14 +984,12 @@ private fun DrawScope.drawCadEntity(
             val shelfMidX = (sh.x + end.x) * 0.5f
             val labelY = sh.y - 5f
             val fontSizePx = (entity.textHeight * viewport.pixelsPerModelUnit).toFloat().coerceIn(10.5f, 15f)
-            drawContext.canvas.nativeCanvas.apply {
-                save()
+            drawContext.canvas.nativeCanvas.withSave {
                 translate(shelfMidX, labelY)
                 textPaint.textSize = fontSizePx
                 textPaint.textAlign = Paint.Align.CENTER
                 textPaint.color = toAndroidColor(baseColor)
                 drawText(entity.text, 0f, 0f, textPaint)
-                restore()
             }
         }
 
@@ -1159,13 +1252,11 @@ private fun DrawScope.drawAdaptiveDimension(
         // 4. Dimension Label centered cleanly above the horizontal landing shelf
         val shelfMidX = (shoulderPx.x + landingEndPx.x) * 0.5f
         val labelY = shoulderPx.y - 5f
-        drawContext.canvas.nativeCanvas.apply {
-            save()
+        drawContext.canvas.nativeCanvas.withSave {
             translate(shelfMidX, labelY)
             textPaint.textSize = fontSizePx
             textPaint.color = toAndroidColor(color)
             drawText(plan.labelText, 0f, 0f, textPaint)
-            restore()
         }
         return
     }
@@ -1196,13 +1287,11 @@ private fun DrawScope.drawAdaptiveDimension(
         }
 
         val textScreen = viewport.modelToScreen(plan.textPositionModel)
-        drawContext.canvas.nativeCanvas.apply {
-            save()
+        drawContext.canvas.nativeCanvas.withSave {
             translate(textScreen.x, textScreen.y)
             textPaint.textSize = fontSizePx
             textPaint.color = toAndroidColor(color)
             drawText(plan.labelText, 0f, 0f, textPaint)
-            restore()
         }
         return
     }
@@ -1245,14 +1334,12 @@ private fun DrawScope.drawAdaptiveDimension(
 
     // Transparent dimension text rendered directly above sheet geometry (Section 21)
     val textScreen = viewport.modelToScreen(plan.textPositionModel)
-    drawContext.canvas.nativeCanvas.apply {
-        save()
+    drawContext.canvas.nativeCanvas.withSave {
         translate(textScreen.x, textScreen.y)
         rotate(plan.textRotationDeg)
         textPaint.textSize = fontSizePx
         textPaint.color = toAndroidColor(color)
         drawText(plan.labelText, 0f, 0f, textPaint)
-        restore()
     }
 }
 
@@ -1501,15 +1588,17 @@ private fun DrawScope.drawPolarTrackingOverlay(
         }
     }
 
-    // 3. Read-Only Live Cursor Readout Badge (R, θ, POLAR θp)
+    // 3. Read-Only Live Cursor Readout Badge (R, θ, θₚ) — Section 8.6 & 8.7
+    if (!polarPreview.hasValidDirection) return
+
     val distanceText = precision.formatLinear(
         rawModelValue = polarPreview.radialDistanceR,
         storageUnit = storageUnit,
         displayUnit = displayUnit
     )
-    val actualThetaText = String.format(java.util.Locale.US, "%.1f°", polarPreview.actualAngleThetaDeg ?: 0.0)
+    val actualThetaText = String.format(Locale.ROOT, "%.1f°", polarPreview.actualAngleThetaDeg ?: 0.0)
     val polarBadgeSuffix = if (polarPreview.isPolarGuideAcquired && polarPreview.activePolarAngleDeg != null) {
-        "  POLAR ${formatPolarAngleCompact(polarPreview.activePolarAngleDeg)}°"
+        "  θₚ ${formatPolarAngleCompact(polarPreview.activePolarAngleDeg)}° (${polarPreview.referenceBasisLabel})"
     } else {
         ""
     }
@@ -1567,7 +1656,7 @@ private fun formatPolarAngleCompact(angleDeg: Double): String {
     return if (abs(angleDeg - roundedInt.toDouble()) < 0.05) {
         roundedInt.toString()
     } else {
-        String.format(java.util.Locale.US, "%.1f", angleDeg)
+        String.format(Locale.ROOT, "%.1f", angleDeg)
     }
 }
 

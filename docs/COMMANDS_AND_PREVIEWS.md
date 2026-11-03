@@ -1,4 +1,4 @@
-# Interactive CAD Commands & Shared Live-Preview Preservation
+# Interactive CAD Commands, Previews & Temporary Polar Guides
 
 ## 1. Command State Machine
 
@@ -20,15 +20,11 @@ Changing a command sub-option (`setCommandSubOption`) or numeric parameter (`set
 3. **Never commits an entity prematurely**.
 4. **Immediately recomputes temporary preview geometry (`computePreviewEntities()`)** from the retained `commandStepPoints`, current `snappedCursorModelPos`, updated `commandSubOption`, and updated `commandParameterValue`.
 
-### Supported Live-Preview Commands
+---
 
-| Command | Retained Step Points | Live Sub-Option / Parameter Preview |
-| :--- | :--- | :--- |
-| `RECTANGLE` | First corner `p1` | Switches live between `Sharp`, `Fillet` (corner arcs of radius `VAL`), `Chamfer` (beveled corners of distance `VAL`), and `Square` |
-| `CIRCLE` | Center or `2P`/`3P` points | Switches live between `Radius`, `Diameter`, `2P`, `3P`, and `TTR` |
-| `ARC` | Picked points (`p1`, `p2`) | Switches live between `3P` (three-point circumscribed arc) and `SCE` (Start-Center-End arc) |
-| `POLYLINE` | Accepted vertices `p1..pn` | Rubber-band segment updates live between straight `Line` and bulged `Arc` (`bulge = 0.45`) |
-| `POLYGON` | Center `p1` | Recomputes regular `N`-gon preview when switching `Inscribed` / `Circumscribed` or changing `VAL` (`3..64` sides) |
-| `LINE`, `RAY`, `XLINE`, `SPLINE` | Accepted points | Live rubber-band / infinite construction line / spline preview |
-| `ELLIPSE`, `DONUT` | Center & axis points | Live ellipse / concentric ring preview using `VAL` |
-| `OFFSET`, `FILLET`, `CHAMFER` | Selected/hovered target | Live offset curve or corner fillet/chamfer preview using `VAL` |
+## 3. Temporary Polar Guide Rendering Contract
+
+- Temporary Visual Polar Tracking guides (`R`, Cursor Bearing `θ`, Track Bearing `θₚ`, dashed guide ray, and angular arc) are rendered exclusively in the transient HUD overlay pass of `CadViewportCanvas`.
+- The blue visual tracking guide ray, angular arc, and `θₚ` label are drawn **only** when `polarTrackingEnabled == true` and `PolarTrackingPreviewState.isPolarGuideAcquired == true` (acquired within `0.35°`, released beyond `0.55°`).
+- When the cursor moves away from an acquired visual bearing, the stale guide disappears immediately.
+- Temporary polar guides and snap markers never enter `CadWorkspaceUiState.entities`, bounding-box extents, undo/redo history, `.pcad` documents, or DXF/PDF/SVG exports.

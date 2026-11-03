@@ -1,41 +1,31 @@
-# Geometry, Coordinate Systems, OSNAP & Polar Tracking
+# Geometry, Invariant Formatting, Zoom-Adaptive Grid Snap & Polar Tracking
 
-## 1. Exact Double-Precision Coordinate Spaces
+## 1. Locale-Independent Engineering Formatting (`CadNumberFormatter`)
 
-PrecisionCAD Studio maintains a strict distinction between three coordinate spaces:
-
-1. **Model Space (`Point2D` in `storageUnit`)**:
-   - Every geometric entity is stored in exact IEEE-754 `Double` coordinates in the project's `storageUnit`.
-   - Switching `displayUnit` under **Option A (`CONVERT_DISPLAY_UNITS`)** scales displayed values without mutating stored coordinates.
-   - Switching `displayUnit` under **Option B (`REINTERPRET_UNITS`)** keeps numeric coordinate values unchanged while updating the unit symbol.
-2. **Display / Working Space (`displayUnit`)**:
-   - Used in the Controller Coordinate HUD, Direct Coordinate Input Window, command-line coordinate parser, and dimension text formatting.
-3. **Screen Space (`Offset` in pixels)**:
-   - Derived exclusively during rendering and hit-testing via `ViewportTransform.modelToScreen` and `ViewportTransform.screenToModel`.
+- All CAD coordinate readouts, dimension values, command-line diagnostics, and serialized numbers use `CadNumberFormatter` (`Locale.ROOT`).
+- Guarantees `.` as the decimal separator and ASCII digits across all system locales (`en-US`, `de-DE`, `bn-IN`, `tr-TR`), preventing comma-decimal ambiguity with `X,Y` coordinate entry.
 
 ---
 
-## 2. Bearing Convention & Direct Coordinate Window (`θ (°)`)
+## 2. Zoom-Adaptive Grid Snap (`CadSnapAndCoordEngine`)
 
-- **Engineering Angle Convention**:
-  - `+X` (East / Right) = `0°`
-  - Counter-clockwise (CCW) positive in `[0°, 360°)` (`+Y = 90°`, `-X = 180°`, `-Y = 270°`).
-- **Reference Origin Selection**:
-  - When a command has accepted at least one step point (`commandStepPoints.lastOrNull() != null`), radial distance `R` and bearing `θ (°)` are measured relative to the active reference point `(x₀, y₀)`.
-  - When no command reference point is active, `R` and `θ (°)` are measured relative to the drawing origin `(0, 0)`.
-- **Deterministic Synchronization in `DirectCoordinateInputDialog`**:
-  - Editing `X` or `Y` (`EditSource.CARTESIAN_XY`) recalculates `R = hypot(dx, dy)` and `θ = normalizeDegrees0To360(atan2(dy, dx))`.
-  - Editing `θ (°)` (`EditSource.BEARING_THETA`) preserves the current radial distance `R` (defaulting to `1.0` if `R < 1e-9`) and updates:
-    - `X = x₀ + R * cos(rad(θ))`
-    - `Y = y₀ + R * sin(rad(θ))`
+- **Preserved User Base Interval (`S_base`)**: `gridSnapSpacing` remains the user-configured nominal interval in `GridAndSnapConfig`.
+- **Zoom Ratio & Quantized Ladder (`computeEffectiveGridSnapInterval`)**:
+  - Given `referencePixelsPerModelUnit` (`P_ref`, captured when a drawing is fitted/initialized or when base grid spacing changes) and current `pixelsPerModelUnit` (`P_cur`), defines `zoomRatio = P_cur / P_ref` and `rawStep = S_base / zoomRatio`.
+  - Quantizes `rawStep` to the nearest engineering `1–2–2.5–5 × 10^n` step within `[1e-4, 1e6]`, applying a **12% hysteresis band** around step transitions so minor pinch-zoom jitter does not oscillate the active grid step.
+- **Safe Nearest-Grid Rounding & Viewport Guards (`applyZoomAdaptiveGridSnap`)**:
+  - Snaps axes via `round(raw / step) * step` with a `Long` index range check (`abs(raw / step) <= 1e12`).
+  - **Screen-Space Jump Guard**: If snapping an axis would jump the cursor by more than `min(96px, 0.35 * usableSpanPx)` on screen, or push a visible cursor outside `UsableViewportRect`, the raw coordinate on that axis is retained.
+  - **ORTHO Independence**: When `orthoEnabled` is active with a reference point, the dominant axis is locked to the reference point and only the free axis snaps to the effective grid interval.
 
 ---
 
-## 3. Separated Visual Polar Tracking vs. PolarSnap
+## 3. Strictly Separated Visual Polar Tracking vs. PolarSnap
 
 - **Visual Polar Tracking (`polarTrackingEnabled`)**:
-  - Evaluates all whole-number bearings `0°..359°` (`wholeNumberVisualBearingsDeg`) plus user-configured custom fractional angles (`customPolarAnglesDeg`, e.g., `22.5°`, `126.5°`).
-  - Displays a guide ray and HUD readout (`R`, Cursor Bearing `θ`, Track Bearing `θₚ`) when the cursor is within `polarSnapToleranceDeg`, without constraining cursor movement.
+  - Evaluates whole-number bearings `0°..359°` plus user-configured custom fractional visual bearings (`polarAdditionalAnglesDeg`, e.g., `22.5°`).
+  - Uses a narrow angular acquisition window (`VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG = 0.35°`) and release hysteresis (`VISUAL_POLAR_RELEASE_TOLERANCE_DEG = 0.55°`).
+  - Strictly informational: displays `R`, Cursor Bearing `θ`, and Track Bearing `θₚ` (when acquired), and never moves or projects the cursor.
 - **PolarSnap (`polarSnapEnabled`)**:
-  - Uses an independent multi-select preset collection (`polarSnapPresetAnglesDeg`, default `45°` and `90°`, selectable across `15°`, `30°`, `45°`, `60°`, `90°`) plus custom snap angles (`polarSnapCustomAnglesDeg`, default `126°`).
-  - Projects the cursor onto the nearest enabled PolarSnap bearing ray at exact radial distance `R` only when `polarSnapEnabled == true` and Ortho is not overriding.
+  - Uses an independent multi-select preset collection (`polarSnapPresetAnglesDeg`, default `45°` and `90°`, selectable across `15°`, `30°`, `45°`, `60°`, `90°`) plus custom snap angles (`polarSnapCustomAnglesDeg`, default `126°`), built via `buildPolarSnapAngles(snapConfig)` without mixing in `polarAdditionalAnglesDeg`.
+  - Projects the candidate point onto the nearest enabled PolarSnap ray within `polarAcquisitionToleranceDeg` only when `polarSnapEnabled == true` and neither OSNAP nor ORTHO overrides.

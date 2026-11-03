@@ -7,8 +7,12 @@ import com.example.cad.model.GridAndSnapConfig
 import com.example.cad.model.OsnapMode
 import com.example.cad.model.Point2D
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.roundToLong
 import kotlin.math.sin
 
@@ -41,6 +45,13 @@ data class UsableViewportRect(
     val heightPx: Float get() = (bottomPx - topPx).coerceAtLeast(1f)
     val centerX: Float get() = (leftPx + rightPx) * 0.5f
     val centerY: Float get() = (topPx + bottomPx) * 0.5f
+
+    fun containsScreenOffset(offset: Offset, marginPx: Float = 0f): Boolean {
+        return offset.x >= leftPx + marginPx &&
+            offset.x <= rightPx - marginPx &&
+            offset.y >= topPx + marginPx &&
+            offset.y <= bottomPx - marginPx
+    }
 }
 
 enum class FitDrawingPolicy(val label: String) {
@@ -220,9 +231,6 @@ data class ViewportTransform(
 
         var working = this
 
-        // If an active command has a reference point and the span from referencePoint to cursorModelPos
-        // is vastly larger than the usable viewport (e.g., > 2.5x usable span via direct coordinate entry),
-        // apply a controlled, bounded zoom-out so both context and cursor remain comprehensible.
         if (referencePoint != null) {
             val refScreen = working.modelToScreen(referencePoint)
             val curScreen = working.modelToScreen(cursorModelPos)
@@ -273,7 +281,7 @@ data class SnapCandidate(
 )
 
 /**
- * Sections 9.4–9.7 — Read-Only Visual Polar Tracking & Independent PolarSnap State.
+ * Section 8 — Read-Only Visual Polar Tracking & Independent PolarSnap State.
  *
  * - [basePoint]: Accepted command base point B = (Bx, By).
  * - [rawCursorPoint]: Live raw virtual cursor position P = (Px, Py).
@@ -281,10 +289,14 @@ data class SnapCandidate(
  * - [actualAngleThetaDeg]: Live unrounded Cursor Bearing θ in [0, 360) degrees (null if R is degenerate ~ 0).
  * - [referenceAngleDeg]: Reference zero-angle direction (0° absolute +X, or previous segment angle when relative mode is active).
  * - [referenceBasisLabel]: Explicit reference basis label ("+X" or "Last Segment").
- * - [activePolarAngleDeg]: Active Track Bearing θp in [0, 360) degrees when polarTrackingEnabled is true (supports all 360 whole-number bearings 0°–359° plus custom fractional visual angles).
+ * - [activePolarAngleDeg]: Active Track Bearing θₚ in [0, 360) degrees ONLY when a visual guide angle in the
+ *   Visual Polar Tracking collection is genuinely acquired within [CadSnapAndCoordEngine.VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG]
+ *   (or retained within [CadSnapAndCoordEngine.VISUAL_POLAR_RELEASE_TOLERANCE_DEG] hysteresis). Null when not acquired.
  * - [worldPolarAngleDeg]: Active visual polar direction in absolute world degrees [0, 360) for guide ray rendering.
- * - [activePolarSnapAngleDeg]: Active PolarSnap ray angle in [0, 360) when within tolerance of a selected PolarSnap preset/custom angle.
- * - [projectedPolarPoint]: Point B + R * (cos θ_snap, sin θ_snap) along the nearest active PolarSnap ray (used to project candidate ONLY when polarSnapEnabled is true).
+ * - [activePolarSnapAngleDeg]: Independently acquired PolarSnap ray angle in [0, 360) when within tolerance of a
+ *   selected PolarSnap preset/custom angle.
+ * - [projectedPolarPoint]: Point B + R * (cos θ_snap, sin θ_snap) along the nearest active PolarSnap ray
+ *   (used to project candidate ONLY when polarSnapEnabled is true).
  */
 data class PolarTrackingPreviewState(
     val basePoint: Point2D,
@@ -301,9 +313,30 @@ data class PolarTrackingPreviewState(
     val hasValidDirection: Boolean get() = actualAngleThetaDeg != null && radialDistanceR > 1e-5
     val isPolarGuideAcquired: Boolean get() = activePolarAngleDeg != null && worldPolarAngleDeg != null && hasValidDirection
     val isPolarSnapRayAcquired: Boolean get() = activePolarSnapAngleDeg != null && projectedPolarPoint != null && hasValidDirection
+    val acquiredAngleDeg: Double? get() = activePolarAngleDeg
 }
 
 object CadSnapAndCoordEngine {
+
+    /** Dedicated visual polar guide acquisition tolerance (Section 8.4). */
+    const val VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG = 0.35
+
+    /** Dedicated visual polar guide release hysteresis tolerance (Section 8.4). */
+    const val VISUAL_POLAR_RELEASE_TOLERANCE_DEG = 0.55
+
+    /** Angular deduplication epsilon for polar guide and snap collections (Section 8.3). */
+    const val ANGLE_DEDUP_EPSILON_DEG = 1e-4
+
+    /** Minimum positive finite Grid Snap step in model units (Section 7.2). */
+    const val MIN_GRID_SNAP_INTERVAL = 1e-6
+
+    /** Maximum finite Grid Snap step in model units (Section 7.2). */
+    const val MAX_GRID_SNAP_INTERVAL = 1e6
+
+    /** Default maximum screen-space snap displacement (~24 dp at 3x density, Section 7.4). */
+    const val DEFAULT_MAX_SNAP_DISPLACEMENT_PX = 72f
+
+    private val ENGINEERING_MANTISSAS = doubleArrayOf(1.0, 2.0, 2.5, 5.0, 10.0)
 
     fun normalizeAngle360(deg: Double): Double {
         if (!deg.isFinite()) return 0.0
@@ -318,7 +351,80 @@ object CadSnapAndCoordEngine {
     }
 
     /**
-     * Section 9.5 — Builds the complete Visual Polar Tracking angle set:
+     * Section 7.2 & 7.3 — Computes the zoom-adaptive effective model-space Grid Snap interval:
+     *   S_eff = S_0 * (Z_0 / Z)
+     * quantized to a clean engineering progression (1–2–2.5–5 × 10^n) that never creates a
+     * larger-than-configured screen-space jump, with hysteresis around [previousEffectiveInterval]
+     * to prevent boundary flicker.
+     */
+    fun computeEffectiveGridSnapInterval(
+        baseInterval: Double,
+        currentPixelsPerModelUnit: Float,
+        referencePixelsPerModelUnit: Double? = null,
+        previousEffectiveInterval: Double? = null
+    ): Double {
+        val safeBase = if (baseInterval.isFinite() && baseInterval > 0.0) {
+            baseInterval.coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+        } else {
+            1.0
+        }
+        val currentZ = currentPixelsPerModelUnit.toDouble()
+        val refZ = referencePixelsPerModelUnit
+        if (refZ == null || !refZ.isFinite() || refZ <= 0.0 || !currentZ.isFinite() || currentZ <= 0.0) {
+            return safeBase
+        }
+
+        val zoomRatio = refZ / currentZ
+        if (abs(zoomRatio - 1.0) < 1e-4) {
+            return safeBase
+        }
+
+        val rawTarget = (safeBase * zoomRatio).coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+        val quantized = quantizeToEngineeringStepNotExceeding(rawTarget)
+
+        // Hysteresis guard (Section 7.4): retain previousEffectiveInterval if within 12% of rawTarget
+        // and its screen-space step does not exceed the configured base screen-space step by > 12%.
+        if (previousEffectiveInterval != null &&
+            previousEffectiveInterval.isFinite() &&
+            previousEffectiveInterval > 0.0
+        ) {
+            val relDiff = abs(previousEffectiveInterval - rawTarget) / rawTarget.coerceAtLeast(MIN_GRID_SNAP_INTERVAL)
+            if (relDiff <= 0.12 && previousEffectiveInterval <= rawTarget * 1.12) {
+                return previousEffectiveInterval.coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+            }
+        }
+
+        return quantized.coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+    }
+
+    fun computeEffectiveGridSnapInterval(
+        baseGridInterval: Double,
+        currentPixelsPerModelUnit: Double,
+        referencePixelsPerModelUnit: Double? = null,
+        previousEffectiveInterval: Double? = null
+    ): Double = computeEffectiveGridSnapInterval(
+        baseInterval = baseGridInterval,
+        currentPixelsPerModelUnit = currentPixelsPerModelUnit.toFloat(),
+        referencePixelsPerModelUnit = referencePixelsPerModelUnit,
+        previousEffectiveInterval = previousEffectiveInterval
+    )
+
+    private fun quantizeToEngineeringStepNotExceeding(value: Double): Double {
+        if (!value.isFinite() || value <= MIN_GRID_SNAP_INTERVAL) return MIN_GRID_SNAP_INTERVAL
+        val exp = floor(log10(value))
+        val pow10 = 10.0.pow(exp)
+        val mantissa = value / pow10
+        var chosen = 1.0
+        for (m in ENGINEERING_MANTISSAS) {
+            if (m <= mantissa * 1.0001) {
+                chosen = m
+            }
+        }
+        return (chosen * pow10).coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+    }
+
+    /**
+     * Section 8.3 — Builds the complete Visual Polar Tracking angle set:
      * all 360 whole-number bearings (0°..359°) plus custom fractional visual angles.
      */
     fun buildVisualPolarGuideAngles(snapConfig: GridAndSnapConfig): List<Double> {
@@ -329,7 +435,7 @@ object CadSnapAndCoordEngine {
         for (custom in snapConfig.polarAdditionalAnglesDeg) {
             if (custom.isFinite()) {
                 val norm = normalizeAngle360(custom)
-                if (angles.none { abs(it - norm) < 1e-4 }) {
+                if (angles.none { wrappedAngularDiffDeg(it, norm) < ANGLE_DEDUP_EPSILON_DEG }) {
                     angles.add(norm)
                 }
             }
@@ -338,31 +444,33 @@ object CadSnapAndCoordEngine {
     }
 
     /**
-     * Section 9.6 — Builds the independent PolarSnap angle collection from the multi-select
+     * Section 8.5 — Builds the independent PolarSnap angle collection strictly from the multi-select
      * PolarSnap presets (`polarSnapPresetAnglesDeg`) plus custom PolarSnap angles (`polarSnapCustomAnglesDeg`).
+     * Never mixes `polarAdditionalAnglesDeg` or the all-degree Visual Polar Tracking set into PolarSnap.
      */
     fun buildPolarSnapAngles(snapConfig: GridAndSnapConfig): List<Double> {
         val angles = mutableListOf<Double>()
         val presets = if (snapConfig.polarSnapPresetAnglesDeg.isNotEmpty()) {
             snapConfig.polarSnapPresetAnglesDeg
         } else {
-            setOf(snapConfig.polarTrackingAngleDeg.coerceIn(1.0, 180.0))
+            GridAndSnapConfig().polarSnapPresetAnglesDeg
         }
         for (incRaw in presets) {
+            if (!incRaw.isFinite()) continue
             val inc = incRaw.coerceIn(1.0, 180.0)
             var deg = 0.0
             while (deg < 360.0 - 1e-5) {
                 val norm = normalizeAngle360(deg)
-                if (angles.none { abs(it - norm) < 1e-4 }) {
+                if (angles.none { wrappedAngularDiffDeg(it, norm) < ANGLE_DEDUP_EPSILON_DEG }) {
                     angles.add(norm)
                 }
                 deg += inc
             }
         }
-        for (custom in snapConfig.polarSnapCustomAnglesDeg + snapConfig.polarAdditionalAnglesDeg) {
+        for (custom in snapConfig.polarSnapCustomAnglesDeg) {
             if (custom.isFinite()) {
                 val norm = normalizeAngle360(custom)
-                if (angles.none { abs(it - norm) < 1e-4 }) {
+                if (angles.none { wrappedAngularDiffDeg(it, norm) < ANGLE_DEDUP_EPSILON_DEG }) {
                     angles.add(norm)
                 }
             }
@@ -371,18 +479,30 @@ object CadSnapAndCoordEngine {
     }
 
     /**
-     * Sections 9.4–9.7: Computes the live read-only Polar Tracking preview (R, Cursor Bearing θ,
-     * Track Bearing θp, reference basis, and independent PolarSnap projection) from the accepted
+     * Section 8.2–8.6: Computes the live read-only Polar Tracking preview (R, Cursor Bearing θ,
+     * Track Bearing θₚ, reference basis, and independent PolarSnap projection) from the accepted
      * command [basePoint] to [rawCursorPoint] in model space.
-     * Returns null when [basePoint] is null.
+     *
+     * Visual Track Bearing θₚ ([PolarTrackingPreviewState.activePolarAngleDeg]) is acquired ONLY when
+     * the raw cursor bearing is within [VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG] (0.35°) of a visual guide
+     * candidate, or retained within [VISUAL_POLAR_RELEASE_TOLERANCE_DEG] (0.55°) of [previouslyAcquiredVisualAngleDeg].
+     * It is NEVER assigned from an acquired PolarSnap ray and NEVER falls back unconditionally to the
+     * nearest whole degree when outside visual tolerance.
      */
     fun computePolarTrackingPreview(
         basePoint: Point2D?,
         rawCursorPoint: Point2D,
         snapConfig: GridAndSnapConfig,
-        previousBasePoint: Point2D? = null
+        previousBasePoint: Point2D? = null,
+        previouslyAcquiredVisualAngleDeg: Double? = null
     ): PolarTrackingPreviewState? {
         if (basePoint == null) return null
+        if (!basePoint.x.isFinite() || !basePoint.y.isFinite() ||
+            !rawCursorPoint.x.isFinite() || !rawCursorPoint.y.isFinite()
+        ) {
+            return null
+        }
+
         val dx = rawCursorPoint.x - basePoint.x
         val dy = rawCursorPoint.y - basePoint.y
         val r = hypot(dx, dy)
@@ -390,7 +510,7 @@ object CadSnapAndCoordEngine {
         val useLastSegment = snapConfig.polarRelativeToLastSegment &&
             previousBasePoint != null &&
             previousBasePoint.distanceTo(basePoint) > 1e-5
-        val refDeg = if (useLastSegment && previousBasePoint != null) {
+        val refDeg = if (useLastSegment) {
             normalizeAngle360(previousBasePoint.angleToDeg(basePoint))
         } else {
             0.0
@@ -412,23 +532,24 @@ object CadSnapAndCoordEngine {
             )
         }
 
-        val rawWorldDeg = normalizeAngle360(Math.toDegrees(kotlin.math.atan2(dy, dx)))
+        val rawWorldDeg = normalizeAngle360(Math.toDegrees(atan2(dy, dx)))
         val relativeThetaDeg = normalizeAngle360(rawWorldDeg - refDeg)
-        val tolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
+        val snapTolerance = snapConfig.polarAcquisitionToleranceDeg.coerceIn(0.5, 45.0)
 
-        // Evaluate independent PolarSnap ray acquisition against PolarSnap multi-select presets + custom angles
+        // 1. Evaluate independent PolarSnap ray acquisition against PolarSnap presets + custom snap angles only
         val polarSnapCandidates = buildPolarSnapAngles(snapConfig)
         val bestSnapDeg = polarSnapCandidates.minByOrNull { cand ->
             wrappedAngularDiffDeg(relativeThetaDeg, cand)
         }
         val snapDiff = if (bestSnapDeg != null) wrappedAngularDiffDeg(relativeThetaDeg, bestSnapDeg) else Double.MAX_VALUE
-        val acquiredSnapDeg = if (bestSnapDeg != null && snapDiff <= tolerance) bestSnapDeg else null
+        val acquiredSnapDeg = if (bestSnapDeg != null && snapDiff <= snapTolerance) bestSnapDeg else null
         val projectedSnapPt = if (acquiredSnapDeg != null) {
             basePoint.polarOffset(r, normalizeAngle360(refDeg + acquiredSnapDeg))
         } else {
             null
         }
 
+        // 2. If Visual Polar Tracking is disabled, never acquire or draw a visual guide ray
         if (!snapConfig.polarTrackingEnabled) {
             return PolarTrackingPreviewState(
                 basePoint = basePoint,
@@ -444,30 +565,32 @@ object CadSnapAndCoordEngine {
             )
         }
 
-        // Visual Polar Tracking (Section 9.5): all 360 whole-number bearings (0°..359°) + custom fractional angles.
-        // Priority:
-        // 1. Custom fractional angle in polarAdditionalAnglesDeg within 0.45°
-        // 2. Acquired PolarSnap / major increment ray within tolerance
-        // 3. Nearest whole-number bearing in 0°..359° (or custom fractional angle)
-        val fractionalCustom = snapConfig.polarAdditionalAnglesDeg
-            .filter { it.isFinite() }
-            .map { normalizeAngle360(it) }
-        val nearFractional = fractionalCustom
-            .filter { abs(it - kotlin.math.round(it)) > 1e-3 }
-            .minByOrNull { wrappedAngularDiffDeg(relativeThetaDeg, it) }
-            ?.takeIf { wrappedAngularDiffDeg(relativeThetaDeg, it) <= 0.48 }
-
-        val visualGuideDeg: Double = when {
-            nearFractional != null -> nearFractional
-            acquiredSnapDeg != null -> acquiredSnapDeg
-            else -> {
-                val allVisual = buildVisualPolarGuideAngles(snapConfig)
-                allVisual.minByOrNull { wrappedAngularDiffDeg(relativeThetaDeg, it) }
-                    ?: normalizeAngle360(kotlin.math.round(relativeThetaDeg))
-            }
+        // 3. Evaluate Visual Polar Tracking acquisition strictly against buildVisualPolarGuideAngles(snapConfig)
+        //    using VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG (0.35°) and VISUAL_POLAR_RELEASE_TOLERANCE_DEG (0.55°).
+        val allVisualCandidates = buildVisualPolarGuideAngles(snapConfig)
+        val closestVisualCandidate = allVisualCandidates.minByOrNull { cand ->
+            wrappedAngularDiffDeg(relativeThetaDeg, cand)
+        }
+        val closestVisualDiff = if (closestVisualCandidate != null) {
+            wrappedAngularDiffDeg(relativeThetaDeg, closestVisualCandidate)
+        } else {
+            Double.MAX_VALUE
         }
 
-        val worldPolar = normalizeAngle360(refDeg + visualGuideDeg)
+        val acquiredVisualDeg: Double? = when {
+            closestVisualCandidate != null && closestVisualDiff <= VISUAL_POLAR_ACQUIRE_TOLERANCE_DEG -> {
+                closestVisualCandidate
+            }
+            previouslyAcquiredVisualAngleDeg != null &&
+                previouslyAcquiredVisualAngleDeg.isFinite() &&
+                allVisualCandidates.any { wrappedAngularDiffDeg(it, previouslyAcquiredVisualAngleDeg) < ANGLE_DEDUP_EPSILON_DEG } &&
+                wrappedAngularDiffDeg(relativeThetaDeg, previouslyAcquiredVisualAngleDeg) <= VISUAL_POLAR_RELEASE_TOLERANCE_DEG -> {
+                normalizeAngle360(previouslyAcquiredVisualAngleDeg)
+            }
+            else -> null
+        }
+
+        val worldPolar = acquiredVisualDeg?.let { normalizeAngle360(refDeg + it) }
         return PolarTrackingPreviewState(
             basePoint = basePoint,
             rawCursorPoint = rawCursorPoint,
@@ -475,7 +598,7 @@ object CadSnapAndCoordEngine {
             actualAngleThetaDeg = relativeThetaDeg,
             referenceAngleDeg = refDeg,
             referenceBasisLabel = basisLabel,
-            activePolarAngleDeg = visualGuideDeg,
+            activePolarAngleDeg = acquiredVisualDeg,
             worldPolarAngleDeg = worldPolar,
             activePolarSnapAngleDeg = acquiredSnapDeg,
             projectedPolarPoint = projectedSnapPt
@@ -556,21 +679,77 @@ object CadSnapAndCoordEngine {
         }
     }
 
+    /**
+     * Rounds [rawPoint] to the grid lattice of step [interval], guarding against non-finite
+     * inputs and Long overflow on extreme coordinate magnitudes (Section 7.4).
+     */
     fun applyGridSnap(rawPoint: Point2D, interval: Double): Point2D {
-        val safeInterval = interval.coerceAtLeast(1e-4)
-        val snappedX = (rawPoint.x / safeInterval).roundToLong() * safeInterval
-        val snappedY = (rawPoint.y / safeInterval).roundToLong() * safeInterval
+        if (!rawPoint.x.isFinite() || !rawPoint.y.isFinite()) return Point2D(0.0, 0.0)
+        if (!interval.isFinite() || interval <= 0.0) return rawPoint
+        val safeInterval = interval.coerceIn(MIN_GRID_SNAP_INTERVAL, MAX_GRID_SNAP_INTERVAL)
+        val qx = rawPoint.x / safeInterval
+        val qy = rawPoint.y / safeInterval
+        if (!qx.isFinite() || !qy.isFinite() || abs(qx) > 1e14 || abs(qy) > 1e14) {
+            return rawPoint
+        }
+        val snappedX = qx.roundToLong() * safeInterval
+        val snappedY = qy.roundToLong() * safeInterval
+        if (!snappedX.isFinite() || !snappedY.isFinite()) return rawPoint
         return Point2D(snappedX, snappedY)
     }
 
     /**
+     * Section 7.2–7.4 — Applies zoom-adaptive Grid Snap with screen-space displacement and
+     * usable-viewport boundary guards so Grid Snap never jumps off-screen at high magnification.
+     */
+    fun applyZoomAdaptiveGridSnap(
+        rawPoint: Point2D,
+        baseInterval: Double,
+        viewport: ViewportTransform,
+        referencePixelsPerModelUnit: Double? = null,
+        previousEffectiveInterval: Double? = null,
+        usableRect: UsableViewportRect? = null,
+        maxScreenDisplacementPx: Float = DEFAULT_MAX_SNAP_DISPLACEMENT_PX
+    ): Point2D {
+        if (!rawPoint.x.isFinite() || !rawPoint.y.isFinite()) return Point2D(0.0, 0.0)
+        val effectiveStep = computeEffectiveGridSnapInterval(
+            baseInterval = baseInterval,
+            currentPixelsPerModelUnit = viewport.pixelsPerModelUnit,
+            referencePixelsPerModelUnit = referencePixelsPerModelUnit,
+            previousEffectiveInterval = previousEffectiveInterval
+        )
+        val candidate = applyGridSnap(rawPoint, effectiveStep)
+        val rawScreen = viewport.modelToScreen(rawPoint)
+        val snappedScreen = viewport.modelToScreen(candidate)
+        val screenDelta = hypot(
+            (snappedScreen.x - rawScreen.x).toDouble(),
+            (snappedScreen.y - rawScreen.y).toDouble()
+        ).toFloat()
+
+        // Guard against forcing a snap that exceeds the screen-space displacement limit
+        if (referencePixelsPerModelUnit != null && maxScreenDisplacementPx > 0f && screenDelta > maxScreenDisplacementPx) {
+            return rawPoint
+        }
+
+        // Guard against snapping a visible cursor outside the usable viewport
+        if (usableRect != null &&
+            usableRect.containsScreenOffset(rawScreen) &&
+            !usableRect.containsScreenOffset(snappedScreen)
+        ) {
+            return rawPoint
+        }
+
+        return candidate
+    }
+
+    /**
      * Evaluates OSNAP candidates in screen-space proximity while preserving exact model-space coordinates.
-     * Snap priority (Section 45.7):
+     * Snap priority:
      * 1. Temporary OSNAP override (if active)
      * 2. Active OSNAP modes (Endpoint/Intersection/Center/Midpoint/Quadrant/Perpendicular/Tangent/Insertion/Nearest)
-     * 3. Optional PolarSnap candidate (only when polarTrackingEnabled && polarSnapEnabled && activePolarAngleDeg != null)
+     * 3. Optional PolarSnap candidate (only when polarSnapEnabled && activePolarSnapAngleDeg != null)
      * 4. Ortho lock (when orthoEnabled)
-     * 5. Grid Snap (if enabled)
+     * 5. Zoom-adaptive Grid Snap (if enabled)
      * 6. Free cursor candidate
      */
     fun resolveCursorSnap(
@@ -580,8 +759,18 @@ object CadSnapAndCoordEngine {
         snapConfig: GridAndSnapConfig,
         viewport: ViewportTransform,
         snapApertureScreenPx: Float = 26f,
-        previousReferencePoint: Point2D? = null
+        previousReferencePoint: Point2D? = null,
+        referencePixelsPerModelUnit: Double? = null,
+        previousEffectiveGridInterval: Double? = null,
+        usableRect: UsableViewportRect? = null,
+        usableViewportRect: UsableViewportRect? = null,
+        previouslyAcquiredVisualAngleDeg: Double? = null,
+        maxGridSnapDisplacementPx: Float = DEFAULT_MAX_SNAP_DISPLACEMENT_PX
     ): Pair<Point2D, SnapCandidate?> {
+        if (!rawModelCursor.x.isFinite() || !rawModelCursor.y.isFinite()) {
+            return Point2D(0.0, 0.0) to null
+        }
+
         val activeModes: Set<OsnapMode> = when {
             snapConfig.temporaryOsnapOverride != null -> setOf(snapConfig.temporaryOsnapOverride)
             snapConfig.osnapEnabled -> snapConfig.enabledOsnapModes
@@ -601,7 +790,6 @@ object CadSnapAndCoordEngine {
             val best = candidates
                 .filter { it.point.distanceTo(rawModelCursor) <= maxModelDistance }
                 .minByOrNull { cand ->
-                    // Prioritize structural snaps slightly ahead of NEAREST
                     val modeWeight = if (cand.mode == OsnapMode.NEAREST) 1.6 else 1.0
                     cand.point.distanceTo(rawModelCursor) * modeWeight
                 }
@@ -611,14 +799,21 @@ object CadSnapAndCoordEngine {
         }
 
         var working = rawModelCursor
-        if (snapConfig.orthoEnabled && referencePoint != null) {
+        val isOrthoLocked = snapConfig.orthoEnabled && referencePoint != null
+        val isOrthoHorizontal = if (referencePoint != null && snapConfig.orthoEnabled) {
+            abs(rawModelCursor.x - referencePoint.x) >= abs(rawModelCursor.y - referencePoint.y)
+        } else {
+            false
+        }
+        if (isOrthoLocked) {
             working = applyOrthoLock(working, referencePoint)
         } else if (snapConfig.polarSnapEnabled && referencePoint != null) {
             val polarPreview = computePolarTrackingPreview(
                 basePoint = referencePoint,
                 rawCursorPoint = working,
                 snapConfig = snapConfig,
-                previousBasePoint = previousReferencePoint
+                previousBasePoint = previousReferencePoint,
+                previouslyAcquiredVisualAngleDeg = previouslyAcquiredVisualAngleDeg
             )
             if (polarPreview?.projectedPolarPoint != null) {
                 working = polarPreview.projectedPolarPoint
@@ -626,7 +821,24 @@ object CadSnapAndCoordEngine {
             }
         }
         if (snapConfig.gridSnapEnabled) {
-            working = applyGridSnap(working, snapConfig.gridSnapInterval)
+            val gridSnapped = applyZoomAdaptiveGridSnap(
+                rawPoint = working,
+                baseInterval = snapConfig.gridSnapInterval,
+                viewport = viewport,
+                referencePixelsPerModelUnit = referencePixelsPerModelUnit,
+                previousEffectiveInterval = previousEffectiveGridInterval,
+                usableRect = usableRect ?: usableViewportRect,
+                maxScreenDisplacementPx = maxGridSnapDisplacementPx
+            )
+            working = if (referencePoint != null && snapConfig.orthoEnabled) {
+                if (isOrthoHorizontal) {
+                    Point2D(gridSnapped.x, referencePoint.y)
+                } else {
+                    Point2D(referencePoint.x, gridSnapped.y)
+                }
+            } else {
+                gridSnapped
+            }
         }
         return working to null
     }
@@ -720,7 +932,7 @@ object CadSnapAndCoordEngine {
                         val d = referencePoint.distanceTo(e.center)
                         if (d > e.radius + 1e-4) {
                             val baseAngle = e.center.angleToDeg(referencePoint)
-                            val deltaDeg = Math.toDegrees( kotlin.math.acos((e.radius / d).coerceIn(-1.0, 1.0)) )
+                            val deltaDeg = Math.toDegrees(kotlin.math.acos((e.radius / d).coerceIn(-1.0, 1.0)))
                             list.add(SnapCandidate(e.center.polarOffset(e.radius, baseAngle + deltaDeg), OsnapMode.TANGENT, e.id))
                             list.add(SnapCandidate(e.center.polarOffset(e.radius, baseAngle - deltaDeg), OsnapMode.TANGENT, e.id))
                         }

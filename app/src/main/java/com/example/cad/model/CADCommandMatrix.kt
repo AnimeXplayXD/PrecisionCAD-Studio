@@ -1,5 +1,7 @@
 package com.example.cad.model
 
+import java.util.Locale
+
 /**
  * Verification test case definition for a CAD command in the compatibility matrix.
  */
@@ -38,36 +40,36 @@ data class CADCommandMatrix(
         if (category == null) entries else entries.filter { it.category == category }
 
     fun search(query: String): List<CADCommandMatrixEntry> {
-        val q = query.trim().uppercase()
+        val q = query.trim().uppercase(Locale.ROOT)
         if (q.isEmpty()) return entries
         return entries.filter { entry ->
-            entry.commandName.uppercase().contains(q) ||
-                entry.aliases.any { it.uppercase().contains(q) } ||
-                entry.supportedOptions.any { it.uppercase().contains(q) } ||
-                entry.expectedOutput.uppercase().contains(q) ||
+            entry.commandName.uppercase(Locale.ROOT).contains(q) ||
+                entry.aliases.any { it.uppercase(Locale.ROOT).contains(q) } ||
+                entry.supportedOptions.any { it.uppercase(Locale.ROOT).contains(q) } ||
+                entry.expectedOutput.uppercase(Locale.ROOT).contains(q) ||
                 entry.verificationTestCases.any {
-                    it.testCaseId.uppercase().contains(q) || it.title.uppercase().contains(q)
+                    it.testCaseId.uppercase(Locale.ROOT).contains(q) || it.title.uppercase(Locale.ROOT).contains(q)
                 }
         }
     }
 
     fun filter(category: CadCommandCategory?, query: String): List<CADCommandMatrixEntry> {
         val byCat = filterByCategory(category)
-        val q = query.trim().uppercase()
+        val q = query.trim().uppercase(Locale.ROOT)
         if (q.isEmpty()) return byCat
         return byCat.filter { entry ->
-            entry.commandName.uppercase().contains(q) ||
-                entry.aliases.any { it.uppercase().contains(q) } ||
-                entry.supportedOptions.any { it.uppercase().contains(q) } ||
-                entry.expectedOutput.uppercase().contains(q) ||
+            entry.commandName.uppercase(Locale.ROOT).contains(q) ||
+                entry.aliases.any { it.uppercase(Locale.ROOT).contains(q) } ||
+                entry.supportedOptions.any { it.uppercase(Locale.ROOT).contains(q) } ||
+                entry.expectedOutput.uppercase(Locale.ROOT).contains(q) ||
                 entry.verificationTestCases.any {
-                    it.testCaseId.uppercase().contains(q) || it.title.uppercase().contains(q)
+                    it.testCaseId.uppercase(Locale.ROOT).contains(q) || it.title.uppercase(Locale.ROOT).contains(q)
                 }
         }
     }
 
     fun findByCommandNameOrAlias(token: String): CADCommandMatrixEntry? {
-        val upper = token.trim().uppercase()
+        val upper = token.trim().uppercase(Locale.ROOT)
         return entries.firstOrNull { entry ->
             entry.commandName.equals(upper, ignoreCase = true) ||
                 entry.aliases.any { it.equals(upper, ignoreCase = true) }
