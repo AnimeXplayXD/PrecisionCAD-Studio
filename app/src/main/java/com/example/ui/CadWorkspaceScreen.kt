@@ -154,7 +154,6 @@ import com.example.cad.model.WorkspaceSpace
 import com.example.cad.update.CadReleaseEntry
 import com.example.cad.update.CadUpdateUiState
 import java.util.Locale
-import com.example.ui.components.BindCadDeckIdleTimerEffect
 import com.example.ui.components.CadDeckIdleTimerState
 import com.example.ui.components.CadReleaseCatalogueDialog
 import com.example.ui.components.CadViewportCanvas
@@ -2350,10 +2349,6 @@ private fun ContextualCommandAndOptionsDock(
             isVisible = isCommandDeckVisible,
             isEnabled = isCommandDeckVisible,
             postExchangeRevealMs = 0L
-        )
-        BindCadDeckIdleTimerEffect(
-            timerState = commandDeckTimer,
-            isEligible = isCommandDeckVisible
         )
 
         var isSendCardInFront by rememberSaveable { mutableStateOf(true) }

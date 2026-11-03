@@ -170,10 +170,34 @@ class CadDeckIdleTimerState(
 
     var directInteractionGeneration: Int by mutableIntStateOf(0)
         private set
+    var activeLifecycleObserverCount: Int by mutableIntStateOf(0)
+        private set
+    var activeTimerDriverCount: Int by mutableIntStateOf(0)
+        private set
     var elapsedIdleMs: Long = 0L
         private set
     var elapsedPostExchangeMs: Long = 0L
         private set
+
+    internal fun attachLifecycleObserver(): Boolean {
+        if (activeLifecycleObserverCount >= 1) return false
+        activeLifecycleObserverCount = 1
+        return true
+    }
+
+    internal fun detachLifecycleObserver() {
+        activeLifecycleObserverCount = (activeLifecycleObserverCount - 1).coerceAtLeast(0)
+    }
+
+    internal fun attachTimerDriver(): Boolean {
+        if (activeTimerDriverCount >= 1) return false
+        activeTimerDriverCount = 1
+        return true
+    }
+
+    internal fun detachTimerDriver() {
+        activeTimerDriverCount = (activeTimerDriverCount - 1).coerceAtLeast(0)
+    }
 
     val isEligibleForTimer: Boolean
         get() = isParentVisible && isDeckEnabled && isWindowResumed && !isTransitionRunning
@@ -310,14 +334,20 @@ fun rememberCadDeckIdleTimerState(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     DisposableEffect(lifecycleOwner, state) {
+        val attached = state.attachLifecycleObserver()
         val observer = LifecycleEventObserver { _, event ->
             val resumed = event == Lifecycle.Event.ON_RESUME ||
                 lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             state.updateEligibility(windowResumed = resumed)
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
+        if (attached) {
+            lifecycleOwner.lifecycle.addObserver(observer)
+        }
         onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (attached) {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+                state.detachLifecycleObserver()
+            }
             state.updateEligibility(parentVisible = false)
         }
     }
@@ -330,25 +360,31 @@ fun rememberCadDeckIdleTimerState(
         )
     }
 
-    // Drive post-exchange 2.4s reveal retraction and 75s section-local idle peek
+    // Sole timer driver for this CadDeckIdleTimerState instance (V18.3 §3.2):
+    // Drives post-exchange 2.4s reveal retraction and 75s section-local idle peek.
     LaunchedEffect(
         state.isEligibleForTimer,
         state.isPostExchangeRevealing,
         state.directInteractionGeneration
     ) {
         if (!state.isParentVisible || !state.isWindowResumed) return@LaunchedEffect
+        val attachedDriver = state.attachTimerDriver()
+        if (!attachedDriver) return@LaunchedEffect
+        try {
+            if (state.isPostExchangeRevealing && state.postExchangeRevealMs > 0L) {
+                delay(state.postExchangeRevealMs)
+                state.advanceTimeBy(state.postExchangeRevealMs)
+            }
 
-        if (state.isPostExchangeRevealing && state.postExchangeRevealMs > 0L) {
-            delay(state.postExchangeRevealMs)
-            state.advanceTimeBy(state.postExchangeRevealMs)
-        }
-
-        while (state.isEligibleForTimer) {
-            delay(state.idleIntervalMs)
-            if (!state.isEligibleForTimer) break
-            state.advanceTimeBy(state.idleIntervalMs)
-            delay(state.idlePeekHoldMs)
-            state.advanceTimeBy(state.idlePeekHoldMs)
+            while (state.isEligibleForTimer) {
+                delay(state.idleIntervalMs)
+                if (!state.isEligibleForTimer) break
+                state.advanceTimeBy(state.idleIntervalMs)
+                delay(state.idlePeekHoldMs)
+                state.advanceTimeBy(state.idlePeekHoldMs)
+            }
+        } finally {
+            state.detachTimerDriver()
         }
     }
 
@@ -378,61 +414,6 @@ fun rememberCadDeckIdleTimerState(
     isVisible = true,
     isEnabled = true
 )
-
-@Composable
-fun BindCadDeckIdleTimerEffect(
-    timerState: CadDeckIdleTimerState,
-    isEligible: Boolean
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val isReducedMotion = remember(context) {
-        runCatching {
-            android.provider.Settings.Global.getFloat(
-                context.contentResolver,
-                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
-                1f
-            ) == 0f
-        }.getOrDefault(false)
-    }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, timerState) {
-        val observer = LifecycleEventObserver { _, event ->
-            val resumed = event == Lifecycle.Event.ON_RESUME ||
-                lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-            timerState.updateEligibility(windowResumed = resumed)
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            timerState.updateEligibility(parentVisible = false)
-        }
-    }
-    LaunchedEffect(isEligible, isReducedMotion) {
-        timerState.updateEligibility(
-            parentVisible = isEligible,
-            deckEnabled = isEligible,
-            reducedMotion = isReducedMotion
-        )
-    }
-    LaunchedEffect(
-        timerState.isEligibleForTimer,
-        timerState.isPostExchangeRevealing,
-        timerState.directInteractionGeneration
-    ) {
-        if (!timerState.isParentVisible || !timerState.isWindowResumed) return@LaunchedEffect
-        if (timerState.isPostExchangeRevealing && timerState.postExchangeRevealMs > 0L) {
-            delay(timerState.postExchangeRevealMs)
-            timerState.advanceTimeBy(timerState.postExchangeRevealMs)
-        }
-        while (timerState.isEligibleForTimer) {
-            delay(timerState.idleIntervalMs)
-            if (!timerState.isEligibleForTimer) break
-            timerState.advanceTimeBy(timerState.idleIntervalMs)
-            delay(timerState.idlePeekHoldMs)
-            timerState.advanceTimeBy(timerState.idlePeekHoldMs)
-        }
-    }
-}
 
 /**
  * Section 9 & Section 12 — Application-Wide Binary Toggle-Card Component.

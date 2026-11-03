@@ -44,6 +44,7 @@
 - **Paper Space Sheet & Opaque Title Block Pass**:
   - Splits Paper Space rendering into a sheet base pass (drawn before the grid) and an opaque title-block pass (drawn after the grid) so grid lines never bleed through the title block, with zoom-independent screen-space title-block typography.
 - **Shared Card Component & Section-Local Idle Motion System**:
+  - Single lifecycle-aware timer driver (`rememberCadDeckIdleTimerState`) per `CadDeckIdleTimerState` instance (exactly one `LifecycleEventObserver` and one timer coroutine per deck, with zero duplicate bindings).
   - Concealed rear card at rest, `0L` post-exchange reveal on the Command Send/Cancel stack (rear card revealed only during the `75s` section-local idle peek window), and `2.4s` post-exchange reveal + `75s` section-local idle peek (`CadDeckIdleTimerState`) on standard two-card decks.
   - Layout-phase lambda `Modifier.offset { IntOffset(...) }` animations across all card decks so animated cards do not trigger unnecessary Compose recomposition.
   - Green `ENABLE` and neutral-grey `DISABLE` binary cards across Cursor Control, Grid & OSNAP settings, with 3-region OSNAP cards (`[END]` badge left, horizontal marquee full label middle, `ENABLE`/`DISABLE` right).
@@ -62,7 +63,7 @@
 ## Current Scope Limitations
 
 - Strictly 2D drafting and annotation (no 3D solid modeling, 3D meshes, or Z-axis extrusion).
-- Production Release APK signing in CI fails closed unless all five canonical repository signing secrets (`KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`, `RELEASE_CERT_SHA256`) are configured and pass SHA-256 certificate verification.
+- Production Release APK signing in CI fails closed unless all five canonical repository signing secrets (`KEYSTORE_BASE64`, `STORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`, `RELEASE_CERT_SHA256`) are configured and pass both `keytool` preflight and post-build `apksigner` SHA-256 certificate verification (`scripts/verify_apksigner_certificate.py`).
 
 ---
 

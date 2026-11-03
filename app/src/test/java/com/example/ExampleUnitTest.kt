@@ -1410,7 +1410,7 @@ class ExampleUnitTest {
         assertFalse(commandDeck.isRearCardVisible)
         assertFalse(commandDeck.isRearCardRevealed)
 
-        // 2. Verify root version.properties (1.18.2, VERSION_CODE=20) and gradle-wrapper.properties (9.8.2)
+        // 2. Verify root version.properties (1.18.3, VERSION_CODE>=20) and gradle-wrapper.properties (9.8.2)
         val repoRoot = java.io.File("..").takeIf { java.io.File(it, "version.properties").exists() }
             ?: java.io.File(".")
         val versionPropsFile = java.io.File(repoRoot, "version.properties")
@@ -1420,7 +1420,7 @@ class ExampleUnitTest {
             }
             assertEquals("1", vProps.getProperty("VERSION_MAJOR"))
             assertEquals("18", vProps.getProperty("VERSION_MINOR"))
-            assertEquals("2", vProps.getProperty("VERSION_PATCH"))
+            assertEquals("3", vProps.getProperty("VERSION_PATCH"))
             val vCode = vProps.getProperty("VERSION_CODE", "0").toInt()
             assertTrue(vCode >= 20)
         }
@@ -1431,7 +1431,7 @@ class ExampleUnitTest {
             assertTrue(wrapperText.contains("21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607"))
         }
 
-        // 3. Requirement D: Verify licensing-inventory.yml Python 3.12 provisioning and generate_licensing_inventory.py schema 18.2.0
+        // 3. Requirement D/E: Verify licensing-inventory.yml Python 3.12 provisioning and generate_licensing_inventory.py schema 18.3.0
         val workflowFile = java.io.File(repoRoot, ".github/workflows/licensing-inventory.yml")
         if (workflowFile.exists()) {
             val wfText = workflowFile.readText()
@@ -1442,10 +1442,129 @@ class ExampleUnitTest {
         val scriptFile = java.io.File(repoRoot, "scripts/generate_licensing_inventory.py")
         if (scriptFile.exists()) {
             val scriptText = scriptFile.readText()
-            assertTrue(scriptText.contains("SCHEMA_VERSION = \"18.2.0\""))
+            assertTrue(scriptText.contains("SCHEMA_VERSION = \"18.3.0\""))
             assertTrue(scriptText.contains("NOT_APPLICABLE"))
             assertTrue(scriptText.contains("BOOTSTRAP_FAILED_PYTHON_MISSING"))
         }
     }
+
+    @Test
+    fun `TC-V18_3-01 verify V18_3 apksigner SHA-256 certificate parser and single timer driver per CadDeckIdleTimerState`() {
+        val repoRoot = java.io.File("..").takeIf { java.io.File(it, "version.properties").exists() }
+            ?: java.io.File(".")
+
+        // 1. Requirement A (§2.4): Verify scripts/verify_apksigner_certificate.py self-tests and exact user-supplied V2 Signer fixture
+        val verifierScript = java.io.File(repoRoot, "scripts/verify_apksigner_certificate.py")
+        assertTrue("verify_apksigner_certificate.py must exist", verifierScript.exists())
+
+        val selfTestProc = ProcessBuilder("python3", verifierScript.absolutePath, "--self-test")
+            .redirectErrorStream(true)
+            .start()
+        val selfTestOutput = selfTestProc.inputStream.bufferedReader().readText()
+        val selfTestExit = selfTestProc.waitFor()
+        assertEquals("Self-test failed: $selfTestOutput", 0, selfTestExit)
+        assertTrue(selfTestOutput.contains("SELF_TEST_OK"))
+
+        val exactUserSignerOutput = """
+            Verified using v1 scheme (JAR signing): false
+            Verified using v2 scheme (APK Signature Scheme v2): true
+            Verified using v3 scheme (APK Signature Scheme v3): false
+            Verified using v3.1 scheme (APK Signature Scheme v3.1): false
+            Verified using v3.2 scheme (APK Signature Scheme v3.2): false
+            Verified using v4 scheme (APK Signature Scheme v4): false
+            Verified for SourceStamp: false
+            Number of signers: 1
+            V2 Signer: certificate SHA-256 digest: 7bbcda1924e95ca1758c7e0ac763b56ae9f7eafef4c6e7362bf2d63c63531e59
+        """.trimIndent()
+        val trustedHex = "7BBCDA1924E95CA1758C7E0AC763B56AE9F7EAFEF4C6E7362BF2D63C63531E59"
+
+        val parseProc = ProcessBuilder(
+            "python3",
+            verifierScript.absolutePath,
+            "--expected",
+            trustedHex,
+            "--quiet-digest-only"
+        ).start()
+        parseProc.outputStream.bufferedWriter().use { it.write(exactUserSignerOutput) }
+        val parsedDigest = parseProc.inputStream.bufferedReader().readText().trim()
+        val parseExit = parseProc.waitFor()
+        assertEquals(0, parseExit)
+        assertEquals(
+            "7bbcda1924e95ca1758c7e0ac763b56ae9f7eafef4c6e7362bf2d63c63531e59",
+            parsedDigest
+        )
+        assertFalse(parsedDigest.contains("certificatesha-256digest"))
+
+        // Verify workflow uses verify_apksigner_certificate.py and no longer uses awk -F':' '{print $2}' on apksigner output
+        val buildWorkflow = java.io.File(repoRoot, ".github/workflows/build-signed-apk.yml")
+        if (buildWorkflow.exists()) {
+            val buildWfText = buildWorkflow.readText()
+            assertTrue(buildWfText.contains("scripts/verify_apksigner_certificate.py"))
+            assertFalse(buildWfText.contains("grep -i \"certificate SHA-256 digest:\" | head -n 1 | awk -F':' '{print $2}'"))
+        }
+
+        // 2. Requirement B (§3.2 & §3.6): Verify single lifecycle observer and single timer driver ownership per CadDeckIdleTimerState
+        val deckA = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_a")
+        val deckB = com.example.ui.components.CadDeckIdleTimerState(deckId = "deck_b")
+
+        assertEquals(0, deckA.activeLifecycleObserverCount)
+        assertEquals(0, deckA.activeTimerDriverCount)
+        assertTrue(deckA.attachLifecycleObserver())
+        assertEquals(1, deckA.activeLifecycleObserverCount)
+        // Second observer attempt on the same state must be rejected
+        assertFalse(deckA.attachLifecycleObserver())
+        assertEquals(1, deckA.activeLifecycleObserverCount)
+
+        assertTrue(deckA.attachTimerDriver())
+        assertEquals(1, deckA.activeTimerDriverCount)
+        // Second timer driver attempt on the same state must be rejected
+        assertFalse(deckA.attachTimerDriver())
+        assertEquals(1, deckA.activeTimerDriverCount)
+
+        deckA.detachTimerDriver()
+        assertEquals(0, deckA.activeTimerDriverCount)
+        deckA.detachLifecycleObserver()
+        assertEquals(0, deckA.activeLifecycleObserverCount)
+
+        // Verify 74,999 ms does not reveal rear card; +1 ms starts peek; +1,000 ms conceals it; deckB clock is independent
+        deckA.advanceTimeBy(74_999L)
+        assertFalse(deckA.isIdlePeeking)
+        assertFalse(deckA.isRearCardRevealed)
+        assertEquals(0L, deckB.elapsedIdleMs)
+
+        deckA.advanceTimeBy(1L)
+        assertTrue(deckA.isIdlePeeking)
+        assertTrue(deckA.isRearCardRevealed)
+        assertFalse(deckB.isIdlePeeking)
+
+        // Direct interaction during active peek terminates peek immediately and resets elapsedIdleMs
+        deckA.onDirectInteraction()
+        assertFalse(deckA.isIdlePeeking)
+        assertEquals(0L, deckA.elapsedIdleMs)
+
+        // Verify BindCadDeckIdleTimerEffect has been completely removed from source files
+        val binaryCardSource = java.io.File(
+            repoRoot,
+            "app/src/main/java/com/example/ui/components/CadBinaryToggleCard.kt"
+        )
+        val workspaceSource = java.io.File(
+            repoRoot,
+            "app/src/main/java/com/example/ui/CadWorkspaceScreen.kt"
+        )
+        val releaseDialogSource = java.io.File(
+            repoRoot,
+            "app/src/main/java/com/example/ui/components/CadReleaseCatalogueDialog.kt"
+        )
+        if (binaryCardSource.exists()) {
+            assertFalse(binaryCardSource.readText().contains("fun BindCadDeckIdleTimerEffect"))
+        }
+        if (workspaceSource.exists()) {
+            assertFalse(workspaceSource.readText().contains("BindCadDeckIdleTimerEffect"))
+        }
+        if (releaseDialogSource.exists()) {
+            assertFalse(releaseDialogSource.readText().contains("BindCadDeckIdleTimerEffect"))
+        }
+    }
 }
+
 

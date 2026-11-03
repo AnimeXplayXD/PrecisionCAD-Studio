@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Informational Source, Dependency, and Bundled-Material Licensing Inventory Generator (V18.1).
+Informational Source, Dependency, and Bundled-Material Licensing Inventory Generator (V18.3).
 
-STRICT SCOPE (V18.1 Part D / Sections 7–11):
+STRICT SCOPE (V18.3 §6):
 - Informational inventory only.
 - Reports licence identifiers, SPDX headers, copyright statements, and exact GAV POM package metadata
   observed in repository files, resolved Gradle configurations, CycloneDX SBOMs, and bundled materials.
@@ -28,7 +28,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-SCHEMA_VERSION = "18.2.0"
+SCHEMA_VERSION = "18.3.0"
 
 DISCLAIMER_TEXT = (
     "Informational inventory only. Automated detection reports licence and copyright "
@@ -58,6 +58,8 @@ EXCLUDED_FILES = {
 
 EXCLUDED_EXTENSIONS = {
     ".jks",
+    ".p12",
+    ".b64",
     ".keystore",
     ".apk",
     ".aab",
@@ -1040,7 +1042,7 @@ def write_cyclonedx_bom(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate V18.1 informational licensing inventory.")
+    parser = argparse.ArgumentParser(description="Generate V18.3 informational licensing inventory.")
     parser.add_argument("--output-dir", default="reports/licensing", help="Output directory")
     parser.add_argument("--scancode-bin", default="", help="Optional path to ScanCode CLI executable")
     parser.add_argument(

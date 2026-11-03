@@ -26,9 +26,9 @@
 
 ## 2. Automated Versioning (`version.properties` + `app/build.gradle.kts`)
 
-- Base version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=2`, `VERSION_CODE=20`) are stored in root `version.properties`.
+- Base version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=3`, `VERSION_CODE=20`) are stored in root `version.properties`.
 - In GitHub Actions CI, `VERSION_CODE` is computed as `BASE_CODE + GITHUB_RUN_NUMBER` and verified across **all paginated** GitHub Releases (`per_page=100`, `page=1..N`) to guarantee that every new stable Release has a `versionCode` strictly greater than the highest previously published stable release.
-- Manual `version_name_override` values on `workflow_dispatch` are validated via environment variables (`INPUT_VERSION_OVERRIDE`) without direct shell expansion of `${{ inputs.* }}`.
+- Manual `version_name_override` values on `workflow_dispatch` are validated via environment variables (`INPUT_VERSION_NAME_OVERRIDE`) without direct shell expansion of `${{ inputs.* }}`.
 
 ---
 
@@ -40,13 +40,14 @@
   2. `STORE_PASSWORD` — Keystore password
   3. `KEY_PASSWORD` — Key password
   4. `KEY_ALIAS` — Signing key alias (`precisioncad_release`)
-  5. `RELEASE_CERT_SHA256` — 64-character uppercase hex SHA-256 certificate fingerprint
-- **Pre-Build & Post-Sign Verification**:
-  - Before Gradle runs, the workflow decodes the keystore to `$RUNNER_TEMP/precisioncad-release-signing.jks` (`chmod 600`), verifies that `KEY_ALIAS` exists via `keytool -list`, and verifies that the keystore's SHA-256 certificate fingerprint matches `RELEASE_CERT_SHA256`.
-  - After `:app:assembleRelease`, `apksigner verify --print-certs` confirms v2/v3 signatures and verifies that the signed APK's signer SHA-256 fingerprint matches `RELEASE_CERT_SHA256`.
+  5. `RELEASE_CERT_SHA256` — 64-character hex SHA-256 certificate fingerprint
+- **Pre-Build & Post-Sign Certificate Verification (`scripts/verify_apksigner_certificate.py`)**:
+  - Before Gradle runs, the workflow decodes the keystore to `$RUNNER_TEMP/precisioncad-release-<runId>-<attempt>.jks` (`chmod 600`), verifies that `KEY_ALIAS` exists via `keytool -list -v`, extracts the hex value after `SHA256:`, validates that both actual and expected values are 64-character hex strings (`^[0-9a-f]{64}$`), and verifies exact equality with `RELEASE_CERT_SHA256`.
+  - After `:app:assembleRelease`, the workflow runs `python3 scripts/verify_apksigner_certificate.py --self-test` (14 unit fixtures) and pipes `apksigner verify --verbose --print-certs` output into `scripts/verify_apksigner_certificate.py --expected "$EXPECTED_CERT_SHA256"`.
+  - Unlike naive `awk -F':' '{print $2}'` field splitting (which fails on lines with two colons such as `V2 Signer: certificate SHA-256 digest: <hex>` and extracts the label `certificatesha-256digest`), `scripts/verify_apksigner_certificate.py` validates `Number of signers: 1`, requires exactly one `certificate SHA-256 digest:` line, strips everything through the literal `certificate SHA-256 digest:` marker, normalizes both actual and expected digests to 64-character lowercase hex (`^[0-9a-f]{64}$`), and compares them character-for-character.
 - **Step-Scoped Password & Keystore Cleanup**:
   - `STORE_PASSWORD` and `KEY_PASSWORD` are never written to `$GITHUB_ENV`; they are passed only as step-scoped `env:` variables on the steps that decode/verify the keystore and invoke Gradle.
-  - A final `if: always()` cleanup step removes `$RUNNER_TEMP/precisioncad-release-signing.jks` on every job outcome.
+  - A final `if: always()` cleanup step removes the staged keystore from `$RUNNER_TEMP` on every job outcome.
 - **Lint Throwaway Keystore Isolation**:
   - `.github/workflows/lint.yml` creates its temporary non-production keystore (`lint-throwaway-nonprod.jks`) inside the same shell step that runs `./gradlew :app:lintRelease` and deletes it via `trap 'rm -f "$THROW_KEY"' EXIT` without writing paths or passwords to `$GITHUB_ENV`.
 

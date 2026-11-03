@@ -10,8 +10,9 @@ The workflow `.github/workflows/licensing-inventory.yml` and generator script `s
 
 1. **First-Party & Bundled Repository Files**:
    - Scans source files, Gradle scripts, XML resources, documentation, and bundled binary assets (including `design-assets/icons/`).
-   - Provisions Python `3.12.x` via `actions/setup-python@v7.1.0` on `ubuntu-26.04` before bootstrapping the official ScanCode Toolkit `v32.5.0` standalone Python 3.12 Linux archive (`scancode-toolkit-v32.5.0_py3.12-linux.tar.gz`, verified against SHA-256 `638adcd0af576d1f4d5b64dde228724b3ca4fdee2c4de20d88e4356be353f027`) in CI alongside the built-in deterministic repository file inspector (`repository-file-inspector.json`).
-   - Distinguishes archive SHA-256 verification from CLI execution (`ARCHIVE_VERIFIED`, `BOOTSTRAP_FAILED_PYTHON_MISSING`, `VERSION_CHECK_FAILED`, `SCAN_FAILED`, `SCAN_PARTIAL`, `SCAN_COMPLETE`).
+   - Provisions Python `3.12.x` via `actions/setup-python@v7.1.0` on `ubuntu-26.04` and logs safe runtime preflight facts (`command -v python3.12`, `python3.12 --version`, and `sys.executable`) before bootstrapping the official ScanCode Toolkit `v32.5.0` standalone Python 3.12 Linux archive (`scancode-toolkit-v32.5.0_py3.12-linux.tar.gz`, verified against SHA-256 `638adcd0af576d1f4d5b64dde228724b3ca4fdee2c4de20d88e4356be353f027`) in CI alongside the built-in deterministic repository file inspector (`repository-file-inspector.json`).
+   - Distinguishes archive SHA-256 verification from CLI execution (`ARCHIVE_VERIFIED`, `BOOTSTRAP_FAILED_PYTHON_MISSING`, `VERSION_CHECK_FAILED`, `SCAN_FAILED`, `SCAN_PARTIAL`, `SCAN_COMPLETE`) under report schema `18.3.0`.
+   - Records exact `commitSha`, `branchRef`, `runId`, `effectiveVersionName`, `effectiveVersionCode`, and toolchain versions (`gradleWrapper`, `agp`, `kotlin`, `ksp`, `jdk`) in `licensing-inventory-status.json`.
    - Records observed `SPDX-License-Identifier` headers, copyright notices, file SHA-256 digests, and line ranges.
    - Binary/image assets without embedded licence text are recorded as `NOT_DETECTED` (never inferred from appearance or filename).
 2. **Resolved Gradle Dependency Graphs & Exact POM Metadata**:

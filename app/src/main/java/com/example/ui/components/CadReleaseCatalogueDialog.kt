@@ -390,10 +390,6 @@ fun CadReleaseCatalogueDialog(
                     isVisible = true,
                     isEnabled = true
                 )
-                BindCadDeckIdleTimerEffect(
-                    timerState = actionDeckTimer,
-                    isEligible = true
-                )
 
                 var isPrimaryActionInFront by androidx.compose.runtime.saveable.rememberSaveable {
                     androidx.compose.runtime.mutableStateOf(true)

@@ -124,9 +124,13 @@ jobs:
             exit 1
           fi
 
+          PY312_BIN="$(command -v python3.12)"
+          PY312_EXEC="$(python3.12 -c 'import sys; print(sys.executable)')"
+          echo "Python 3.12 command -v: ${PY312_BIN}" | tee -a "$INSTALL_LOG"
+          echo "Python 3.12 sys.executable: ${PY312_EXEC}" | tee -a "$INSTALL_LOG"
           echo "Python 3.12 runtime: $(python3.12 --version 2>&1)" | tee -a "$INSTALL_LOG"
           if [ -x "${EXTRACT_DIR}/configure" ]; then
-            if ! PYTHON_EXECUTABLE="$(command -v python3.12)" "${EXTRACT_DIR}/configure" >> "$INSTALL_LOG" 2>&1; then
+            if ! PYTHON_EXECUTABLE="${PY312_BIN}" "${EXTRACT_DIR}/configure" >> "$INSTALL_LOG" 2>&1; then
               echo "SCANCODE_INSTALL_STATUS=BOOTSTRAP_FAILED_PYTHON_MISSING" >> "$GITHUB_ENV"
               echo "ERROR: ScanCode ./configure bootstrap failed" | tee -a "$INSTALL_LOG"
               exit 1
