@@ -43,6 +43,12 @@
     src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7f52ff"
     alt="Built with Kotlin and Jetpack Compose"
   />
+  <a href="LICENSE">
+    <img
+      src="https://img.shields.io/badge/License-Apache_2.0-0ea5e9"
+      alt="Licensed under Apache License 2.0"
+    />
+  </a>
 </p>
 
 <p align="center">
@@ -202,7 +208,8 @@ All version values below are taken directly from [`gradle/libs.versions.toml`](g
 | Component | Value |
 | :--- | :--- |
 | **Platform** | Android |
-| **Application ID** | `com.precisioncad.studio` |
+| **Application ID & Namespace** | `com.precisioncad.studio` |
+| **Application Theme Resource** | `Theme.PrecisionCADStudio` (`PrecisionCADTheme` in Compose) |
 | **Base Version (`version.properties`)** | `1.18.3` (base `VERSION_CODE = 20`) |
 | **Language** | Kotlin `2.4.21` |
 | **UI Toolkit** | Jetpack Compose (Compose BOM `2026.09.00`, Material 3) |
@@ -216,13 +223,14 @@ All version values below are taken directly from [`gradle/libs.versions.toml`](g
 | **Compile Android SDK (`compileSdk`)** | API `37`, minor API level `2` (`android-37.2`) |
 | **Java Bytecode Target** | Java `11` (`JavaVersion.VERSION_11`) |
 | **CI Runner JDK** | JDK `21` (Temurin on `ubuntu-26.04`) |
-| **Unit & UI Verification** | JUnit `4.13.2`, Robolectric `4.17`, Compose UI Test |
+| **Unit & UI Verification** | JUnit `4.13.2`, Robolectric `4.17` (`PrecisionCADUnitTest`, `PrecisionCADRobolectricTest`, `PrecisionCADInstrumentedTest`) |
+| **Licence** | [Apache License, Version 2.0](LICENSE) |
 
 ---
 
 ## Architecture at a Glance
 
-PrecisionCAD Studio is organized into five deterministic packages under `app/src/main/java/com/example/`:
+PrecisionCAD Studio is organized into five deterministic packages under `app/src/main/java/com/precisioncad/studio/`:
 
 - **`cad/model/` — Domain Entities & Units:** Immutable 2D entity definitions (`CadEntities.kt`), unit systems, sheet configurations, command specifications, and locale-invariant number formatting (`CadUnitsAndSheet.kt`).
 - **`cad/kernel/` — Analytical 2D Geometry & Snapping:** Exact intersection solvers, entity modification algorithms (`CadGeometryKernel.kt`, `CadModificationEngine.kt`), coordinate expression parsing, OSNAP evaluation, zoom-adaptive Grid Snap, and separated Visual Polar Tracking / PolarSnap (`CadSnapAndCoordEngine.kt`).
@@ -244,7 +252,10 @@ For a complete breakdown of rendering passes and state ownership, see [`docs/ARC
 | [`docs/DIMENSION_SYSTEM.md`](docs/DIMENSION_SYSTEM.md) | Shape-aware QDIM, dimension alignment, annotation placement, and selective removal. |
 | [`docs/STORAGE_AND_FORMATS.md`](docs/STORAGE_AND_FORMATS.md) | Native `.pcad` persistence, autosave, explicit save, and DXF/PDF/SVG interchange formats. |
 | [`docs/BUILD_AND_RELEASE.md`](docs/BUILD_AND_RELEASE.md) | SDK/toolchain setup, CI workflows, fail-closed production signing, and GitHub Release automation. |
-| [`docs/LICENSING_INVENTORY.md`](docs/LICENSING_INVENTORY.md) | Informational source and dependency licence inventory and ScanCode workflow. |
+| [`LICENSE`](LICENSE) | Full Apache License, Version 2.0 text governing the repository source code. |
+| [`NOTICE`](NOTICE) | Apache-2.0 Section 4(d) attribution and explicit copyright/trademark reservation notice for the application identity and visual assets. |
+| [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | Attribution and licence summary for bundled OFL-1.1 fonts (`third_party_licenses/OFL-1.1.txt`) and runtime/build libraries. |
+| [`TRADEMARKS.md`](TRADEMARKS.md) | Binding trademark, application identity, and **All Rights Reserved** visual/icon asset copyright policy. |
 
 ---
 
@@ -257,10 +268,11 @@ For a complete breakdown of rendering passes and state ownership, see [`docs/ARC
 
 ---
 
-## Licence and Third-Party Component Notice
+## Licence, Third-Party Notices, and Trademarks
 
-- **Project Licence Status:** A project-level root `LICENSE` file has not yet been declared in this repository. Without an explicit licence grant from the copyright holder, standard copyright rules apply and no open-source redistribution or modification licence should be assumed.
-- **Informational Third-Party & Source Inventory:** The repository maintains an automated, non-blocking licensing inventory workflow documented in [`docs/LICENSING_INVENTORY.md`](docs/LICENSING_INVENTORY.md) (with generated reports written to `reports/licensing/`). That inventory records third-party dependency metadata and source-file scan results strictly for informational visibility and does not itself grant a licence or constitute a legal determination.
+- **Source Code Licence (`Apache-2.0`):** PrecisionCAD Studio's first-party source code is licensed under the **[Apache License, Version 2.0](LICENSE)** (subject to the attribution and exclusion terms in **[`NOTICE`](NOTICE)**).
+- **Application Identity, Icons & Visual Assets (`All Rights Reserved`):** While the source code is open-source under Apache-2.0, the **PrecisionCAD Studio** product name, package identity (`com.precisioncad.studio`), and **all application icons, adaptive launcher artwork, and brand visual assets** (`docs/assets/readme/precisioncad-studio-app-icon.png`, `app/src/main/res/drawable-nodpi/precisioncad_*.png`, `app/src/main/res/drawable/ic_launcher_*.xml`, and `app/src/main/res/mipmap-*/ic_launcher*`) are **Copyright © 2026 AnimeXplayXD — All Rights Reserved** and are **excluded** from the Apache-2.0 license grant. They cannot be used unrestrictedly or redistributed in third-party/forked builds; see **[`NOTICE`](NOTICE)** and **[`TRADEMARKS.md`](TRADEMARKS.md)** for full requirements.
+- **Bundled Fonts & Third-Party Libraries:** Bundled TrueType fonts (`jetbrains_mono.ttf`, `inter.ttf`, and `space_grotesk.ttf`) are distributed under the **SIL Open Font License, Version 1.1** ([`third_party_licenses/OFL-1.1.txt`](third_party_licenses/OFL-1.1.txt)). Upstream runtime and build-time library attributions are catalogued in **[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)**.
 
 ---
 

@@ -1,0 +1,85 @@
+PrecisionCAD Studio
+Copyright (c) 2026 AnimeXplayXD (https://github.com/AnimeXplayXD)
+
+================================================================================
+1. OPEN-SOURCE SOFTWARE LICENSE (APACHE LICENSE, VERSION 2.0)
+================================================================================
+
+Except for the reserved brand identifiers, application icons, and visual assets
+explicitly excluded in Sections 2 and 3 of this NOTICE, the source code of this
+project is licensed under the Apache License, Version 2.0 (the "License"); you
+may not use the source code except in compliance with the License. You may
+obtain a copy of the License in the root LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Pursuant to Section 4(d) of the Apache License, Version 2.0, any derivative work
+or redistribution of this work must retain a readable copy of the attribution
+and reservation notices contained in this NOTICE file.
+
+================================================================================
+2. APPLICATION IDENTITY & TRADEMARK RESERVATION (APACHE-2.0 SECTION 6)
+================================================================================
+
+Pursuant to Section 6 ("Trademarks") of the Apache License, Version 2.0, this
+License does NOT grant permission to use the trade names, trademarks, service
+marks, product names, or application identifiers of the Licensor, except as
+required for reasonable and customary use in describing the origin of the Work
+and reproducing the content of this NOTICE file.
+
+The following application identity elements are proprietary and reserved
+exclusively to the copyright holder (AnimeXplayXD):
+
+  * Application & Product Name: "PrecisionCAD Studio" and "PrecisionCAD"
+  * Official Android Application ID: "com.precisioncad.studio"
+  * Official Project Brand Identity, Wordmarks, and Logos
+
+Unrestricted use, rebranding confusion, or redistribution of modified/unmodified
+third-party builds under the "PrecisionCAD Studio" name or application identity
+is strictly prohibited without prior written permission from the copyright
+holder.
+
+================================================================================
+3. COPYRIGHTED VISUAL ASSETS & APPLICATION ICONS (ALL RIGHTS RESERVED)
+================================================================================
+
+All application icons, adaptive launcher artwork, logos, and brand visual assets
+in this repository are Copyright (c) 2026 AnimeXplayXD — All Rights Reserved,
+and are EXPLICITLY EXCLUDED from the Apache License, Version 2.0 copyright
+license grant:
+
+  * docs/assets/readme/precisioncad-studio-app-icon.png
+  * app/src/main/res/drawable-nodpi/precisioncad_foreground.png
+  * app/src/main/res/drawable-nodpi/precisioncad_background.png
+  * app/src/main/res/drawable-nodpi/precisioncad_monochrome.png
+  * app/src/main/res/drawable/ic_launcher_foreground.xml
+  * app/src/main/res/drawable/ic_launcher_background.xml
+  * app/src/main/res/drawable/ic_launcher_monochrome.xml
+  * app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+  * app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+  * app/src/main/res/mipmap-mdpi/ic_launcher.png
+  * app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+  * app/src/main/res/mipmap-hdpi/ic_launcher.png
+  * app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+  * app/src/main/res/mipmap-xhdpi/ic_launcher.png
+  * app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+  * app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+  * app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+  * app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+  * app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+
+These visual assets may NOT be used unrestrictedly, copied into other projects,
+packaged into third-party APK/AAB distributions, published to any app store, or
+used in external commercial or non-commercial media without express prior
+written permission from the copyright holder. See TRADEMARKS.md for complete
+requirements governing forks and redistributions.
+
+================================================================================
+4. THIRD-PARTY SOFTWARE & FONT ATTRIBUTIONS
+================================================================================
+
+This software includes third-party open-source libraries (licensed under the
+Apache License, Version 2.0) and bundled Google Fonts (Space Grotesk, Inter, and
+JetBrains Mono, licensed under the SIL Open Font License, Version 1.1). Complete
+copyright notices and license mappings are documented in THIRD_PARTY_NOTICES.md
+and third_party_licenses/OFL-1.1.txt.

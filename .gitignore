@@ -1,24 +1,35 @@
+# IDE & Workspace Metadata
 *.iml
-.gradle
-.kotlin
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+.idea/
+.vscode/
+.aistudio/
+
+# Gradle & Kotlin Build Output
+.gradle/
+.kotlin/
+build/
+**/build/
 local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Environment & Secret Configuration
 .env
-debug.keystore
-*.p12
+!.env.example
+secrets/
+release-signing/
+
+# Android Keystores, Certificates & Encoded Signing Keys
 *.jks
 *.keystore
-*.b64
-precisioncad-release.*
-/reports/
+*.p12
+*.pfx
+*.pem
+*.pk8
+*.key
+*.base64
+
+# OS Metadata
+.DS_Store
+Thumbs.db

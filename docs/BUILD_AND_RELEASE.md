@@ -2,15 +2,16 @@
 
 ## 1. Android Application Identity & SDK Target
 
-- **Application Name**: `PrecisionCAD Studio` (`app/src/main/res/values/strings.xml` and `metadata.json`)
-- **Application ID**: `com.precisioncad.studio` (`app/build.gradle.kts`, namespace `com.example`)
+- **Application Name**: `PrecisionCAD Studio` (`app/src/main/res/values/strings.xml`)
+- **Application ID & Namespace**: `com.precisioncad.studio` (`app/build.gradle.kts`)
+- **Application Theme Resource**: `Theme.PrecisionCADStudio` (`app/src/main/res/values/themes.xml`)
 - **Compile SDK**: Android API `37`, minor API level `2` (`compileSdk { version = release(37) { minorApiLevel = 2 } }`)
 - **Target SDK**: `37` (`minSdk = 24`)
 - **Toolchain**:
   - Gradle Wrapper: `9.8.2` (`./gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`) with verified `distributionSha256Sum=21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607`
   - Android Gradle Plugin (AGP): `9.1.1`
-  - Kotlin Compose Plugin: `2.2.10`
-  - KSP: `2.3.5`
+  - Kotlin & Compose Compiler Plugin: `2.4.21`
+  - KSP: `2.3.13`
   - GitHub Actions Runner: `ubuntu-26.04` with JDK `21` (Temurin)
   - Node 24-Compatible Actions:
     - `actions/checkout@v7.0.1`
@@ -35,11 +36,11 @@
 ## 3. Fail-Closed 5-Secret Release Signing & Step-Scoped Credential Hygiene
 
 - **Canonical Repository Signing Secrets**:
-  Production Release builds in `.github/workflows/build-signed-apk.yml` require all five repository Actions secrets:
-  1. `KEYSTORE_BASE64` — Base64-encoded PKCS#12 release keystore
-  2. `STORE_PASSWORD` — Keystore password
-  3. `KEY_PASSWORD` — Key password
-  4. `KEY_ALIAS` — Signing key alias (`precisioncad_release`)
+  Production Release builds in `.github/workflows/build-signed-apk.yml` fail closed and never generate a replacement or deterministic fallback keystore. They require all five repository Actions secrets:
+  1. `RELEASE_KEYSTORE_BASE64` (or `KEYSTORE_BASE64`) — Base64-encoded release keystore
+  2. `RELEASE_KEYSTORE_PASSWORD` (or `STORE_PASSWORD`) — Keystore password
+  3. `RELEASE_KEY_ALIAS` (or `KEY_ALIAS`) — Signing key alias
+  4. `RELEASE_KEY_PASSWORD` (or `KEY_PASSWORD`) — Key password
   5. `RELEASE_CERT_SHA256` — 64-character hex SHA-256 certificate fingerprint
 - **Pre-Build & Post-Sign Certificate Verification (`scripts/verify_apksigner_certificate.py`)**:
   - Before Gradle runs, the workflow decodes the keystore to `$RUNNER_TEMP/precisioncad-release-<runId>-<attempt>.jks` (`chmod 600`), verifies that `KEY_ALIAS` exists via `keytool -list -v`, extracts the hex value after `SHA256:`, validates that both actual and expected values are 64-character hex strings (`^[0-9a-f]{64}$`), and verifies exact equality with `RELEASE_CERT_SHA256`.
@@ -63,7 +64,8 @@
 
 ---
 
-## 5. Informational Licensing Inventory Workflow
+## 5. Open-Source Licensing, Visual Asset Copyright & Third-Party Notices
 
-- `.github/workflows/licensing-inventory.yml` runs `scripts/generate_licensing_inventory.py` as an independent, non-blocking (`continue-on-error: true`, `contents: read`) job.
-- See [`docs/LICENSING_INVENTORY.md`](LICENSING_INVENTORY.md) for full details.
+- **First-Party Source Code**: Licensed under the [Apache License, Version 2.0](../LICENSE) (with required Section 4(d) attributions and exclusions in [`NOTICE`](../NOTICE)).
+- **Application Identity, Icons & Visual Assets (`All Rights Reserved`)**: The **PrecisionCAD Studio** name, official `com.precisioncad.studio` application identity, and all launcher icons / brand artwork are **Copyright © 2026 AnimeXplayXD — All Rights Reserved** and are excluded from the Apache-2.0 license grant as defined in [`NOTICE`](../NOTICE) and [`TRADEMARKS.md`](../TRADEMARKS.md).
+- **Third-Party Libraries & Bundled Fonts**: Documented in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) and [`third_party_licenses/OFL-1.1.txt`](../third_party_licenses/OFL-1.1.txt).

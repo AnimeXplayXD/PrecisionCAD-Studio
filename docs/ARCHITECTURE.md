@@ -2,7 +2,7 @@
 
 ## 1. Layered Package Structure
 
-PrecisionCAD Studio is organized into five deterministic layers under `app/src/main/java/com/example/`:
+PrecisionCAD Studio is organized into five deterministic layers under `app/src/main/java/com/precisioncad/studio/`:
 
 1. **`cad/model/` — Domain Entities, Invariant Formatting & Immutable Value Objects**:
    - `CadEntities.kt`: Sealed 2D hierarchy (`CadEntity`) with exact IEEE-754 `Double` coordinates (`LineEntity`, `PolylineEntity`, `CircleEntity`, `ArcEntity`, `EllipseEntity`, `SplineEntity`, `RayEntity`, `XLineEntity`, `DonutEntity`, `HatchEntity`, `BlockInsertEntity`, `TextEntity`, `LeaderEntity`, `CenterMarkEntity`, `DimensionEntity`), `CadLayer`, `BlockDefinition`, and `GeometricConstraintRecord`.
@@ -37,3 +37,6 @@ PrecisionCAD Studio is organized into five deterministic layers under `app/src/m
 - **Single-Source IME & Overlay Invariance**:
   - `CadViewportCanvas` never derives its usable viewport or camera transform (`pixelsPerModelUnit`, `panScreenX`, `panScreenY`) from animated IME insets, card idle peeks, dialog scroll states, or controller collapse/expand transitions.
   - `upper_command_ime_region` uses a single bottom offset (`maxOf(controllerDeckHeightPx, imeBottomPx)` without duplicate `.imePadding()`), keeping `lower_controller_stationary_region` anchored at the bottom of the screen.
+- **Theme & Verification Suites**:
+  - Android XML theme resource: `Theme.PrecisionCADStudio` (`app/src/main/res/values/themes.xml` and `app/src/main/AndroidManifest.xml`); Jetpack Compose theme wrapper: `PrecisionCADTheme` (`com.precisioncad.studio.ui.theme`).
+  - Automated test suites: `PrecisionCADUnitTest` and `PrecisionCADRobolectricTest` (`app/src/test/java/com/precisioncad/studio/`), plus `PrecisionCADInstrumentedTest` (`app/src/androidTest/java/com/precisioncad/studio/test/`).

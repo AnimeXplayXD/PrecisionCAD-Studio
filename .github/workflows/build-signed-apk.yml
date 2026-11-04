@@ -247,17 +247,17 @@ jobs:
         if: ${{ github.event_name != 'pull_request' && inputs.build_variant != 'debug' }}
         shell: bash
         env:
-          SECRET_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          SECRET_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SECRET_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD || secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+          SECRET_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.KEY_ALIAS }}
           EXPECTED_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
         run: |
           set -euo pipefail
           set +x
 
           if [ -z "$SECRET_KEYSTORE_BASE64" ] || [ -z "$SECRET_STORE_PASSWORD" ] || [ -z "$SECRET_KEY_PASSWORD" ] || [ -z "$SECRET_KEY_ALIAS" ] || [ -z "$EXPECTED_CERT_SHA256" ]; then
-            echo "ERROR: Missing required production release signing secrets (KEYSTORE_BASE64, STORE_PASSWORD, KEY_PASSWORD, KEY_ALIAS, RELEASE_CERT_SHA256)."
+            echo "ERROR: Missing required production release signing secrets (RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD, RELEASE_CERT_SHA256)."
             echo "Production Release builds fail closed and never generate a replacement signing key."
             exit 1
           fi
@@ -300,9 +300,9 @@ jobs:
       - name: Run Unit Tests & Release Lint Before Assembly
         shell: bash
         env:
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD || secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
           ./gradlew :app:testDebugUnitTest :app:lintRelease --no-daemon --stacktrace
@@ -311,9 +311,9 @@ jobs:
         if: ${{ github.event_name != 'pull_request' && inputs.build_variant != 'debug' }}
         shell: bash
         env:
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD || secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
           ./gradlew :app:assembleRelease --no-daemon --stacktrace

@@ -66,7 +66,7 @@ val releaseRepoName = System.getenv("GITHUB_RELEASE_REPO")?.takeIf { it.isNotBla
   ?: versionProps.getProperty("GITHUB_RELEASE_REPO", "PrecisionCAD-Studio")
 
 android {
-  namespace = "com.example"
+  namespace = "com.precisioncad.studio"
   compileSdk {
     version = release(37) {
       minorApiLevel = 2
@@ -160,8 +160,8 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
+// Configure the Secrets Gradle Plugin to load local overrides from .env
+// and safe tracked defaults from .env.example.
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"

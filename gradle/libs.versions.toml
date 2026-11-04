@@ -25,7 +25,6 @@ moshiKotlinCodegen = "1.15.2"
 robolectric = "4.17"
 secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
-cyclonedxBom = "3.5.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -64,4 +63,3 @@ kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "ko
 google-devtools-ksp = { id = "com.google.devtools.ksp", version.ref = "googleDevtoolsKsp" }
 secrets = { id = "com.google.android.libraries.mapsplatform.secrets-gradle-plugin", version.ref = "secretsGradlePlugin" }
 google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }
-cyclonedx-bom = { id = "org.cyclonedx.bom", version.ref = "cyclonedxBom" }
