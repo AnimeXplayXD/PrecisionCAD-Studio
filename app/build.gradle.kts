@@ -11,9 +11,10 @@ plugins {
 
 // Automated Versioning Logic:
 // 1. Reads base version metadata from root `version.properties` (if present).
-// 2. Auto-increments `VERSION_CODE` in `version.properties` when executing a release build locally.
-// 3. In GitHub Actions / CI, automatically uses `VERSION_CODE` or `storedVersionCode + GITHUB_RUN_NUMBER`
-//    so every CI release APK has a strictly increasing versionCode for seamless Android upgrade installs.
+// 2. Auto-increments `VERSION_CODE` in `version.properties` when executing a release build locally
+//    outside CI unless explicitly overridden via `VERSION_CODE`.
+// 3. In GitHub Actions / CI, reads `VERSION_CODE` and `VERSION_MAJOR.VERSION_MINOR.VERSION_PATCH`
+//    directly from `version.properties` (ignoring `GITHUB_RUN_NUMBER`) unless explicitly overridden.
 val versionPropsFile = rootProject.file("version.properties")
 val versionProps = Properties().apply {
   if (versionPropsFile.canRead()) {
@@ -29,13 +30,12 @@ val isReleaseAssembleTask = gradle.startParameter.taskNames.any { taskName ->
   taskName.contains("assembleRelease", ignoreCase = true) ||
     taskName.contains("bundleRelease", ignoreCase = true)
 }
-val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+val isCiEnvironment = System.getenv("CI").equals("true", ignoreCase = true)
 val explicitEnvVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
 
 val resolvedVersionCode = when {
   explicitEnvVersionCode != null && explicitEnvVersionCode > 0 -> explicitEnvVersionCode
-  ciRunNumber != null && ciRunNumber > 0 -> storedVersionCode + ciRunNumber
-  isReleaseAssembleTask -> {
+  isReleaseAssembleTask && !isCiEnvironment -> {
     val nextCode = storedVersionCode + 1
     versionProps.setProperty("VERSION_CODE", nextCode.toString())
     runCatching {
@@ -56,7 +56,6 @@ val explicitEnvVersionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBla
 val resolvedVersionName = when {
   explicitEnvVersionName != null -> explicitEnvVersionName
   gitTagVersion != null -> gitTagVersion
-  ciRunNumber != null -> "$versionMajor.$versionMinor.$versionPatch.$ciRunNumber"
   else -> "$versionMajor.$versionMinor.$versionPatch"
 }
 

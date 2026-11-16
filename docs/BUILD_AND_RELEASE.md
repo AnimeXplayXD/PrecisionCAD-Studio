@@ -25,10 +25,11 @@
 
 ---
 
-## 2. Automated Versioning (`version.properties` + `app/build.gradle.kts`)
+## 2. Static Versioning & Release Gate (`version.properties` + `app/build.gradle.kts`)
 
-- Base version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=3`, `VERSION_CODE=20`) are stored in root `version.properties`.
-- In GitHub Actions CI, `VERSION_CODE` is computed as `BASE_CODE + GITHUB_RUN_NUMBER` and verified across **all paginated** GitHub Releases (`per_page=100`, `page=1..N`) to guarantee that every new stable Release has a `versionCode` strictly greater than the highest previously published stable release.
+- Version numbers (`VERSION_MAJOR=1`, `VERSION_MINOR=18`, `VERSION_PATCH=4`, `VERSION_CODE=31`) are stored in root `version.properties`.
+- Both Gradle and GitHub Actions CI read `VERSION_CODE` and `VERSION_MAJOR.VERSION_MINOR.VERSION_PATCH` directly from `version.properties` without adding `GITHUB_RUN_NUMBER`, so CI re-runs and build-only dispatches never increment the build number.
+- When publishing a stable GitHub Release, CI queries **all paginated** GitHub Releases (`per_page=100`, `page=1..N`) and fails closed unless `VERSION_CODE` is strictly greater than the highest previously published stable release. Non-publishing runs (pull requests, `debug` builds, and `workflow_dispatch` runs with `publish_release=false`) are permitted to build with the current `VERSION_CODE`.
 - Manual `version_name_override` values on `workflow_dispatch` are validated via environment variables (`INPUT_VERSION_NAME_OVERRIDE`) without direct shell expansion of `${{ inputs.* }}`.
 
 ---

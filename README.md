@@ -210,7 +210,7 @@ All version values below are taken directly from [`gradle/libs.versions.toml`](g
 | **Platform** | Android |
 | **Application ID & Namespace** | `com.precisioncad.studio` |
 | **Application Theme Resource** | `Theme.PrecisionCADStudio` (`PrecisionCADTheme` in Compose) |
-| **Base Version (`version.properties`)** | `1.18.3` (base `VERSION_CODE = 20`) |
+| **Base Version (`version.properties`)** | `1.18.4` (`VERSION_CODE = 31`) |
 | **Language** | Kotlin `2.4.21` |
 | **UI Toolkit** | Jetpack Compose (Compose BOM `2026.09.00`, Material 3) |
 | **Build System** | Gradle Wrapper `9.8.2` |

@@ -1411,7 +1411,7 @@ class PrecisionCADUnitTest {
         assertFalse(commandDeck.isRearCardVisible)
         assertFalse(commandDeck.isRearCardRevealed)
 
-        // 2. Verify root version.properties (1.18.3, VERSION_CODE>=20) and gradle-wrapper.properties (9.8.2)
+        // 2. Verify root version.properties (1.18.4, VERSION_CODE>=31), static CI versioning, and gradle-wrapper.properties (9.8.2)
         val repoRoot = java.io.File("..").takeIf { java.io.File(it, "version.properties").exists() }
             ?: java.io.File(".")
         val versionPropsFile = java.io.File(repoRoot, "version.properties")
@@ -1421,9 +1421,22 @@ class PrecisionCADUnitTest {
             }
             assertEquals("1", vProps.getProperty("VERSION_MAJOR"))
             assertEquals("18", vProps.getProperty("VERSION_MINOR"))
-            assertEquals("3", vProps.getProperty("VERSION_PATCH"))
+            assertEquals("4", vProps.getProperty("VERSION_PATCH"))
             val vCode = vProps.getProperty("VERSION_CODE", "0").toInt()
-            assertTrue(vCode >= 20)
+            assertTrue(vCode >= 31)
+        }
+        val appGradleFile = java.io.File(repoRoot, "app/build.gradle.kts")
+        if (appGradleFile.exists()) {
+            val gradleText = appGradleFile.readText()
+            assertFalse(gradleText.contains("storedVersionCode + ciRunNumber"))
+            assertFalse(gradleText.contains(".$" + "ciRunNumber"))
+        }
+        val releaseWorkflowFile = java.io.File(repoRoot, ".github/workflows/build-signed-apk.yml")
+        if (releaseWorkflowFile.exists()) {
+            val workflowText = releaseWorkflowFile.readText()
+            assertFalse(workflowText.contains("BASE_CODE + GITHUB_RUN_NUMBER"))
+            assertFalse(workflowText.contains("${'$'}{PATCH}.${'$'}{GITHUB_RUN_NUMBER}"))
+            assertTrue(workflowText.contains("WILL_PUBLISH_RELEASE"))
         }
         val wrapperPropsFile = java.io.File(repoRoot, "gradle/wrapper/gradle-wrapper.properties")
         if (wrapperPropsFile.exists()) {

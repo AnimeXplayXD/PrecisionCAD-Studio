@@ -84,23 +84,40 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --version
 
-      - name: Compute Automated Version Code, Version Name & Monotonicity Check
+      - name: Resolve Static Version Code, Version Name & Release Publish Gate
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION_NAME_OVERRIDE: ${{ inputs.version_name_override }}
+          INPUT_BUILD_VARIANT: ${{ inputs.build_variant }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
           set -euo pipefail
 
-          BASE_CODE=$(grep -E '^VERSION_CODE=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "18")
+          BASE_CODE=$(grep -E '^VERSION_CODE=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "31")
           MAJOR=$(grep -E '^VERSION_MAJOR=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "1")
           MINOR=$(grep -E '^VERSION_MINOR=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "18")
-          PATCH=$(grep -E '^VERSION_PATCH=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "0")
+          PATCH=$(grep -E '^VERSION_PATCH=' version.properties 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "4")
 
-          COMPUTED_VERSION_CODE=$((BASE_CODE + GITHUB_RUN_NUMBER))
+          if [[ ! "$BASE_CODE" =~ ^[0-9]+$ ]] || [ "$BASE_CODE" -le 0 ]; then
+            echo "ERROR: Invalid VERSION_CODE '$BASE_CODE' in version.properties."
+            exit 1
+          fi
 
-          # Paginate all GitHub Releases and verify monotonic versionCode progression.
-          # Fails closed if the GitHub Releases API request fails or returns malformed data.
+          # CI runs never auto-increment VERSION_CODE with GITHUB_RUN_NUMBER.
+          COMPUTED_VERSION_CODE=$((10#$BASE_CODE))
+
+          WILL_PUBLISH_RELEASE="false"
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ] && [ "${INPUT_BUILD_VARIANT:-release}" != "debug" ]; then
+            if [ "${GITHUB_EVENT_NAME}" = "push" ] && { [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF}" = "refs/heads/master" ] || [[ "${GITHUB_REF}" == refs/tags/v* ]]; }; then
+              WILL_PUBLISH_RELEASE="true"
+            elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${INPUT_PUBLISH_RELEASE:-false}" = "true" ]; then
+              WILL_PUBLISH_RELEASE="true"
+            fi
+          fi
+          export WILL_PUBLISH_RELEASE
+
+          # Paginate all GitHub Releases. Fail closed on API errors or non-monotonic versionCode ONLY when publishing a release.
           LATEST_PUBLISHED_CODE=$(python3 - << 'PYEOF'
           import json
           import os
@@ -110,37 +127,51 @@ jobs:
           import urllib.request
 
           repo = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ["GH_TOKEN"]
+          token = os.environ.get("GH_TOKEN", "")
+          must_enforce = os.environ.get("WILL_PUBLISH_RELEASE") == "true"
           max_code = 0
           page = 1
 
           while True:
               url = f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"
-              req = urllib.request.Request(
-                  url,
-                  headers={
-                      "Accept": "application/vnd.github+json",
-                      "Authorization": f"Bearer {token}",
-                      "X-GitHub-Api-Version": "2026-03-10",
-                      "User-Agent": "PrecisionCAD-Release-Pipeline/18.1",
-                  },
-              )
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2026-03-10",
+                  "User-Agent": "PrecisionCAD-Release-Pipeline/18.4",
+              }
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              req = urllib.request.Request(url, headers=headers)
               try:
                   with urllib.request.urlopen(req, timeout=30) as resp:
                       if resp.status != 200:
-                          sys.stderr.write(f"ERROR: GitHub Releases API returned HTTP {resp.status}\n")
-                          sys.exit(1)
+                          if must_enforce:
+                              sys.stderr.write(f"ERROR: GitHub Releases API returned HTTP {resp.status}\n")
+                              sys.exit(1)
+                          print("unknown")
+                          sys.exit(0)
                       payload = json.loads(resp.read().decode("utf-8"))
               except urllib.error.HTTPError as exc:
-                  sys.stderr.write(f"ERROR: Failed to query GitHub Releases API (HTTP {exc.code})\n")
-                  sys.exit(1)
+                  if must_enforce:
+                      sys.stderr.write(f"ERROR: Failed to query GitHub Releases API (HTTP {exc.code})\n")
+                      sys.exit(1)
+                  sys.stderr.write(f"NOTICE: Build-only run could not query GitHub Releases API (HTTP {exc.code}); continuing.\n")
+                  print("unknown")
+                  sys.exit(0)
               except Exception as exc:
-                  sys.stderr.write(f"ERROR: Failed to query GitHub Releases API: {exc}\n")
-                  sys.exit(1)
+                  if must_enforce:
+                      sys.stderr.write(f"ERROR: Failed to query GitHub Releases API: {exc}\n")
+                      sys.exit(1)
+                  sys.stderr.write(f"NOTICE: Build-only run could not query GitHub Releases API ({exc}); continuing.\n")
+                  print("unknown")
+                  sys.exit(0)
 
               if not isinstance(payload, list):
-                  sys.stderr.write("ERROR: Unexpected GitHub Releases API payload format (expected JSON array).\n")
-                  sys.exit(1)
+                  if must_enforce:
+                      sys.stderr.write("ERROR: Unexpected GitHub Releases API payload format (expected JSON array).\n")
+                      sys.exit(1)
+                  print("unknown")
+                  sys.exit(0)
 
               if not payload:
                   break
@@ -173,14 +204,18 @@ jobs:
           PYEOF
           )
 
-          if [ "$COMPUTED_VERSION_CODE" -le "$LATEST_PUBLISHED_CODE" ]; then
-            echo "ERROR: Computed versionCode ($COMPUTED_VERSION_CODE) is not strictly greater than latest published stable versionCode ($LATEST_PUBLISHED_CODE)."
-            exit 1
+          if [ "$WILL_PUBLISH_RELEASE" = "true" ]; then
+            if [ "$COMPUTED_VERSION_CODE" -le "$LATEST_PUBLISHED_CODE" ]; then
+              echo "ERROR: VERSION_CODE ($COMPUTED_VERSION_CODE) in version.properties is not strictly greater than latest published stable versionCode ($LATEST_PUBLISHED_CODE). Bump VERSION_CODE before publishing a new GitHub Release."
+              exit 1
+            fi
+          elif [[ "$LATEST_PUBLISHED_CODE" =~ ^[0-9]+$ ]] && [ "$COMPUTED_VERSION_CODE" -le "$LATEST_PUBLISHED_CODE" ]; then
+            echo "NOTICE: Build-only run using VERSION_CODE=$COMPUTED_VERSION_CODE (latest published stable is $LATEST_PUBLISHED_CODE). Release publication is not enabled for this run."
           fi
 
           if [ -n "${INPUT_VERSION_NAME_OVERRIDE:-}" ]; then
             if [[ ! "$INPUT_VERSION_NAME_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[A-Za-z0-9._-]+)?$ ]]; then
-              echo "ERROR: Invalid version_name_override format. Expected numeric version string (e.g. 1.18.1)."
+              echo "ERROR: Invalid version_name_override format. Expected numeric version string (e.g. 1.18.4)."
               exit 1
             fi
             COMPUTED_VERSION_NAME="$INPUT_VERSION_NAME_OVERRIDE"
@@ -188,7 +223,7 @@ jobs:
             RAW_TAG_VER="${GITHUB_REF_NAME#v}"
             COMPUTED_VERSION_NAME="${RAW_TAG_VER%%-b*}"
           else
-            COMPUTED_VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}.${GITHUB_RUN_NUMBER}"
+            COMPUTED_VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
           fi
 
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
@@ -210,11 +245,12 @@ jobs:
 
           echo "### PrecisionCAD Studio Build & Versioning Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "- **applicationId**: \`com.precisioncad.studio\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **versionCode**: \`${COMPUTED_VERSION_CODE}\` (previous max stable: \`${LATEST_PUBLISHED_CODE}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **versionCode**: \`${COMPUTED_VERSION_CODE}\` (latest published stable: \`${LATEST_PUBLISHED_CODE}\`)" >> "$GITHUB_STEP_SUMMARY"
           echo "- **versionName**: \`${COMPUTED_VERSION_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **publishRelease**: \`${WILL_PUBLISH_RELEASE}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **releaseTag**: \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **commitSha**: \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **runNumber**: \`${GITHUB_RUN_NUMBER}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **runNumber**: \`${GITHUB_RUN_NUMBER}\` (informational only; not added to versionCode)" >> "$GITHUB_STEP_SUMMARY"
           echo "- **runnerImage**: \`${RUNNER_IMAGE_LABEL}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prepare .env File for Secrets Gradle Plugin
