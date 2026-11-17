@@ -355,16 +355,6 @@ object CadIncomingDocumentRouter {
             allowEmptyExtension = true
         )
 
-        if (queriedSize != null && queriedSize == 0L) {
-            return@withContext CadImportStageOutcome.Failure(
-                errorKind = CadImportErrorKind.EMPTY_FILE,
-                title = "EMPTY CAD FILE",
-                message = "'$resolvedDisplayName' contains 0 bytes and cannot be imported.",
-                retryable = false,
-                displayName = resolvedDisplayName
-            )
-        }
-
         if (queriedSize != null && queriedSize!! > MAX_IMPORT_BYTES) {
             return@withContext CadImportStageOutcome.Failure(
                 errorKind = CadImportErrorKind.SIZE_LIMIT_EXCEEDED,

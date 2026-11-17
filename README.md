@@ -131,7 +131,7 @@ PrecisionCAD Studio separates native project persistence from external CAD and v
 | **`.pdf`** | Plot / technical document export | Vector sheet and model plotting generated via Android's `PdfDocument` API with synchronized project/title-block naming. |
 | **`.svg`** | Vector interchange | 2D vector path export and basic SVG path/primitive import (`CadDxfInterchange.kt`). |
 
-- **External `ACTION_VIEW` Document Handoff (v1.18.4 / Build 31+):** Other Android apps (such as document galleries and file managers) can open 2D ASCII `.dxf` (`image/vnd.dxf`, `application/dxf`, etc.), native `.pcad`, and validated `application/octet-stream` `FileProvider` `content://` URIs directly in PrecisionCAD Studio via `ACTION_VIEW` + `FLAG_GRANT_READ_URI_PERMISSION`, with path-safe staging, size/signature validation, SHA-256 verification, and unsaved-drawing protection.
+- **External `ACTION_VIEW` Document Handoff (v1.18.4 / Build 32+):** Other Android apps (such as document galleries and file managers) can open 2D ASCII `.dxf` (`image/vnd.dxf`, `application/dxf`, etc.), native `.pcad`, and validated `application/octet-stream` `FileProvider` `content://` URIs directly in PrecisionCAD Studio via `ACTION_VIEW` + `FLAG_GRANT_READ_URI_PERMISSION`, with path-safe staging, size/signature validation, SHA-256 verification, and unsaved-drawing protection.
 
 > **Note:** `.pcad` is PrecisionCAD Studio's native project format, not DWG. Native DWG, DWF, Binary DXF, and 3D CAD formats (`.step`/`.stp`, `.iges`/`.igs`, `.stl`, `.obj`, `.glb`/`.gltf`) are not supported.
 
@@ -212,7 +212,7 @@ All version values below are taken directly from [`gradle/libs.versions.toml`](g
 | **Platform** | Android |
 | **Application ID & Namespace** | `com.precisioncad.studio` |
 | **Application Theme Resource** | `Theme.PrecisionCADStudio` (`PrecisionCADTheme` in Compose) |
-| **Base Version (`version.properties`)** | `1.18.4` (`VERSION_CODE = 31`) |
+| **Base Version (`version.properties`)** | `1.18.4` (`VERSION_CODE = 32`) |
 | **Language** | Kotlin `2.4.21` |
 | **UI Toolkit** | Jetpack Compose (Compose BOM `2026.09.00`, Material 3) |
 | **Build System** | Gradle Wrapper `9.8.2` |

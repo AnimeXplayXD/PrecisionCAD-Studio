@@ -31,7 +31,7 @@ A `.pcad` document preserves:
 
 ---
 
-## 4. External `ACTION_VIEW` CAD Import Contract (1.18.4 / Build 31+)
+## 4. External `ACTION_VIEW` CAD Import Contract (1.18.4 / Build 32+)
 
 PrecisionCAD Studio (`.MainActivity`, `launchMode="singleTop"`) accepts external CAD documents via Android `Intent.ACTION_VIEW` (`CATEGORY_DEFAULT` / `CATEGORY_BROWSABLE`) with `content://` or `file://` URIs and `FLAG_GRANT_READ_URI_PERMISSION`.
 
