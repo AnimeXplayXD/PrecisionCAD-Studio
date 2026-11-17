@@ -475,7 +475,9 @@ class ExternalCadImportRobolectricTest {
             "simulatedFailingScenarioBody"
         )
         val dxfBytes = buildDxfBytes("fail_check", endX = 95.0, radius = 12.0)
+        val secondBytes = buildPcadBytes("FailAfterWarmNewIntent", endX = 140.0)
         val (_, _, launchIntent) = createSharedFileIntent("throw_after_launch.dxf", dxfBytes, "image/vnd.dxf")
+        val (_, _, warmIntent) = createSharedFileIntent("warm_before_throw.pcad", secondBytes, "application/octet-stream")
 
         var capturedScenario: ActivityScenario<MainActivity>? = null
         var caughtThrowable: Throwable? = null
@@ -484,6 +486,10 @@ class ExternalCadImportRobolectricTest {
             override fun evaluate() {
                 val sc = nestedOwner.launch<MainActivity>(launchIntent)
                 capturedScenario = sc
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                sc.onActivity { activity ->
+                    dispatchNewIntent(activity, warmIntent)
+                }
                 Shadows.shadowOf(Looper.getMainLooper()).idle()
                 throw IllegalStateException("EXPECTED_HARNESS_BODY_FAILURE")
             }

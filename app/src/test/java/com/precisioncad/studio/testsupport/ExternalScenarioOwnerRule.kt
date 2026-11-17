@@ -3,6 +3,7 @@ package com.precisioncad.studio.testsupport
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Looper
 import androidx.core.content.FileProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -13,6 +14,7 @@ import com.precisioncad.studio.ui.components.CadDeckIdleTimerState
 import org.junit.rules.TestRule
 import org.junit.runner.Description
 import org.junit.runners.model.Statement
+import org.robolectric.Shadows
 import java.io.File
 
 /**
@@ -129,7 +131,9 @@ class ExternalScenarioOwnerRule(
                     scenarios.clear()
                     for ((idx, scenario) in snapshot.withIndex()) {
                         try {
+                            prepareScenarioForClose(scenario)
                             scenario.close()
+                            Shadows.shadowOf(Looper.getMainLooper()).idle()
                         } catch (closeErr: Throwable) {
                             println(
                                 "[ScenarioOwner] PHASE=SCENARIO_CLOSE_ERROR index=$idx " +
@@ -176,6 +180,23 @@ class ExternalScenarioOwnerRule(
                 if (primaryError != null) {
                     throw primaryError
                 }
+            }
+        }
+    }
+
+    private fun prepareScenarioForClose(scenario: ActivityScenario<out Activity>) {
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        runCatching {
+            val startIntentField = ActivityScenario::class.java.getDeclaredField("startActivityIntent").apply {
+                isAccessible = true
+            }
+            val currentActivityField = ActivityScenario::class.java.getDeclaredField("currentActivity").apply {
+                isAccessible = true
+            }
+            val startIntent = startIntentField.get(scenario) as? Intent
+            val currentActivity = currentActivityField.get(scenario) as? Activity
+            if (startIntent != null && currentActivity != null && currentActivity.intent !== startIntent) {
+                currentActivity.intent = startIntent
             }
         }
     }
