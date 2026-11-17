@@ -28,3 +28,20 @@ A `.pcad` document preserves:
 
 - Downloaded release APKs are staged exclusively under app-private internal storage at `<context.filesDir>/updates/` (`.part` temporary file during HTTPS streaming, promoted to `PrecisionCAD-Studio-v<versionName>-b<versionCode>-release.apk` only after passing all 10 `CadApkVerifier` checks).
 - Retaining or cleaning up staged update APKs never touches `<context.filesDir>/pcad_autosave/`, the Room project database (`precision_cad_studio.db`), SharedPreferences, or `Documents/PrecisionCAD/`.
+
+---
+
+## 4. External `ACTION_VIEW` CAD Import Contract (1.18.4 / Build 31+)
+
+PrecisionCAD Studio (`.MainActivity`, `launchMode="singleTop"`) accepts external CAD documents via Android `Intent.ACTION_VIEW` (`CATEGORY_DEFAULT` / `CATEGORY_BROWSABLE`) with `content://` or `file://` URIs and `FLAG_GRANT_READ_URI_PERMISSION`.
+
+### Supported Formats and Intent Filters
+- **2D ASCII DXF (`.dxf`):** `image/vnd.dxf`, `application/dxf`, `application/x-dxf`, `drawing/x-dxf`, `image/x-dxf`, `application/x-autocad`, and extension fallback (`*.dxf` / `*.DXF`).
+- **Native `.pcad` (`schemaVersion` 1 & 2):** `application/vnd.precisioncad.pcad`, `application/x-pcad`, and extension fallback (`*.pcad` / `*.PCAD`).
+- **Validated Generic Binary Fallback (`application/octet-stream`):** Accepted for callers whose `FileProvider` does not advertise CAD-specific MIME types, then strictly validated inside `CadIncomingDocumentRouter` before parsing.
+- **Explicitly Unsupported Formats (Not Advertised):** Binary DXF, AutoCAD `.dwg` / `.dwf`, `.step` / `.stp`, `.iges` / `.igs`, `.stl`, `.obj`, `.glb`, `.gltf`, and `*/*`.
+
+### Security, Validation, and Unsaved Session Protection
+- Streams bytes via `ContentResolver.openInputStream` into `<context.filesDir>/incoming_imports/` while checking `OpenableColumns`, enforcing a `25 MiB` import cap and `4 MiB` free-space margin (`StatFs`), sanitizing untrusted display names against path traversal, computing an incremental SHA-256 digest, and rejecting empty, binary, 3D, or malformed files with explicit `CadIncomingImportState.Failed` dialogs.
+- If the active workspace session has unsaved modifications (`isDocumentDirty == true`), the incoming document remains staged safely in app-private storage while `UnsavedDrawingConfirmationDialog` lets the user choose **Save and Continue**, **Discard and Continue**, or **Stay Here**, surviving screen rotation and temporary external URI grant expiration.
+

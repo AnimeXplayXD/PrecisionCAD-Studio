@@ -2,8 +2,10 @@ package com.precisioncad.studio.ui
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.precisioncad.studio.cad.data.CadAppDatabase
 import com.precisioncad.studio.cad.data.CadProjectMetadataEntity
@@ -15,9 +17,16 @@ import com.precisioncad.studio.cad.dimension.DimensionStyleConfig
 import com.precisioncad.studio.cad.dimension.QDimDensityPolicy
 import com.precisioncad.studio.cad.dimension.QDimOperatingMode
 import com.precisioncad.studio.cad.io.CadDxfInterchange
+import com.precisioncad.studio.cad.io.CadExternalFormat
+import com.precisioncad.studio.cad.io.CadImportErrorKind
+import com.precisioncad.studio.cad.io.CadImportStageOutcome
+import com.precisioncad.studio.cad.io.CadIncomingDocumentRouter
+import com.precisioncad.studio.cad.io.CadIncomingImportState
 import com.precisioncad.studio.cad.io.CadPcadPersistence
 import com.precisioncad.studio.cad.io.DxfDocumentPayload
+import com.precisioncad.studio.cad.io.IncomingDocumentRequest
 import com.precisioncad.studio.cad.io.PcadProjectDocument
+import com.precisioncad.studio.cad.io.StagedExternalDocument
 import com.precisioncad.studio.cad.kernel.CadGeometryKernel
 import com.precisioncad.studio.cad.kernel.CadModificationEngine
 import com.precisioncad.studio.cad.kernel.CadSnapAndCoordEngine
@@ -148,6 +157,13 @@ sealed interface PendingHomeReplacementAction {
         override val actionSummaryLabel: String
             get() = "Import Pasted DXF / PCAD Content"
     }
+
+    data class ImportExternalDocument(
+        val stagedDocument: StagedExternalDocument
+    ) : PendingHomeReplacementAction {
+        override val actionSummaryLabel: String
+            get() = "Import External ${stagedDocument.format.name} ('${stagedDocument.resolvedDisplayName}')"
+    }
 }
 
 data class CadWorkspaceUiState(
@@ -157,6 +173,7 @@ data class CadWorkspaceUiState(
     val lastExplicitSaveRevision: Long = 0L,
     val pendingCommandLineInput: String = "",
     val pendingHomeReplacementAction: PendingHomeReplacementAction? = null,
+    val incomingImportState: CadIncomingImportState = CadIncomingImportState.Idle,
     val shouldLaunchHomeDxfPicker: Boolean = false,
     val currentProjectId: String = "untitled_drawing",
     val currentProjectName: String = "Untitled Drawing",
@@ -238,7 +255,10 @@ data class CadWorkspaceUiState(
  * Orientation-safe StateFlow ViewModel preserving all drawing state, cursor coordinates,
  * active command steps, selection sets, zoom/pan, and undo/redo history across Portrait/Landscape rotation.
  */
-class CadWorkspaceViewModel(application: Application) : AndroidViewModel(application) {
+class CadWorkspaceViewModel @JvmOverloads constructor(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle()
+) : AndroidViewModel(application) {
 
     private val database = CadAppDatabase.getInstance(application)
     private val repository = CadProjectRepository(application, database.projectDao())
@@ -261,6 +281,9 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private var notificationDismissJob: Job? = null
     private var overviewDismissJob: Job? = null
     private var autoQuickSaveJob: Job? = null
+    private var incomingImportJob: Job? = null
+    private var activeImportRequestId: String? = null
+    private var lastSubmittedExternalRequest: IncomingDocumentRequest? = null
     private var overviewSeq: Long = 1L
     private var nextRevisionCounter: Long = 1L
 
@@ -268,13 +291,17 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         private set
     var lastExplicitSavedPcadFile: File? = null
         private set
+    var lastExternalImportSha256: String? = null
+        private set
 
     var simulateExplicitSaveFailureForTesting: Boolean = false
+    var availableFreeBytesOverrideForTesting: ((File) -> Long)? = null
 
     init {
         viewModelScope.launch {
             repository.cleanupUntouchedLegacyTemplatesOnce()
         }
+        restorePendingExternalImportIfNeeded()
         updateRepository.checkForUpdates(manual = false)
     }
 
@@ -491,7 +518,26 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun dismissPendingHomeAction() {
-        _uiState.update { it.copy(pendingHomeReplacementAction = null) }
+        val pending = _uiState.value.pendingHomeReplacementAction
+        if (pending is PendingHomeReplacementAction.ImportExternalDocument) {
+            CadIncomingDocumentRouter.cleanupStagedFile(pending.stagedDocument.stagedFilePath)
+            clearSavedExternalImportState()
+            _uiState.update {
+                it.copy(
+                    pendingHomeReplacementAction = null,
+                    incomingImportState = CadIncomingImportState.Cancelled(
+                        requestId = pending.stagedDocument.requestId,
+                        displayName = pending.stagedDocument.resolvedDisplayName
+                    )
+                )
+            }
+            emitTransientNotification(
+                "IMPORT CANCELLED • Kept active drawing '${_uiState.value.currentProjectName}'",
+                NotificationCategory.INFO
+            )
+        } else {
+            _uiState.update { it.copy(pendingHomeReplacementAction = null) }
+        }
     }
 
     private fun executeHomeReplacementAction(action: PendingHomeReplacementAction) {
@@ -508,7 +554,494 @@ class CadWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             is PendingHomeReplacementAction.ImportDxfOrPcadText -> {
                 importDxfString(action.content)
             }
+            is PendingHomeReplacementAction.ImportExternalDocument -> {
+                commitStagedExternalDocument(action.stagedDocument)
+            }
         }
+    }
+
+    // --- External CAD Document Receiving Contract (ACTION_VIEW -> Stage -> Validate -> Import) ---
+
+    fun handleIncomingImportIntent(intent: Intent?): Boolean {
+        val request = CadIncomingDocumentRouter.extractRequest(intent) ?: return false
+        CadIncomingDocumentRouter.markIntentHandled(intent)
+        startExternalImportRequest(request)
+        return true
+    }
+
+    fun startExternalImportRequest(request: IncomingDocumentRequest) {
+        incomingImportJob?.cancel()
+        val previousPending = _uiState.value.pendingHomeReplacementAction
+        if (previousPending is PendingHomeReplacementAction.ImportExternalDocument) {
+            CadIncomingDocumentRouter.cleanupStagedFile(previousPending.stagedDocument.stagedFilePath)
+        }
+
+        activeImportRequestId = request.requestId
+        lastSubmittedExternalRequest = request
+        val initialDisplay = request.displayNameHint ?: "External CAD Document"
+
+        savedStateHandle[KEY_EXT_IN_FLIGHT] = true
+        savedStateHandle[KEY_EXT_AWAITING_DECISION] = false
+        savedStateHandle[KEY_EXT_REQUEST_ID] = request.requestId
+        savedStateHandle[KEY_EXT_URI_STRING] = request.uri.toString()
+        savedStateHandle[KEY_EXT_DECLARED_MIME] = request.declaredMimeType
+        savedStateHandle[KEY_EXT_DISPLAY_NAME] = initialDisplay
+
+        _uiState.update {
+            it.copy(
+                pendingHomeReplacementAction = if (previousPending is PendingHomeReplacementAction.ImportExternalDocument) null else it.pendingHomeReplacementAction,
+                incomingImportState = CadIncomingImportState.Reading(
+                    requestId = request.requestId,
+                    displayName = initialDisplay,
+                    bytesRead = 0L,
+                    totalBytes = null
+                )
+            )
+        }
+
+        incomingImportJob = viewModelScope.launch {
+            val freeBytesFn = availableFreeBytesOverrideForTesting
+            val outcome = if (freeBytesFn != null) {
+                CadIncomingDocumentRouter.stageAndValidateRequest(
+                    context = getApplication(),
+                    request = request,
+                    onProgress = { readBytes, totalBytes ->
+                        if (activeImportRequestId == request.requestId) {
+                            _uiState.update { st ->
+                                if (st.incomingImportState is CadIncomingImportState.Reading) {
+                                    st.copy(
+                                        incomingImportState = CadIncomingImportState.Reading(
+                                            requestId = request.requestId,
+                                            displayName = initialDisplay,
+                                            bytesRead = readBytes,
+                                            totalBytes = totalBytes
+                                        )
+                                    )
+                                } else {
+                                    st
+                                }
+                            }
+                        }
+                    },
+                    availableBytesProvider = freeBytesFn
+                )
+            } else {
+                CadIncomingDocumentRouter.stageAndValidateRequest(
+                    context = getApplication(),
+                    request = request,
+                    onProgress = { readBytes, totalBytes ->
+                        if (activeImportRequestId == request.requestId) {
+                            _uiState.update { st ->
+                                if (st.incomingImportState is CadIncomingImportState.Reading) {
+                                    st.copy(
+                                        incomingImportState = CadIncomingImportState.Reading(
+                                            requestId = request.requestId,
+                                            displayName = initialDisplay,
+                                            bytesRead = readBytes,
+                                            totalBytes = totalBytes
+                                        )
+                                    )
+                                } else {
+                                    st
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+
+            if (activeImportRequestId != request.requestId) {
+                if (outcome is CadImportStageOutcome.Success) {
+                    CadIncomingDocumentRouter.cleanupStagedFile(outcome.document.stagedFilePath)
+                }
+                return@launch
+            }
+
+            when (outcome) {
+                is CadImportStageOutcome.Failure -> {
+                    clearSavedExternalImportState()
+                    _uiState.update {
+                        it.copy(
+                            incomingImportState = CadIncomingImportState.Failed(
+                                requestId = request.requestId,
+                                displayName = outcome.displayName,
+                                errorKind = outcome.errorKind,
+                                title = outcome.title,
+                                message = outcome.message,
+                                retryable = outcome.retryable,
+                                lastRequest = request
+                            )
+                        )
+                    }
+                    emitTransientNotification(
+                        "${outcome.title} • ${outcome.message}",
+                        NotificationCategory.ERROR,
+                        isPersistentError = true
+                    )
+                }
+                is CadImportStageOutcome.Success -> {
+                    val staged = outcome.document
+                    savedStateHandle[KEY_EXT_IN_FLIGHT] = false
+                    savedStateHandle[KEY_EXT_STAGED_PATH] = staged.stagedFilePath
+                    savedStateHandle[KEY_EXT_DISPLAY_NAME] = staged.resolvedDisplayName
+                    savedStateHandle[KEY_EXT_SHA256] = staged.sha256Hex
+                    savedStateHandle[KEY_EXT_BYTES] = staged.byteCount
+
+                    val currentState = _uiState.value
+                    if (currentState.hasActiveWorkspaceSession && currentState.isDocumentDirty) {
+                        savedStateHandle[KEY_EXT_AWAITING_DECISION] = true
+                        _uiState.update {
+                            it.copy(
+                                incomingImportState = CadIncomingImportState.AwaitingUnsavedDecision(staged),
+                                pendingHomeReplacementAction = PendingHomeReplacementAction.ImportExternalDocument(staged)
+                            )
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                incomingImportState = CadIncomingImportState.Importing(
+                                    requestId = staged.requestId,
+                                    displayName = staged.resolvedDisplayName,
+                                    format = staged.format
+                                )
+                            )
+                        }
+                        commitStagedExternalDocument(staged)
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelActiveExternalImport() {
+        val current = _uiState.value.incomingImportState
+        incomingImportJob?.cancel()
+        incomingImportJob = null
+        activeImportRequestId = null
+        clearSavedExternalImportState()
+        val display = when (current) {
+            is CadIncomingImportState.Reading -> current.displayName
+            is CadIncomingImportState.Importing -> current.displayName
+            is CadIncomingImportState.AwaitingUnsavedDecision -> {
+                CadIncomingDocumentRouter.cleanupStagedFile(current.stagedDocument.stagedFilePath)
+                current.stagedDocument.resolvedDisplayName
+            }
+            else -> "External CAD File"
+        }
+        val reqId = when (current) {
+            is CadIncomingImportState.Reading -> current.requestId
+            is CadIncomingImportState.Importing -> current.requestId
+            is CadIncomingImportState.AwaitingUnsavedDecision -> current.stagedDocument.requestId
+            else -> ""
+        }
+        _uiState.update {
+            it.copy(
+                pendingHomeReplacementAction = if (it.pendingHomeReplacementAction is PendingHomeReplacementAction.ImportExternalDocument) null else it.pendingHomeReplacementAction,
+                incomingImportState = CadIncomingImportState.Cancelled(reqId, display)
+            )
+        }
+    }
+
+    fun dismissExternalImportState() {
+        _uiState.update { it.copy(incomingImportState = CadIncomingImportState.Idle) }
+    }
+
+    fun retryLastFailedExternalImport() {
+        val current = _uiState.value.incomingImportState
+        val req = (current as? CadIncomingImportState.Failed)?.lastRequest ?: lastSubmittedExternalRequest ?: return
+        startExternalImportRequest(req.copy(requestId = UUID.randomUUID().toString()))
+    }
+
+    private fun commitStagedExternalDocument(staged: StagedExternalDocument) {
+        undoStack.clear()
+        redoStack.clear()
+        val nextRev = nextRevisionCounter++
+        val projectId = "proj_${UUID.randomUUID().toString().take(8)}"
+        val baseName = staged.projectBaseName
+
+        when (staged.format) {
+            CadExternalFormat.PCAD -> {
+                val doc = staged.parsedPcad ?: run {
+                    CadIncomingDocumentRouter.cleanupStagedFile(staged.stagedFilePath)
+                    clearSavedExternalImportState()
+                    _uiState.update {
+                        it.copy(
+                            incomingImportState = CadIncomingImportState.Failed(
+                                requestId = staged.requestId,
+                                displayName = staged.resolvedDisplayName,
+                                errorKind = CadImportErrorKind.MALFORMED_CONTENT,
+                                title = "CORRUPT .PCAD PROJECT",
+                                message = "Failed to restore '${staged.resolvedDisplayName}'.",
+                                retryable = false
+                            )
+                        )
+                    }
+                    return
+                }
+                val msg = "OPEN (.PCAD) • Imported '${staged.resolvedDisplayName}' (${doc.entities.size} entities, ${doc.displayUnit.symbol})"
+                _uiState.update {
+                    it.copy(
+                        isHomeScreenVisible = false,
+                        hasActiveWorkspaceSession = true,
+                        documentRevision = nextRev,
+                        lastExplicitSaveRevision = nextRev,
+                        pendingCommandLineInput = "",
+                        pendingHomeReplacementAction = null,
+                        currentProjectId = projectId,
+                        currentProjectName = baseName,
+                        storageUnit = doc.storageUnit,
+                        displayUnit = doc.displayUnit,
+                        unitChangeMode = doc.unitChangeMode,
+                        precision = doc.precision,
+                        sheetSetup = doc.sheetSetup.copy(titleBlockTitle = baseName),
+                        dimensionStyle = doc.dimensionStyle,
+                        gridSnapConfig = doc.gridSnapConfig,
+                        controllerConfig = doc.controllerConfig,
+                        activeLayerName = doc.activeLayerName,
+                        layers = doc.layers,
+                        entities = doc.entities,
+                        blocks = doc.blocks.associateBy { b -> b.name },
+                        selectedEntityIds = emptySet(),
+                        previousSelectedEntityIds = emptySet(),
+                        referencePixelsPerModelUnit = null,
+                        effectiveGridSnapInterval = doc.gridSnapConfig.gridSnapInterval,
+                        isQuickDimensionEnabled = doc.isQuickDimensionEnabled,
+                        qdimDensity = doc.qdimDensity,
+                        qdimArrangementPreference = doc.qdimArrangementPreference,
+                        canUndo = false,
+                        canRedo = false,
+                        activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
+                        commandPromptBanner = msg,
+                        commandPanelState = CommandPanelState.Hidden,
+                        incomingImportState = CadIncomingImportState.Ready(
+                            requestId = staged.requestId,
+                            displayName = staged.resolvedDisplayName,
+                            format = CadExternalFormat.PCAD,
+                            entityCount = doc.entities.size,
+                            sha256Hex = staged.sha256Hex,
+                            byteCount = staged.byteCount
+                        )
+                    )
+                }
+                fitDrawing(notify = false)
+                lastExternalImportSha256 = staged.sha256Hex
+                val payload = currentDxfPayload()
+                val syncedDoc = doc.copy(projectId = projectId, projectName = baseName)
+                viewModelScope.launch {
+                    repository.saveProjectDocument(
+                        projectId = projectId,
+                        name = baseName,
+                        description = "Imported .pcad (${staged.resolvedDisplayName} • ${doc.entities.size} entities)",
+                        payload = payload,
+                        saveToPublicDocuments = false,
+                        pcadDocument = syncedDoc
+                    )
+                }
+                emitTransientNotification(msg, NotificationCategory.SUCCESS)
+            }
+            CadExternalFormat.DXF -> {
+                val imported = staged.parsedDxf ?: run {
+                    CadIncomingDocumentRouter.cleanupStagedFile(staged.stagedFilePath)
+                    clearSavedExternalImportState()
+                    _uiState.update {
+                        it.copy(
+                            incomingImportState = CadIncomingImportState.Failed(
+                                requestId = staged.requestId,
+                                displayName = staged.resolvedDisplayName,
+                                errorKind = CadImportErrorKind.MALFORMED_CONTENT,
+                                title = "CORRUPT DXF FILE",
+                                message = "Failed to import entities from '${staged.resolvedDisplayName}'.",
+                                retryable = false
+                            )
+                        )
+                    }
+                    return
+                }
+                val cleaned = AutoDimensionEngine.removeAutoDimensions(imported.entities)
+                val msg = "DXFIN • Imported '${staged.resolvedDisplayName}' (${cleaned.size} entities, ${imported.displayUnit.symbol})"
+                _uiState.update {
+                    it.copy(
+                        isHomeScreenVisible = false,
+                        hasActiveWorkspaceSession = true,
+                        documentRevision = nextRev,
+                        lastExplicitSaveRevision = nextRev,
+                        pendingCommandLineInput = "",
+                        pendingHomeReplacementAction = null,
+                        currentProjectId = projectId,
+                        currentProjectName = baseName,
+                        storageUnit = imported.storageUnit,
+                        displayUnit = imported.displayUnit,
+                        sheetSetup = SheetSetupConfig(titleBlockTitle = baseName),
+                        layers = imported.layers,
+                        activeLayerName = imported.layers.firstOrNull()?.name ?: "0",
+                        entities = cleaned,
+                        blocks = imported.blocks.associateBy { b -> b.name },
+                        selectedEntityIds = emptySet(),
+                        previousSelectedEntityIds = emptySet(),
+                        referencePixelsPerModelUnit = null,
+                        effectiveGridSnapInterval = it.gridSnapConfig.gridSnapInterval,
+                        isQuickDimensionEnabled = false,
+                        canUndo = false,
+                        canRedo = false,
+                        activeActionPrompt = promptForCommand(CadCommandId.SELECT, 0, "Single"),
+                        commandPromptBanner = msg,
+                        commandPanelState = CommandPanelState.Hidden,
+                        incomingImportState = CadIncomingImportState.Ready(
+                            requestId = staged.requestId,
+                            displayName = staged.resolvedDisplayName,
+                            format = CadExternalFormat.DXF,
+                            entityCount = cleaned.size,
+                            sha256Hex = staged.sha256Hex,
+                            byteCount = staged.byteCount
+                        )
+                    )
+                }
+                fitDrawing(notify = false)
+                lastExternalImportSha256 = staged.sha256Hex
+                val payload = currentDxfPayload()
+                viewModelScope.launch {
+                    repository.saveProjectDocument(
+                        projectId = projectId,
+                        name = baseName,
+                        description = "Imported DXF (${staged.resolvedDisplayName} • ${cleaned.size} entities, ${imported.displayUnit.symbol})",
+                        payload = payload,
+                        saveToPublicDocuments = false
+                    )
+                }
+                emitTransientNotification(msg, NotificationCategory.SUCCESS)
+            }
+        }
+
+        CadIncomingDocumentRouter.cleanupStagedFile(staged.stagedFilePath)
+        clearSavedExternalImportState()
+    }
+
+    private fun restorePendingExternalImportIfNeeded() {
+        val awaitingDecision = savedStateHandle.get<Boolean>(KEY_EXT_AWAITING_DECISION) == true
+        val inFlight = savedStateHandle.get<Boolean>(KEY_EXT_IN_FLIGHT) == true
+        if (!awaitingDecision && !inFlight) return
+
+        val requestId = savedStateHandle.get<String>(KEY_EXT_REQUEST_ID) ?: UUID.randomUUID().toString()
+        val displayName = savedStateHandle.get<String>(KEY_EXT_DISPLAY_NAME) ?: "External CAD Document"
+        val sourceUriStr = savedStateHandle.get<String>(KEY_EXT_URI_STRING)
+        val declaredMime = savedStateHandle.get<String>(KEY_EXT_DECLARED_MIME)
+        val stagedPath = savedStateHandle.get<String>(KEY_EXT_STAGED_PATH)
+        val sha256Hex = savedStateHandle.get<String>(KEY_EXT_SHA256) ?: ""
+        val byteCount = savedStateHandle.get<Long>(KEY_EXT_BYTES) ?: 0L
+
+        val fallbackRequest = sourceUriStr?.let { uriStr ->
+            runCatching { android.net.Uri.parse(uriStr) }.getOrNull()?.let { uri ->
+                IncomingDocumentRequest(
+                    requestId = requestId,
+                    uri = uri,
+                    declaredMimeType = declaredMime,
+                    clipMimeTypes = emptyList(),
+                    displayNameHint = displayName,
+                    hasReadGrantFlag = true,
+                    intentFingerprint = "restore|$uriStr"
+                )
+            }
+        }
+
+        if (awaitingDecision && !stagedPath.isNullOrBlank()) {
+            viewModelScope.launch {
+                val stagedFile = File(stagedPath)
+                if (!stagedFile.exists()) {
+                    clearSavedExternalImportState()
+                    _uiState.update {
+                        it.copy(
+                            incomingImportState = CadIncomingImportState.Failed(
+                                requestId = requestId,
+                                displayName = displayName,
+                                errorKind = CadImportErrorKind.IO_ERROR,
+                                title = "IMPORT RECOVERY FAILED",
+                                message = "The staged copy of '$displayName' was removed while the app was closed. Tap Retry or re-open the file from the source app.",
+                                retryable = fallbackRequest != null,
+                                lastRequest = fallbackRequest
+                            )
+                        )
+                    }
+                    return@launch
+                }
+                val parsed = CadIncomingDocumentRouter.parseValidatedStagedFile(
+                    stagedFile = stagedFile,
+                    requestId = requestId,
+                    sourceUriString = sourceUriStr.orEmpty(),
+                    resolvedDisplayName = displayName,
+                    declaredMimeType = declaredMime,
+                    byteCount = stagedFile.length().coerceAtLeast(byteCount),
+                    sha256Hex = sha256Hex
+                )
+                when (parsed) {
+                    is CadImportStageOutcome.Success -> {
+                        _uiState.update {
+                            it.copy(
+                                incomingImportState = CadIncomingImportState.AwaitingUnsavedDecision(parsed.document),
+                                pendingHomeReplacementAction = PendingHomeReplacementAction.ImportExternalDocument(parsed.document)
+                            )
+                        }
+                    }
+                    is CadImportStageOutcome.Failure -> {
+                        CadIncomingDocumentRouter.cleanupStagedFile(stagedPath)
+                        clearSavedExternalImportState()
+                        _uiState.update {
+                            it.copy(
+                                incomingImportState = CadIncomingImportState.Failed(
+                                    requestId = requestId,
+                                    displayName = displayName,
+                                    errorKind = parsed.errorKind,
+                                    title = parsed.title,
+                                    message = parsed.message,
+                                    retryable = fallbackRequest != null,
+                                    lastRequest = fallbackRequest
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        // Process was killed mid-read before staging completed: do not fake success; emit retryable failure.
+        clearSavedExternalImportState()
+        _uiState.update {
+            it.copy(
+                incomingImportState = CadIncomingImportState.Failed(
+                    requestId = requestId,
+                    displayName = displayName,
+                    errorKind = CadImportErrorKind.IO_ERROR,
+                    title = "IMPORT INTERRUPTED",
+                    message = "Reading '$displayName' was interrupted when the app restarted. Tap Retry or re-open from the source app.",
+                    retryable = fallbackRequest != null,
+                    lastRequest = fallbackRequest
+                )
+            )
+        }
+    }
+
+    private fun clearSavedExternalImportState() {
+        savedStateHandle.remove<Boolean>(KEY_EXT_IN_FLIGHT)
+        savedStateHandle.remove<Boolean>(KEY_EXT_AWAITING_DECISION)
+        savedStateHandle.remove<String>(KEY_EXT_REQUEST_ID)
+        savedStateHandle.remove<String>(KEY_EXT_URI_STRING)
+        savedStateHandle.remove<String>(KEY_EXT_DECLARED_MIME)
+        savedStateHandle.remove<String>(KEY_EXT_DISPLAY_NAME)
+        savedStateHandle.remove<String>(KEY_EXT_STAGED_PATH)
+        savedStateHandle.remove<String>(KEY_EXT_SHA256)
+        savedStateHandle.remove<Long>(KEY_EXT_BYTES)
+    }
+
+    companion object {
+        internal const val KEY_EXT_IN_FLIGHT = "ext_import_in_flight"
+        internal const val KEY_EXT_AWAITING_DECISION = "ext_import_awaiting_decision"
+        internal const val KEY_EXT_REQUEST_ID = "ext_import_request_id"
+        internal const val KEY_EXT_URI_STRING = "ext_import_uri_string"
+        internal const val KEY_EXT_DECLARED_MIME = "ext_import_declared_mime"
+        internal const val KEY_EXT_DISPLAY_NAME = "ext_import_display_name"
+        internal const val KEY_EXT_STAGED_PATH = "ext_import_staged_path"
+        internal const val KEY_EXT_SHA256 = "ext_import_sha256"
+        internal const val KEY_EXT_BYTES = "ext_import_bytes"
     }
 
     fun startNewBlankDrawing(

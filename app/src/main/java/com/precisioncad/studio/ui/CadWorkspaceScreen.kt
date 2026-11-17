@@ -89,6 +89,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -120,6 +121,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -135,10 +137,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.precisioncad.studio.R
 import com.precisioncad.studio.cad.data.CadProjectMetadataEntity
 import com.precisioncad.studio.cad.dimension.DimensionArrangementPreference
 import com.precisioncad.studio.cad.dimension.QDimDensityPolicy
 import com.precisioncad.studio.cad.io.CadDxfInterchange
+import com.precisioncad.studio.cad.io.CadIncomingImportState
 import com.precisioncad.studio.cad.kernel.FitDrawingPolicy
 import com.precisioncad.studio.cad.kernel.UsableViewportRect
 import com.precisioncad.studio.cad.model.CadCommandCategory
@@ -288,11 +292,15 @@ fun CadWorkspaceScreen(
     }
 
     // V18.2 Requirement C (§6.5): System Back gesture/button from Home returns to active workspace session
+    val isExternalImportModalActive = uiState.incomingImportState is CadIncomingImportState.Reading ||
+        uiState.incomingImportState is CadIncomingImportState.Importing ||
+        uiState.incomingImportState is CadIncomingImportState.Failed
     BackHandler(
         enabled = uiState.isHomeScreenVisible &&
             uiState.hasActiveWorkspaceSession &&
             uiState.pendingHomeReplacementAction == null &&
-            !uiState.isReleaseCatalogueOpen
+            !uiState.isReleaseCatalogueOpen &&
+            !isExternalImportModalActive
     ) {
         viewModel.returnToActiveWorkspace()
     }
@@ -983,6 +991,13 @@ fun CadWorkspaceScreen(
             onStayHere = { viewModel.dismissPendingHomeAction() }
         )
     }
+
+    ExternalImportStatusDialog(
+        importState = uiState.incomingImportState,
+        onCancel = viewModel::cancelActiveExternalImport,
+        onRetry = viewModel::retryLastFailedExternalImport,
+        onDismiss = viewModel::dismissExternalImportState
+    )
 
     if (showActionLauncherDialog) {
         ActionLauncherDialog(
@@ -3996,4 +4011,259 @@ private fun CadHomeScreen(
         }
     }
 }
+
+@Composable
+private fun ExternalImportStatusDialog(
+    importState: CadIncomingImportState,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    when (importState) {
+        is CadIncomingImportState.Reading,
+        is CadIncomingImportState.Importing -> {
+            val isReading = importState is CadIncomingImportState.Reading
+            val displayName = when (importState) {
+                is CadIncomingImportState.Reading -> importState.displayName
+                is CadIncomingImportState.Importing -> importState.displayName
+                else -> ""
+            }
+            val titleText = if (isReading) {
+                stringResource(R.string.external_import_reading_title)
+            } else {
+                stringResource(R.string.external_import_importing_title)
+            }
+            Dialog(
+                onDismissRequest = onCancel,
+                properties = DialogProperties(
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 500.dp)
+                        .border(1.5.dp, CadCyanPrimary, RoundedCornerShape(12.dp))
+                        .testTag("external_import_progress_dialog"),
+                    shape = RoundedCornerShape(12.dp),
+                    color = CadSurfaceCard
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                tint = CadCyanPrimary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = titleText,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = CadCyanPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CadTextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        if (importState is CadIncomingImportState.Reading) {
+                            val total = importState.totalBytes
+                            if (total != null && total > 0L) {
+                                val progress = (importState.bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                                LinearProgressIndicator(
+                                    progress = { progress },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = CadCyanPrimary,
+                                    trackColor = CadBorderHairline
+                                )
+                                Text(
+                                    text = "${formatExternalByteCount(importState.bytesRead)} / ${formatExternalByteCount(total)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CadTextSecondary
+                                )
+                            } else {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = CadCyanPrimary,
+                                    trackColor = CadBorderHairline
+                                )
+                                Text(
+                                    text = "${formatExternalByteCount(importState.bytesRead)} staged",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CadTextSecondary
+                                )
+                            }
+                        } else if (importState is CadIncomingImportState.Importing) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = CadCyanPrimary,
+                                trackColor = CadBorderHairline
+                            )
+                            Text(
+                                text = "Parsing ${importState.format.name} entities into 2D workspace...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CadTextPrimary
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onCancel,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("external_import_cancel_button"),
+                            border = BorderStroke(1.dp, CadBorderStrong),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.external_import_cancel),
+                                color = CadTextPrimary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        is CadIncomingImportState.Failed -> {
+            Dialog(
+                onDismissRequest = onDismiss,
+                properties = DialogProperties(
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = true,
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 500.dp)
+                        .border(1.5.dp, CadRedAlert, RoundedCornerShape(12.dp))
+                        .testTag("external_import_error_dialog"),
+                    shape = RoundedCornerShape(12.dp),
+                    color = CadSurfaceCard
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = CadRedAlert,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = importState.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = CadRedAlert,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.testTag("external_import_error_title")
+                                )
+                                Text(
+                                    text = importState.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CadTextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = onDismiss,
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = stringResource(R.string.external_import_close_desc),
+                                    tint = CadTextSecondary
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = importState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CadTextPrimary,
+                            modifier = Modifier.testTag("external_import_error_message")
+                        )
+
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (importState.retryable && importState.lastRequest != null) {
+                                Button(
+                                    onClick = onRetry,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("external_import_retry_button"),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = CadCyanPrimary,
+                                        contentColor = Color(0xFF001824)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(stringResource(R.string.external_import_retry), fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = onDismiss,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("external_import_dismiss_button"),
+                                border = BorderStroke(1.dp, CadBorderStrong),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.external_import_dismiss),
+                                    color = CadTextPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else -> Unit
+    }
+}
+
+private fun formatExternalByteCount(bytes: Long): String {
+    return when {
+        bytes < 1024L -> "$bytes B"
+        bytes < 1024L * 1024L -> String.format(Locale.ROOT, "%.1f KB", bytes / 1024.0)
+        else -> String.format(Locale.ROOT, "%.2f MB", bytes / (1024.0 * 1024.0))
+    }
+}
+
 

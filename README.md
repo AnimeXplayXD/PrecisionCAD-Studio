@@ -131,7 +131,9 @@ PrecisionCAD Studio separates native project persistence from external CAD and v
 | **`.pdf`** | Plot / technical document export | Vector sheet and model plotting generated via Android's `PdfDocument` API with synchronized project/title-block naming. |
 | **`.svg`** | Vector interchange | 2D vector path export and basic SVG path/primitive import (`CadDxfInterchange.kt`). |
 
-> **Note:** `.pcad` is PrecisionCAD Studio's native project format, not DWG. Native DWG or DWF reading/writing is not implemented.
+- **External `ACTION_VIEW` Document Handoff (v1.18.4 / Build 31+):** Other Android apps (such as document galleries and file managers) can open 2D ASCII `.dxf` (`image/vnd.dxf`, `application/dxf`, etc.), native `.pcad`, and validated `application/octet-stream` `FileProvider` `content://` URIs directly in PrecisionCAD Studio via `ACTION_VIEW` + `FLAG_GRANT_READ_URI_PERMISSION`, with path-safe staging, size/signature validation, SHA-256 verification, and unsaved-drawing protection.
+
+> **Note:** `.pcad` is PrecisionCAD Studio's native project format, not DWG. Native DWG, DWF, Binary DXF, and 3D CAD formats (`.step`/`.stp`, `.iges`/`.igs`, `.stl`, `.obj`, `.glb`/`.gltf`) are not supported.
 
 ### Release Catalogue and In-App Update Handoff
 
@@ -235,7 +237,7 @@ PrecisionCAD Studio is organized into five deterministic packages under `app/src
 - **`cad/model/` — Domain Entities & Units:** Immutable 2D entity definitions (`CadEntities.kt`), unit systems, sheet configurations, command specifications, and locale-invariant number formatting (`CadUnitsAndSheet.kt`).
 - **`cad/kernel/` — Analytical 2D Geometry & Snapping:** Exact intersection solvers, entity modification algorithms (`CadGeometryKernel.kt`, `CadModificationEngine.kt`), coordinate expression parsing, OSNAP evaluation, zoom-adaptive Grid Snap, and separated Visual Polar Tracking / PolarSnap (`CadSnapAndCoordEngine.kt`).
 - **`cad/dimension/` — Quick Dimension & Alignment Engine:** Shape-aware geometry classification (`QuickDimensionEngine.kt`), 1D interval-graph lane allocation, 2D collision resolution (`DimensionAlignmentEngine.kt`), and annotation layout (`AdaptiveAnnotationRenderer.kt`).
-- **`cad/io/`, `cad/data/`, & `cad/update/` — Persistence, Interchange & Updater:** Native `.pcad` serialization and atomic quick-save (`CadPcadPersistence.kt`), DXF/PDF/SVG interchange (`CadDxfInterchange.kt`), local Room project catalogue (`CadRoomDatabase.kt`), and GitHub Releases verification/install handoff (`CadAppUpdater.kt`).
+- **`cad/io/`, `cad/data/`, & `cad/update/` — Persistence, Interchange & Updater:** Native `.pcad` serialization and atomic quick-save (`CadPcadPersistence.kt`), DXF/PDF/SVG interchange (`CadDxfInterchange.kt`), external `ACTION_VIEW` validation and staging (`CadIncomingDocumentRouter.kt`), local Room project catalogue (`CadRoomDatabase.kt`), and GitHub Releases verification/install handoff (`CadAppUpdater.kt`).
 - **`ui/` — Jetpack Compose Workspace & Shared Components:** Single-source-of-truth workspace state holder (`CadWorkspaceViewModel.kt`), multi-pass technical viewport (`CadViewportCanvas.kt`), virtual cursor controller (`VirtualCursorController.kt`), reusable card-deck state machine (`CadBinaryToggleCard.kt`), and engineering configuration dialogs (`CadDialogsAndPanels.kt`, `CadReleaseCatalogueDialog.kt`).
 
 For a complete breakdown of rendering passes and state ownership, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -262,7 +264,7 @@ For a complete breakdown of rendering passes and state ownership, see [`docs/ARC
 ## Current Limitations
 
 - **Strictly 2D Drafting Scope:** PrecisionCAD Studio supports 2D planar geometry and technical annotation only; 3D solid modelling, 3D meshes, and Z-axis extrusions are outside the application's scope.
-- **File Format Boundaries:** `.pcad` is the native project persistence format; `.dxf` (`AC1015`), `.pdf`, and `.svg` serve as interchange and plot formats. Native DWG and DWF formats are not supported.
+- **File Format Boundaries:** `.pcad` is the native project persistence format; `.dxf` (ASCII `AC1015`), `.pdf`, and `.svg` serve as interchange and plot formats. External `ACTION_VIEW` intents are restricted to 2D ASCII `.dxf`, native `.pcad`, and validated `application/octet-stream` payloads. Binary DXF, native DWG/DWF, and 3D CAD/mesh formats (STEP, IGES, STL, OBJ, glTF/GLB) are not supported.
 - **Production Release Signing:** Creating an official signed Release APK via CI requires the repository's configured production signing secrets and certificate verification pass (`scripts/verify_apksigner_certificate.py`).
 - **System Installation Confirmation:** In-app update downloads are verified prior to handoff, but final package installation is always subject to Android `PackageInstaller` policies and user confirmation on the target device.
 

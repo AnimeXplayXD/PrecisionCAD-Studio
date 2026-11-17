@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">PrecisionCAD Studio</string>
+    <string name="external_import_reading_title">Reading External CAD File</string>
+    <string name="external_import_importing_title">Importing CAD Geometry</string>
+    <string name="external_import_cancel">Cancel</string>
+    <string name="external_import_retry">Retry</string>
+    <string name="external_import_dismiss">Dismiss</string>
+    <string name="external_import_close_desc">Close import dialog</string>
 </resources>
