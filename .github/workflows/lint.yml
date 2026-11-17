@@ -97,14 +97,24 @@ jobs:
           STORE_PASSWORD="$THROW_PASS" \
           KEY_ALIAS="upload" \
           KEY_PASSWORD="$THROW_PASS" \
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label lintRelease-pr -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label lintRelease-pr -- \
             ./gradlew :app:lintRelease --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
+
+      - name: Finalize Any Interrupted Lint Step
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --finalize-incomplete
 
       - name: Upload Lint Report Artifacts (HTML, XML & TXT)
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: android-lint-release-reports
+          name: android-lint-release-reports-attempt-${{ github.run_attempt }}
           path: |
             app/build/reports/lint-results-release.*
           if-no-files-found: warn
@@ -114,7 +124,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: precisioncad-lint-diagnostics
+          name: precisioncad-lint-diagnostics-attempt-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/precisioncad-ci-diagnostics/
           if-no-files-found: ignore

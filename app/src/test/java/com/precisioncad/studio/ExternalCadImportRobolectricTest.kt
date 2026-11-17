@@ -14,7 +14,6 @@ import androidx.compose.ui.test.performClick
 import androidx.core.content.FileProvider
 import androidx.lifecycle.SavedStateHandle
 import androidx.test.core.app.ActivityScenario
-import androidx.test.core.app.ApplicationProvider
 import com.precisioncad.studio.cad.io.CadDxfInterchange
 import com.precisioncad.studio.cad.io.CadImportErrorKind
 import com.precisioncad.studio.cad.io.CadIncomingDocumentRouter
@@ -27,19 +26,19 @@ import com.precisioncad.studio.cad.model.CadEntity
 import com.precisioncad.studio.cad.model.CadLayer
 import com.precisioncad.studio.cad.model.CadUnit
 import com.precisioncad.studio.cad.model.Point2D
-import com.precisioncad.studio.cad.update.CadGitHubUpdateRepository
 import com.precisioncad.studio.cad.update.ReleaseFeedFetcher
+import com.precisioncad.studio.testsupport.ExternalScenarioOwnerRule
 import com.precisioncad.studio.ui.CadWorkspaceViewModel
-import com.precisioncad.studio.ui.components.CadDeckIdleTimerState
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.runner.Description
 import org.junit.runner.RunWith
+import org.junit.runners.model.Statement
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
 import org.robolectric.annotation.Config
@@ -51,39 +50,17 @@ import java.util.Locale
 @Config(sdk = [36])
 class ExternalCadImportRobolectricTest {
 
+    private val scenarioOwner = ExternalScenarioOwnerRule()
+    private val composeRule = createEmptyComposeRule()
+
     @get:Rule
-    val composeRule = createEmptyComposeRule()
+    val ruleChain: RuleChain = RuleChain.outerRule(scenarioOwner).around(composeRule)
 
-    private lateinit var context: Context
-    private lateinit var exportsDir: File
+    private val context: Context
+        get() = scenarioOwner.context
 
-    @Before
-    fun setup() {
-        resetFileProviderCache()
-        CadGitHubUpdateRepository.defaultFetcherOverrideForTesting =
-            ReleaseFeedFetcher { _, _, _, _ -> Result.success(null) }
-        CadDeckIdleTimerState.timerDriverEnabledForTesting = false
-        context = ApplicationProvider.getApplicationContext()
-        exportsDir = File(context.cacheDir, "exports").apply { mkdirs() }
-    }
-
-    @After
-    fun tearDown() {
-        CadGitHubUpdateRepository.defaultFetcherOverrideForTesting = null
-        CadDeckIdleTimerState.timerDriverEnabledForTesting = true
-        exportsDir.listFiles()?.forEach { it.delete() }
-        File(context.filesDir, CadIncomingDocumentRouter.STAGING_DIR_NAME).listFiles()?.forEach { it.delete() }
-        resetFileProviderCache()
-    }
-
-    private fun resetFileProviderCache() {
-        runCatching {
-            val cacheField = FileProvider::class.java.getDeclaredField("sCache").apply {
-                isAccessible = true
-            }
-            (cacheField.get(null) as? MutableMap<*, *>)?.clear()
-        }
-    }
+    private val exportsDir: File
+        get() = scenarioOwner.exportsDir
 
     private fun buildDxfBytes(label: String, endX: Double, radius: Double): ByteArray {
         val payload = DxfDocumentPayload(
@@ -292,40 +269,39 @@ class ExternalCadImportRobolectricTest {
         val expectedHash = sha256(dxfBytes)
         val (_, _, launchIntent) = createSharedFileIntent("flange_plate.dxf", dxfBytes, "image/vnd.dxf")
 
-        ActivityScenario.launch<MainActivity>(launchIntent).use { scenario ->
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
-                    vm.lastExternalImportSha256 == expectedHash &&
-                    !vm.uiState.value.isHomeScreenVisible
-            }
+        val scenario = scenarioOwner.launch<MainActivity>(launchIntent)
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                vm.lastExternalImportSha256 == expectedHash &&
+                !vm.uiState.value.isHomeScreenVisible
+        }
 
-            // Directly in workspace (not stuck on Home Screen)
-            composeRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
-            assertTrue(composeRule.onAllNodesWithTag("cad_home_screen").fetchSemanticsNodes().isEmpty())
+        // Directly in workspace (not stuck on Home Screen)
+        composeRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
+        assertTrue(composeRule.onAllNodesWithTag("cad_home_screen").fetchSemanticsNodes().isEmpty())
 
-            var firstRevision = 0L
-            scenario.onActivity { activity ->
-                val vm = extractViewModel(activity)
-                val st = vm.uiState.value
-                assertFalse(st.isHomeScreenVisible)
-                assertTrue(st.hasActiveWorkspaceSession)
-                assertEquals("flange_plate", st.currentProjectName)
-                assertEquals(2, st.entities.size)
-                assertEquals(expectedHash, vm.lastExternalImportSha256)
-                assertTrue(st.incomingImportState is CadIncomingImportState.Ready)
-                firstRevision = st.documentRevision
-                assertTrue(CadIncomingDocumentRouter.isIntentAlreadyHandled(activity.intent))
-            }
+        var firstRevision = 0L
+        scenario.onActivity { activity ->
+            val vm = extractViewModel(activity)
+            val st = vm.uiState.value
+            assertFalse(st.isHomeScreenVisible)
+            assertTrue(st.hasActiveWorkspaceSession)
+            assertEquals("flange_plate", st.currentProjectName)
+            assertEquals(2, st.entities.size)
+            assertEquals(expectedHash, vm.lastExternalImportSha256)
+            assertTrue(st.incomingImportState is CadIncomingImportState.Ready)
+            firstRevision = st.documentRevision
+            assertTrue(CadIncomingDocumentRouter.isIntentAlreadyHandled(activity.intent))
+        }
 
-            // Simulate configuration change / screen rotation
-            scenario.recreate()
-            waitForTagDisplayed("cad_technical_viewport")
+        // Simulate configuration change / screen rotation
+        scenario.recreate()
+        waitForTagDisplayed("cad_technical_viewport")
 
-            scenario.onActivity { activity ->
-                val vm = extractViewModel(activity)
-                assertEquals(firstRevision, vm.uiState.value.documentRevision)
-                assertEquals(expectedHash, vm.lastExternalImportSha256)
-            }
+        scenario.onActivity { activity ->
+            val vm = extractViewModel(activity)
+            assertEquals(firstRevision, vm.uiState.value.documentRevision)
+            assertEquals(expectedHash, vm.lastExternalImportSha256)
         }
     }
 
@@ -340,66 +316,65 @@ class ExternalCadImportRobolectricTest {
 
         val (_, _, firstIntent) = createSharedFileIntent("assembly.dxf", firstDxf, "image/vnd.dxf")
 
-        ActivityScenario.launch<MainActivity>(firstIntent).use { scenario ->
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
-                    vm.lastExternalImportSha256 == firstHash
-            }
+        val scenario = scenarioOwner.launch<MainActivity>(firstIntent)
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                vm.lastExternalImportSha256 == firstHash
+        }
 
-            // Deliver second same-named file via warm onNewIntent (first is clean -> direct switch)
-            val (_, _, secondIntent) = createSharedFileIntent("assembly.dxf", secondDxfSameName, "image/vnd.dxf")
-            scenario.onActivity { activity ->
-                dispatchNewIntent(activity, secondIntent)
-            }
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
-                    vm.lastExternalImportSha256 == secondHash
-            }
+        // Deliver second same-named file via warm onNewIntent (first is clean -> direct switch)
+        val (_, _, secondIntent) = createSharedFileIntent("assembly.dxf", secondDxfSameName, "image/vnd.dxf")
+        scenario.onActivity { activity ->
+            dispatchNewIntent(activity, secondIntent)
+        }
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                vm.lastExternalImportSha256 == secondHash
+        }
 
-            scenario.onActivity { activity ->
-                val vm = extractViewModel(activity)
-                assertEquals(secondHash, vm.lastExternalImportSha256)
-                // Verify entity coordinates match second DXF (not cached first DXF!)
-                val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
-                assertEquals(260.0, line.end.x, 0.01)
+        scenario.onActivity { activity ->
+            val vm = extractViewModel(activity)
+            assertEquals(secondHash, vm.lastExternalImportSha256)
+            // Verify entity coordinates match second DXF (not cached first DXF!)
+            val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
+            assertEquals(260.0, line.end.x, 0.01)
 
-                // Make unsaved active edits in workspace
-                vm.activateCommand(CadCommandId.LINE)
-                vm.submitCommandOrCoordinateInput("0,0")
-                vm.submitCommandOrCoordinateInput("50,50")
-                vm.finishCurrentCommand()
-                assertTrue(vm.uiState.value.isDocumentDirty)
-            }
-            pumpMainAndCompose()
+            // Make unsaved active edits in workspace
+            vm.activateCommand(CadCommandId.LINE)
+            vm.submitCommandOrCoordinateInput("0,0")
+            vm.submitCommandOrCoordinateInput("50,50")
+            vm.finishCurrentCommand()
+            assertTrue(vm.uiState.value.isDocumentDirty)
+        }
+        pumpMainAndCompose()
 
-            // Send third document (.pcad over octet-stream) while active drawing has unsaved edits
-            val (thirdSourceFile, _, thirdIntent) = createSharedFileIntent(
-                "mount_plate.pcad",
-                thirdPcadBytes,
-                "application/octet-stream"
-            )
-            scenario.onActivity { activity ->
-                dispatchNewIntent(activity, thirdIntent)
-            }
-            waitForTagDisplayed("unsaved_drawing_confirmation_dialog")
+        // Send third document (.pcad over octet-stream) while active drawing has unsaved edits
+        val (thirdSourceFile, _, thirdIntent) = createSharedFileIntent(
+            "mount_plate.pcad",
+            thirdPcadBytes,
+            "application/octet-stream"
+        )
+        scenario.onActivity { activity ->
+            dispatchNewIntent(activity, thirdIntent)
+        }
+        waitForTagDisplayed("unsaved_drawing_confirmation_dialog")
 
-            // Prove staging durability: revoke/delete external source file AFTER staging, before tapping Discard!
-            assertTrue(thirdSourceFile.delete())
+        // Prove staging durability: revoke/delete external source file AFTER staging, before tapping Discard!
+        assertTrue(thirdSourceFile.delete())
 
-            composeRule.onNodeWithTag("unsaved_dialog_discard_and_continue").performClick()
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
-                    vm.lastExternalImportSha256 == thirdHash
-            }
+        composeRule.onNodeWithTag("unsaved_dialog_discard_and_continue").performClick()
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                vm.lastExternalImportSha256 == thirdHash
+        }
 
-            // Verify import STILL completed cleanly from app-private staged copy!
-            scenario.onActivity { activity ->
-                val vm = extractViewModel(activity)
-                assertEquals("MountPlate_V3", vm.uiState.value.currentProjectName)
-                assertEquals(thirdHash, vm.lastExternalImportSha256)
-                val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
-                assertEquals(320.0, line.end.x, 0.01)
-            }
+        // Verify import STILL completed cleanly from app-private staged copy!
+        scenario.onActivity { activity ->
+            val vm = extractViewModel(activity)
+            assertEquals("MountPlate_V3", vm.uiState.value.currentProjectName)
+            assertEquals(thirdHash, vm.lastExternalImportSha256)
+            val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
+            assertEquals(320.0, line.end.x, 0.01)
         }
     }
 
@@ -409,32 +384,31 @@ class ExternalCadImportRobolectricTest {
         val validHash = sha256(validDxf)
         val (_, _, initialIntent) = createSharedFileIntent("existing_plan.dxf", validDxf, "image/vnd.dxf")
 
-        ActivityScenario.launch<MainActivity>(initialIntent).use { scenario ->
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
-                    vm.lastExternalImportSha256 == validHash
-            }
+        val scenario = scenarioOwner.launch<MainActivity>(initialIntent)
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                vm.lastExternalImportSha256 == validHash
+        }
 
-            val badStep = "ISO-10303-21;\nHEADER;\nDATA;\nEND-ISO-10303-21;".toByteArray(Charsets.UTF_8)
-            val (_, _, badIntent) = createSharedFileIntent("solid_body.bin", badStep, "application/octet-stream")
-            scenario.onActivity { activity ->
-                dispatchNewIntent(activity, badIntent)
-            }
-            waitForTagDisplayed("external_import_error_dialog")
+        val badStep = "ISO-10303-21;\nHEADER;\nDATA;\nEND-ISO-10303-21;".toByteArray(Charsets.UTF_8)
+        val (_, _, badIntent) = createSharedFileIntent("solid_body.bin", badStep, "application/octet-stream")
+        scenario.onActivity { activity ->
+            dispatchNewIntent(activity, badIntent)
+        }
+        waitForTagDisplayed("external_import_error_dialog")
 
-            composeRule.onNodeWithTag("external_import_error_title").assertIsDisplayed()
-            composeRule.onNodeWithTag("external_import_error_message").assertIsDisplayed()
-            composeRule.onNodeWithTag("external_import_dismiss_button").performClick()
-            waitForScenarioViewModelCondition(scenario) { vm ->
-                vm.uiState.value.incomingImportState is CadIncomingImportState.Idle
-            }
+        composeRule.onNodeWithTag("external_import_error_title").assertIsDisplayed()
+        composeRule.onNodeWithTag("external_import_error_message").assertIsDisplayed()
+        composeRule.onNodeWithTag("external_import_dismiss_button").performClick()
+        waitForScenarioViewModelCondition(scenario) { vm ->
+            vm.uiState.value.incomingImportState is CadIncomingImportState.Idle
+        }
 
-            scenario.onActivity { activity ->
-                val vm = extractViewModel(activity)
-                assertEquals("existing_plan", vm.uiState.value.currentProjectName)
-                assertEquals(validHash, vm.lastExternalImportSha256)
-                assertTrue(vm.uiState.value.incomingImportState is CadIncomingImportState.Idle)
-            }
+        scenario.onActivity { activity ->
+            val vm = extractViewModel(activity)
+            assertEquals("existing_plan", vm.uiState.value.currentProjectName)
+            assertEquals(validHash, vm.lastExternalImportSha256)
+            assertTrue(vm.uiState.value.incomingImportState is CadIncomingImportState.Idle)
         }
     }
 
@@ -491,6 +465,40 @@ class ExternalCadImportRobolectricTest {
         val failed = midReadVm.uiState.value.incomingImportState as? CadIncomingImportState.Failed
         assertTrue(failed != null)
         assertEquals(CadImportErrorKind.IO_ERROR, failed!!.errorKind)
+    }
+
+    @Test
+    fun `ExternalScenarioOwnerRule preserves body failure and completes scenario teardown when test body throws`() {
+        val nestedOwner = ExternalScenarioOwnerRule()
+        val description = Description.createTestDescription(
+            ExternalCadImportRobolectricTest::class.java,
+            "simulatedFailingScenarioBody"
+        )
+        val dxfBytes = buildDxfBytes("fail_check", endX = 95.0, radius = 12.0)
+        val (_, _, launchIntent) = createSharedFileIntent("throw_after_launch.dxf", dxfBytes, "image/vnd.dxf")
+
+        var capturedScenario: ActivityScenario<MainActivity>? = null
+        var caughtThrowable: Throwable? = null
+
+        val failingStatement = object : Statement() {
+            override fun evaluate() {
+                val sc = nestedOwner.launch<MainActivity>(launchIntent)
+                capturedScenario = sc
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                throw IllegalStateException("EXPECTED_HARNESS_BODY_FAILURE")
+            }
+        }
+
+        try {
+            nestedOwner.apply(failingStatement, description).evaluate()
+        } catch (t: Throwable) {
+            caughtThrowable = t
+        }
+
+        assertTrue(caughtThrowable is IllegalStateException)
+        assertEquals("EXPECTED_HARNESS_BODY_FAILURE", caughtThrowable?.message)
+        assertEquals("DONE", nestedOwner.currentPhase)
+        assertEquals(androidx.lifecycle.Lifecycle.State.DESTROYED, capturedScenario?.state)
     }
 
     private fun dispatchNewIntent(activity: MainActivity, newIntent: Intent) {

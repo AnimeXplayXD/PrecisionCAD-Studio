@@ -339,7 +339,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label PrecisionCADUnitTest -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label PrecisionCADUnitTest \
+            --class-fqcn com.precisioncad.studio.PrecisionCADUnitTest -- \
             ./gradlew :app:testDebugUnitTest \
               --tests 'com.precisioncad.studio.PrecisionCADUnitTest' \
               --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
@@ -349,7 +353,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label CadIncomingDocumentRouterTest -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label CadIncomingDocumentRouterTest \
+            --class-fqcn com.precisioncad.studio.CadIncomingDocumentRouterTest -- \
             ./gradlew :app:testDebugUnitTest \
               --tests 'com.precisioncad.studio.CadIncomingDocumentRouterTest' \
               --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
@@ -359,7 +367,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label ExternalCadImportRobolectricTest -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label ExternalCadImportRobolectricTest \
+            --class-fqcn com.precisioncad.studio.ExternalCadImportRobolectricTest -- \
             ./gradlew :app:testDebugUnitTest \
               --tests 'com.precisioncad.studio.ExternalCadImportRobolectricTest' \
               --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
@@ -369,7 +381,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label PrecisionCADRobolectricTest -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label PrecisionCADRobolectricTest \
+            --class-fqcn com.precisioncad.studio.PrecisionCADRobolectricTest -- \
             ./gradlew :app:testDebugUnitTest \
               --tests 'com.precisioncad.studio.PrecisionCADRobolectricTest' \
               --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
@@ -383,7 +399,10 @@ jobs:
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label lintRelease -- \
+          ./scripts/ci-gradle-diagnostics.sh \
+            --watchdog-seconds 120 \
+            --hard-timeout-seconds 780 \
+            --label lintRelease -- \
             ./gradlew :app:lintRelease \
               --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
 
@@ -490,12 +509,20 @@ jobs:
           fi
           rm -f "${RUNNER_TEMP}"/precisioncad-release-*.jks 2>/dev/null || true
 
-      - name: Upload Unit Test Results & Reports
+      - name: Finalize Any Interrupted Step & Collect Fallback Per-Class Reports
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --finalize-incomplete
+
+      - name: Upload Per-Class Unit Test Archives & Reports
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: unit-test-results-and-reports
+          name: unit-test-results-and-reports-attempt-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/precisioncad-test-archives/
             app/build/test-results/testDebugUnitTest/
             app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: warn
@@ -505,7 +532,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: precisioncad-ci-diagnostics
+          name: precisioncad-ci-diagnostics-attempt-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/precisioncad-ci-diagnostics/
           if-no-files-found: ignore
@@ -515,7 +542,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: android-lint-release-reports
+          name: android-lint-release-reports-attempt-${{ github.run_attempt }}
           path: |
             app/build/reports/lint-results-release.*
           if-no-files-found: warn
