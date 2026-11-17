@@ -1757,6 +1757,30 @@ class PrecisionCADUnitTest {
         assertEquals(1, balancedArcDims.count { it.dimensionType == DimensionType.ANGULAR })
         assertTrue(balancedArcDims.none { it.dimensionType == DimensionType.LINEAR_HORIZONTAL || it.dimensionType == DimensionType.LINEAR_VERTICAL })
     }
+
+    @Test
+    fun `TC-CI-01 verify CadDeckIdleTimerState eligibility, driver cancellation cleanup, and pause transitions`() {
+        val state = com.precisioncad.studio.ui.components.CadDeckIdleTimerState(deckId = "ci_timer_test")
+        assertTrue(state.isEligibleForTimer)
+        assertTrue(state.attachTimerDriver())
+        assertEquals(1, state.activeTimerDriverCount)
+
+        // Advance past 60s idle interval -> enters peek
+        state.advanceTimeBy(60_000L)
+        assertTrue(state.isIdlePeeking)
+
+        // Becoming invisible or paused cancels eligibility and resets peek state
+        state.updateEligibility(parentVisible = false)
+        assertFalse(state.isEligibleForTimer)
+        assertFalse(state.isIdlePeeking)
+
+        // Detaching driver (as LaunchedEffect finally block guarantees on disposal) leaves count at 0
+        state.detachTimerDriver()
+        assertEquals(0, state.activeTimerDriverCount)
+
+        // Reduced motion disables idle peek while keeping eligibility clean
+        state.updateEligibility(parentVisible = true, deckEnabled = true, reducedMotion = true)
+        state.advanceTimeBy(60_000L)
+        assertFalse(state.isIdlePeeking)
+    }
 }
-
-

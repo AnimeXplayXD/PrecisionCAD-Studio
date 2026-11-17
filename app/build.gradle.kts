@@ -1,4 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
 import java.util.Properties
 
 plugins {
@@ -149,6 +151,17 @@ android {
         if (localRobolectricCache.isDirectory) {
           testTask.systemProperty("robolectric.dependency.dir", localRobolectricCache.absolutePath)
           testTask.systemProperty("robolectric.offline", "true")
+        }
+        testTask.maxParallelForks = 1
+        testTask.testLogging {
+          events(
+            TestLogEvent.STARTED,
+            TestLogEvent.PASSED,
+            TestLogEvent.FAILED,
+            TestLogEvent.SKIPPED
+          )
+          exceptionFormat = TestExceptionFormat.FULL
+          showStandardStreams = true
         }
       }
     }

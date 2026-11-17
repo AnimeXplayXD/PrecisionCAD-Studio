@@ -14,6 +14,7 @@ import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.precisioncad.studio.BuildConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -760,12 +761,64 @@ object CadApkVerifier {
 }
 
 /**
+ * Transport seam for fetching GitHub Releases JSON so tests can run deterministically offline
+ * while production builds use [DefaultHttpReleaseFeedFetcher].
+ */
+fun interface ReleaseFeedFetcher {
+    fun fetchReleasesJson(
+        endpointUrl: String,
+        installedVersionName: String,
+        cachedEtag: String?,
+        onEtagReceived: (String) -> Unit
+    ): Result<String?>
+}
+
+object DefaultHttpReleaseFeedFetcher : ReleaseFeedFetcher {
+    override fun fetchReleasesJson(
+        endpointUrl: String,
+        installedVersionName: String,
+        cachedEtag: String?,
+        onEtagReceived: (String) -> Unit
+    ): Result<String?> = runCatching {
+        val url = URL(endpointUrl)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10_000
+            readTimeout = 15_000
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            setRequestProperty("User-Agent", "PrecisionCAD-Studio-Android/$installedVersionName")
+            if (!cachedEtag.isNullOrBlank()) {
+                setRequestProperty("If-None-Match", cachedEtag)
+            }
+        }
+        try {
+            when (val code = conn.responseCode) {
+                HttpURLConnection.HTTP_NOT_MODIFIED -> null
+                HttpURLConnection.HTTP_OK -> {
+                    val etag = conn.getHeaderField("ETag")
+                    if (!etag.isNullOrBlank()) {
+                        onEtagReceived(etag)
+                    }
+                    conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                }
+                else -> throw IllegalStateException("GitHub API returned HTTP $code")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+}
+
+/**
  * Phase 12 — GitHub Release Catalogue & In-App Updater Repository.
  */
-class CadGitHubUpdateRepository(
+class CadGitHubUpdateRepository @JvmOverloads constructor(
     context: Context,
     private val scope: CoroutineScope,
-    val repoConfig: UpdateRepositoryConfig = UpdateRepositoryConfig()
+    val repoConfig: UpdateRepositoryConfig = UpdateRepositoryConfig(),
+    private val releaseFeedFetcher: ReleaseFeedFetcher? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : CadInstallSessionCallbacks.Listener {
 
     private val appContext = context.applicationContext
@@ -926,11 +979,15 @@ class CadGitHubUpdateRepository(
         }
     }
 
+    var requestedUpdateCheckCount: Int = 0
+        private set
+
     /**
      * Checks GitHub Releases API for updates.
      * Automatic startup checks are throttled to once every 6 hours; manual checks run immediately.
      */
     fun checkForUpdates(manual: Boolean) {
+        requestedUpdateCheckCount++
         val lastCheckMs = prefs.getLong(KEY_LAST_CHECK_EPOCH_MS, 0L)
         val nowMs = System.currentTimeMillis()
         if (!manual && lastCheckMs > 0L && (nowMs - lastCheckMs) < UpdateRepositoryConfig.AUTO_CHECK_THROTTLE_MS) {
@@ -939,7 +996,7 @@ class CadGitHubUpdateRepository(
 
         scope.launch {
             _updateUiState.value = AppUpdateUiState.Checking(isManual = manual)
-            val result = withContext(Dispatchers.IO) {
+            val result = withContext(ioDispatcher) {
                 fetchReleasesFromGitHub()
             }
             result.fold(
@@ -959,36 +1016,16 @@ class CadGitHubUpdateRepository(
         }
     }
 
-    private fun fetchReleasesFromGitHub(): Result<String?> = runCatching {
-        val url = URL(repoConfig.releasesEndpointUrl)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-            setRequestProperty("User-Agent", "PrecisionCAD-Studio-Android/$installedVersionName")
-            val cachedEtag = prefs.getString(KEY_CACHED_ETAG, null)
-            if (!cachedEtag.isNullOrBlank()) {
-                setRequestProperty("If-None-Match", cachedEtag)
+    private fun fetchReleasesFromGitHub(): Result<String?> {
+        val fetcher = releaseFeedFetcher ?: defaultFetcherOverrideForTesting ?: DefaultHttpReleaseFeedFetcher
+        return fetcher.fetchReleasesJson(
+            endpointUrl = repoConfig.releasesEndpointUrl,
+            installedVersionName = installedVersionName,
+            cachedEtag = prefs.getString(KEY_CACHED_ETAG, null),
+            onEtagReceived = { etag ->
+                prefs.edit { putString(KEY_CACHED_ETAG, etag) }
             }
-        }
-        try {
-            val code = conn.responseCode
-            when (code) {
-                HttpURLConnection.HTTP_NOT_MODIFIED -> null
-                HttpURLConnection.HTTP_OK -> {
-                    val etag = conn.getHeaderField("ETag")
-                    if (!etag.isNullOrBlank()) {
-                        prefs.edit { putString(KEY_CACHED_ETAG, etag) }
-                    }
-                    conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                }
-                else -> throw IllegalStateException("GitHub API returned HTTP $code")
-            }
-        } finally {
-            conn.disconnect()
-        }
+        )
     }
 
     /**
@@ -1326,5 +1363,8 @@ class CadGitHubUpdateRepository(
         private const val KEY_LAST_CHECK_EPOCH_MS = "last_check_epoch_ms"
         private const val KEY_CACHED_ETAG = "cached_releases_etag"
         private const val KEY_CACHED_RELEASES_JSON = "cached_releases_json"
+
+        @Volatile
+        var defaultFetcherOverrideForTesting: ReleaseFeedFetcher? = null
     }
 }

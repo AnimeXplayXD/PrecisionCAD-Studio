@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.StatFs
 import android.provider.OpenableColumns
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -312,8 +313,9 @@ object CadIncomingDocumentRouter {
                 val stat = StatFs(dir.absolutePath)
                 if (stat.totalBytes > 0L) stat.availableBytes else Long.MAX_VALUE
             }.getOrDefault(Long.MAX_VALUE)
-        }
-    ): CadImportStageOutcome = withContext(Dispatchers.IO) {
+        },
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): CadImportStageOutcome = withContext(ioDispatcher) {
         val resolver = context.contentResolver
         var queriedName: String? = null
         var queriedSize: Long? = null
@@ -355,7 +357,8 @@ object CadIncomingDocumentRouter {
             allowEmptyExtension = true
         )
 
-        if (queriedSize != null && queriedSize!! > MAX_IMPORT_BYTES) {
+        val knownSize = queriedSize
+        if (knownSize != null && knownSize > MAX_IMPORT_BYTES) {
             return@withContext CadImportStageOutcome.Failure(
                 errorKind = CadImportErrorKind.SIZE_LIMIT_EXCEEDED,
                 title = "FILE TOO LARGE",
@@ -499,7 +502,8 @@ object CadIncomingDocumentRouter {
             resolvedDisplayName = resolvedDisplayName,
             declaredMimeType = request.declaredMimeType,
             byteCount = totalRead,
-            sha256Hex = sha256Hex
+            sha256Hex = sha256Hex,
+            ioDispatcher = ioDispatcher
         )
         if (outcome is CadImportStageOutcome.Failure) {
             stagedFile.delete()
@@ -514,8 +518,9 @@ object CadIncomingDocumentRouter {
         resolvedDisplayName: String,
         declaredMimeType: String?,
         byteCount: Long,
-        sha256Hex: String
-    ): CadImportStageOutcome = withContext(Dispatchers.IO) {
+        sha256Hex: String,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): CadImportStageOutcome = withContext(ioDispatcher) {
         if (!stagedFile.exists() || byteCount <= 0L || stagedFile.length() == 0L) {
             return@withContext CadImportStageOutcome.Failure(
                 errorKind = CadImportErrorKind.EMPTY_FILE,

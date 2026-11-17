@@ -1,7 +1,6 @@
 name: Android Lint (Release)
 
 on:
-  push:
   pull_request:
   workflow_dispatch:
 
@@ -12,6 +11,7 @@ jobs:
   lint-release:
     name: Run Gradle lintRelease
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ./gradlew
+          chmod +x ./gradlew ./scripts/ci-gradle-diagnostics.sh
           ./gradlew --version
 
       - name: Prepare .env File for Secrets Gradle Plugin
@@ -97,7 +97,8 @@ jobs:
           STORE_PASSWORD="$THROW_PASS" \
           KEY_ALIAS="upload" \
           KEY_PASSWORD="$THROW_PASS" \
-          ./gradlew :app:lintRelease --no-daemon --stacktrace
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label lintRelease-pr -- \
+            ./gradlew :app:lintRelease --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
 
       - name: Upload Lint Report Artifacts (HTML, XML & TXT)
         if: always()
@@ -108,3 +109,13 @@ jobs:
             app/build/reports/lint-results-release.*
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Upload Lint Watchdog Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: precisioncad-lint-diagnostics
+          path: |
+            ${{ runner.temp }}/precisioncad-ci-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7

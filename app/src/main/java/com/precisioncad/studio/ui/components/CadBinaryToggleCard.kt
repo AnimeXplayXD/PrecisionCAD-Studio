@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -146,6 +147,8 @@ fun peekDirectionForShape(shapeClass: CardShapeClass): CardPeekDirection = when 
  *   peeks subtly for [IDLE_PEEK_HOLD_MS] (4,000 ms) and then retracts completely without changing
  *   any state or triggering any action.
  */
+val LocalCadDeckIdleTimerEnabled = staticCompositionLocalOf { true }
+
 @Stable
 class CadDeckIdleTimerState(
     val deckId: String,
@@ -164,6 +167,9 @@ class CadDeckIdleTimerState(
         const val IDLE_PEEK_INTERVAL_MS = 60_000L
         const val IDLE_PEEK_HOLD_MS = 4_000L
         const val POST_EXCHANGE_REVEAL_MS = 4_000L
+
+        @Volatile
+        var timerDriverEnabledForTesting: Boolean = true
 
         /**
          * V19 §4.2 — Command Send/Cancel deck visibility rule:
@@ -445,14 +451,17 @@ fun rememberCadDeckIdleTimerState(
         )
     }
 
+    val isTimerDriverEnabled = LocalCadDeckIdleTimerEnabled.current && CadDeckIdleTimerState.timerDriverEnabledForTesting
+
     // Sole timer driver for this CadDeckIdleTimerState instance (V18.3 §3.2 & V19 §5.2):
     // Drives post-exchange 4.0s reveal retraction and 60s section-local 4.0s idle peek.
     LaunchedEffect(
+        isTimerDriverEnabled,
         state.isEligibleForTimer,
         state.isPostExchangeRevealing,
         state.directInteractionGeneration
     ) {
-        if (!state.isParentVisible || !state.isWindowResumed) return@LaunchedEffect
+        if (!isTimerDriverEnabled || !state.isParentVisible || !state.isWindowResumed) return@LaunchedEffect
         val attachedDriver = state.attachTimerDriver()
         if (!attachedDriver) return@LaunchedEffect
         try {

@@ -44,6 +44,7 @@ jobs:
   build-signed-apk:
     name: Build & Sign Android APK
     runs-on: ubuntu-26.04
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Repository
@@ -81,7 +82,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ./gradlew
+          chmod +x ./gradlew ./scripts/ci-gradle-diagnostics.sh
           ./gradlew --version
 
       - name: Resolve Static Version Code, Version Name & Release Publish Gate
@@ -333,7 +334,48 @@ jobs:
           echo "KEYSTORE_PATH=${KEYSTORE_FILE}" >> "$GITHUB_ENV"
           echo "Verified production signing certificate SHA-256 fingerprint: ${ACTUAL_CERT_SHA256}"
 
-      - name: Run Unit Tests & Release Lint Before Assembly
+      - name: Run Unit Tests (PrecisionCADUnitTest)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label PrecisionCADUnitTest -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'com.precisioncad.studio.PrecisionCADUnitTest' \
+              --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
+
+      - name: Run Unit Tests (CadIncomingDocumentRouterTest)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label CadIncomingDocumentRouterTest -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'com.precisioncad.studio.CadIncomingDocumentRouterTest' \
+              --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
+
+      - name: Run Robolectric UI Tests (ExternalCadImportRobolectricTest)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label ExternalCadImportRobolectricTest -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'com.precisioncad.studio.ExternalCadImportRobolectricTest' \
+              --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
+
+      - name: Run Robolectric UI Tests (PrecisionCADRobolectricTest)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label PrecisionCADRobolectricTest -- \
+            ./gradlew :app:testDebugUnitTest \
+              --tests 'com.precisioncad.studio.PrecisionCADRobolectricTest' \
+              --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
+
+      - name: Run Android Release Lint (:app:lintRelease)
+        timeout-minutes: 15
         shell: bash
         env:
           STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD || secrets.STORE_PASSWORD }}
@@ -341,7 +383,9 @@ jobs:
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          ./gradlew :app:testDebugUnitTest :app:lintRelease --no-daemon --stacktrace
+          ./scripts/ci-gradle-diagnostics.sh --watchdog-seconds 720 --label lintRelease -- \
+            ./gradlew :app:lintRelease \
+              --no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace
 
       - name: Build Signed Release APK
         if: ${{ github.event_name != 'pull_request' && inputs.build_variant != 'debug' }}
@@ -445,6 +489,27 @@ jobs:
             rm -f "${KEYSTORE_PATH}"
           fi
           rm -f "${RUNNER_TEMP}"/precisioncad-release-*.jks 2>/dev/null || true
+
+      - name: Upload Unit Test Results & Reports
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: unit-test-results-and-reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload CI Watchdog Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: precisioncad-ci-diagnostics
+          path: |
+            ${{ runner.temp }}/precisioncad-ci-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload Lint Report Artifacts
         if: always()

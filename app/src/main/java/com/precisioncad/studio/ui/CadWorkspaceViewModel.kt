@@ -59,9 +59,12 @@ import com.precisioncad.studio.cad.model.WorkspaceSpace
 import com.precisioncad.studio.cad.update.CadGitHubUpdateRepository
 import com.precisioncad.studio.cad.update.CadReleaseEntry
 import com.precisioncad.studio.cad.update.CadUpdateUiState
+import com.precisioncad.studio.cad.update.ReleaseFeedFetcher
 import com.precisioncad.studio.ui.components.ControllerDockState
 import com.precisioncad.studio.ui.components.SelectionBoxDragState
 import com.precisioncad.studio.ui.components.ViewportGestureState
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -255,14 +258,45 @@ data class CadWorkspaceUiState(
  * Orientation-safe StateFlow ViewModel preserving all drawing state, cursor coordinates,
  * active command steps, selection sets, zoom/pan, and undo/redo history across Portrait/Landscape rotation.
  */
-class CadWorkspaceViewModel @JvmOverloads constructor(
+class CadWorkspaceViewModel private constructor(
     application: Application,
-    private val savedStateHandle: SavedStateHandle = SavedStateHandle()
+    private val savedStateHandle: SavedStateHandle,
+    releaseFeedFetcherOverride: ReleaseFeedFetcher?,
+    private val ioDispatcher: CoroutineDispatcher
 ) : AndroidViewModel(application) {
+
+    @JvmOverloads
+    constructor(
+        application: Application,
+        savedStateHandle: SavedStateHandle = SavedStateHandle()
+    ) : this(
+        application = application,
+        savedStateHandle = savedStateHandle,
+        releaseFeedFetcherOverride = null,
+        ioDispatcher = Dispatchers.IO
+    )
+
+    internal constructor(
+        application: Application,
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
+        releaseFeedFetcher: ReleaseFeedFetcher?,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+        @Suppress("UNUSED_PARAMETER") testTagMarker: Unit = Unit
+    ) : this(
+        application = application,
+        savedStateHandle = savedStateHandle,
+        releaseFeedFetcherOverride = releaseFeedFetcher,
+        ioDispatcher = ioDispatcher
+    )
 
     private val database = CadAppDatabase.getInstance(application)
     private val repository = CadProjectRepository(application, database.projectDao())
-    val updateRepository = CadGitHubUpdateRepository(application, viewModelScope)
+    val updateRepository = CadGitHubUpdateRepository(
+        context = application,
+        scope = viewModelScope,
+        releaseFeedFetcher = releaseFeedFetcherOverride,
+        ioDispatcher = ioDispatcher
+    )
 
     private val prefs = application.getSharedPreferences("precision_cad_prefs", Context.MODE_PRIVATE)
 
@@ -623,7 +657,8 @@ class CadWorkspaceViewModel @JvmOverloads constructor(
                             }
                         }
                     },
-                    availableBytesProvider = freeBytesFn
+                    availableBytesProvider = freeBytesFn,
+                    ioDispatcher = ioDispatcher
                 )
             } else {
                 CadIncomingDocumentRouter.stageAndValidateRequest(
@@ -646,7 +681,8 @@ class CadWorkspaceViewModel @JvmOverloads constructor(
                                 }
                             }
                         }
-                    }
+                    },
+                    ioDispatcher = ioDispatcher
                 )
             }
 

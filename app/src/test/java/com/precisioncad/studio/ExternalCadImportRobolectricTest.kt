@@ -27,7 +27,10 @@ import com.precisioncad.studio.cad.model.CadEntity
 import com.precisioncad.studio.cad.model.CadLayer
 import com.precisioncad.studio.cad.model.CadUnit
 import com.precisioncad.studio.cad.model.Point2D
+import com.precisioncad.studio.cad.update.CadGitHubUpdateRepository
+import com.precisioncad.studio.cad.update.ReleaseFeedFetcher
 import com.precisioncad.studio.ui.CadWorkspaceViewModel
+import com.precisioncad.studio.ui.components.CadDeckIdleTimerState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -57,12 +60,17 @@ class ExternalCadImportRobolectricTest {
     @Before
     fun setup() {
         resetFileProviderCache()
+        CadGitHubUpdateRepository.defaultFetcherOverrideForTesting =
+            ReleaseFeedFetcher { _, _, _, _ -> Result.success(null) }
+        CadDeckIdleTimerState.timerDriverEnabledForTesting = false
         context = ApplicationProvider.getApplicationContext()
         exportsDir = File(context.cacheDir, "exports").apply { mkdirs() }
     }
 
     @After
     fun tearDown() {
+        CadGitHubUpdateRepository.defaultFetcherOverrideForTesting = null
+        CadDeckIdleTimerState.timerDriverEnabledForTesting = true
         exportsDir.listFiles()?.forEach { it.delete() }
         File(context.filesDir, CadIncomingDocumentRouter.STAGING_DIR_NAME).listFiles()?.forEach { it.delete() }
         resetFileProviderCache()
@@ -143,12 +151,41 @@ class ExternalCadImportRobolectricTest {
             .digest(bytes)
             .joinToString("") { b -> "%02x".format(Locale.ROOT, b) }
 
-    private fun drainMainAndIdle() {
+    private fun pumpMainAndCompose() {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
         composeRule.waitForIdle()
-        Thread.sleep(150)
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-        composeRule.waitForIdle()
+    }
+
+    private fun waitForBoundedCondition(
+        timeoutMs: Long = 10_000L,
+        condition: () -> Boolean
+    ) {
+        composeRule.waitUntil(timeoutMillis = timeoutMs) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            condition()
+        }
+        pumpMainAndCompose()
+    }
+
+    private fun waitForTagDisplayed(tag: String, timeoutMs: Long = 10_000L) {
+        waitForBoundedCondition(timeoutMs) {
+            composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(tag).assertIsDisplayed()
+    }
+
+    private fun waitForScenarioViewModelCondition(
+        scenario: ActivityScenario<MainActivity>,
+        timeoutMs: Long = 10_000L,
+        predicate: (CadWorkspaceViewModel) -> Boolean
+    ) {
+        waitForBoundedCondition(timeoutMs) {
+            var matched = false
+            scenario.onActivity { activity ->
+                matched = predicate(extractViewModel(activity))
+            }
+            matched
+        }
     }
 
     @Test
@@ -256,7 +293,11 @@ class ExternalCadImportRobolectricTest {
         val (_, _, launchIntent) = createSharedFileIntent("flange_plate.dxf", dxfBytes, "image/vnd.dxf")
 
         ActivityScenario.launch<MainActivity>(launchIntent).use { scenario ->
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                    vm.lastExternalImportSha256 == expectedHash &&
+                    !vm.uiState.value.isHomeScreenVisible
+            }
 
             // Directly in workspace (not stuck on Home Screen)
             composeRule.onNodeWithTag("cad_technical_viewport").assertIsDisplayed()
@@ -264,11 +305,7 @@ class ExternalCadImportRobolectricTest {
 
             var firstRevision = 0L
             scenario.onActivity { activity ->
-                val vmField = MainActivity::class.java.getDeclaredField("workspaceViewModel\$delegate").apply {
-                    isAccessible = true
-                }
-                @Suppress("UNCHECKED_CAST")
-                val vm = (vmField.get(activity) as Lazy<CadWorkspaceViewModel>).value
+                val vm = extractViewModel(activity)
                 val st = vm.uiState.value
                 assertFalse(st.isHomeScreenVisible)
                 assertTrue(st.hasActiveWorkspaceSession)
@@ -282,14 +319,10 @@ class ExternalCadImportRobolectricTest {
 
             // Simulate configuration change / screen rotation
             scenario.recreate()
-            drainMainAndIdle()
+            waitForTagDisplayed("cad_technical_viewport")
 
             scenario.onActivity { activity ->
-                val vmField = MainActivity::class.java.getDeclaredField("workspaceViewModel\$delegate").apply {
-                    isAccessible = true
-                }
-                @Suppress("UNCHECKED_CAST")
-                val vm = (vmField.get(activity) as Lazy<CadWorkspaceViewModel>).value
+                val vm = extractViewModel(activity)
                 assertEquals(firstRevision, vm.uiState.value.documentRevision)
                 assertEquals(expectedHash, vm.lastExternalImportSha256)
             }
@@ -301,22 +334,31 @@ class ExternalCadImportRobolectricTest {
         val firstDxf = buildDxfBytes("v1", endX = 110.0, radius = 10.0)
         val secondDxfSameName = buildDxfBytes("v2", endX = 260.0, radius = 33.0)
         val thirdPcadBytes = buildPcadBytes("MountPlate_V3", endX = 320.0)
+        val firstHash = sha256(firstDxf)
+        val secondHash = sha256(secondDxfSameName)
+        val thirdHash = sha256(thirdPcadBytes)
 
         val (_, _, firstIntent) = createSharedFileIntent("assembly.dxf", firstDxf, "image/vnd.dxf")
 
         ActivityScenario.launch<MainActivity>(firstIntent).use { scenario ->
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                    vm.lastExternalImportSha256 == firstHash
+            }
 
             // Deliver second same-named file via warm onNewIntent (first is clean -> direct switch)
             val (_, _, secondIntent) = createSharedFileIntent("assembly.dxf", secondDxfSameName, "image/vnd.dxf")
             scenario.onActivity { activity ->
                 dispatchNewIntent(activity, secondIntent)
             }
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                    vm.lastExternalImportSha256 == secondHash
+            }
 
             scenario.onActivity { activity ->
                 val vm = extractViewModel(activity)
-                assertEquals(sha256(secondDxfSameName), vm.lastExternalImportSha256)
+                assertEquals(secondHash, vm.lastExternalImportSha256)
                 // Verify entity coordinates match second DXF (not cached first DXF!)
                 val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
                 assertEquals(260.0, line.end.x, 0.01)
@@ -328,7 +370,7 @@ class ExternalCadImportRobolectricTest {
                 vm.finishCurrentCommand()
                 assertTrue(vm.uiState.value.isDocumentDirty)
             }
-            drainMainAndIdle()
+            pumpMainAndCompose()
 
             // Send third document (.pcad over octet-stream) while active drawing has unsaved edits
             val (thirdSourceFile, _, thirdIntent) = createSharedFileIntent(
@@ -339,22 +381,22 @@ class ExternalCadImportRobolectricTest {
             scenario.onActivity { activity ->
                 dispatchNewIntent(activity, thirdIntent)
             }
-            drainMainAndIdle()
-
-            // Prompt must protect active drawing first!
-            composeRule.onNodeWithTag("unsaved_drawing_confirmation_dialog").assertIsDisplayed()
+            waitForTagDisplayed("unsaved_drawing_confirmation_dialog")
 
             // Prove staging durability: revoke/delete external source file AFTER staging, before tapping Discard!
             assertTrue(thirdSourceFile.delete())
 
             composeRule.onNodeWithTag("unsaved_dialog_discard_and_continue").performClick()
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                    vm.lastExternalImportSha256 == thirdHash
+            }
 
             // Verify import STILL completed cleanly from app-private staged copy!
             scenario.onActivity { activity ->
                 val vm = extractViewModel(activity)
                 assertEquals("MountPlate_V3", vm.uiState.value.currentProjectName)
-                assertEquals(sha256(thirdPcadBytes), vm.lastExternalImportSha256)
+                assertEquals(thirdHash, vm.lastExternalImportSha256)
                 val line = vm.uiState.value.entities.filterIsInstance<CadEntity.LineEntity>().first()
                 assertEquals(320.0, line.end.x, 0.01)
             }
@@ -364,28 +406,33 @@ class ExternalCadImportRobolectricTest {
     @Test
     fun `unsupported STEP over octet-stream displays visible error dialog without clobbering active drawing`() {
         val validDxf = buildDxfBytes("keep_me", endX = 140.0, radius = 15.0)
+        val validHash = sha256(validDxf)
         val (_, _, initialIntent) = createSharedFileIntent("existing_plan.dxf", validDxf, "image/vnd.dxf")
 
         ActivityScenario.launch<MainActivity>(initialIntent).use { scenario ->
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Ready &&
+                    vm.lastExternalImportSha256 == validHash
+            }
 
             val badStep = "ISO-10303-21;\nHEADER;\nDATA;\nEND-ISO-10303-21;".toByteArray(Charsets.UTF_8)
             val (_, _, badIntent) = createSharedFileIntent("solid_body.bin", badStep, "application/octet-stream")
             scenario.onActivity { activity ->
                 dispatchNewIntent(activity, badIntent)
             }
-            drainMainAndIdle()
+            waitForTagDisplayed("external_import_error_dialog")
 
-            composeRule.onNodeWithTag("external_import_error_dialog").assertIsDisplayed()
             composeRule.onNodeWithTag("external_import_error_title").assertIsDisplayed()
             composeRule.onNodeWithTag("external_import_error_message").assertIsDisplayed()
             composeRule.onNodeWithTag("external_import_dismiss_button").performClick()
-            drainMainAndIdle()
+            waitForScenarioViewModelCondition(scenario) { vm ->
+                vm.uiState.value.incomingImportState is CadIncomingImportState.Idle
+            }
 
             scenario.onActivity { activity ->
                 val vm = extractViewModel(activity)
                 assertEquals("existing_plan", vm.uiState.value.currentProjectName)
-                assertEquals(sha256(validDxf), vm.lastExternalImportSha256)
+                assertEquals(validHash, vm.lastExternalImportSha256)
                 assertTrue(vm.uiState.value.incomingImportState is CadIncomingImportState.Idle)
             }
         }
@@ -394,6 +441,7 @@ class ExternalCadImportRobolectricTest {
     @Test
     fun `SavedStateHandle restores pending staged external import and surfaces explicit failure when killed mid-read`() {
         val app = context.applicationContext as Application
+        val offlineFetcher = ReleaseFeedFetcher { _, _, _, _ -> Result.success(null) }
         val dxfBytes = buildDxfBytes("restore", endX = 210.0, radius = 20.0)
         val stagingDir = File(context.filesDir, CadIncomingDocumentRouter.STAGING_DIR_NAME).apply { mkdirs() }
         val stagedFile = File(stagingDir, "req-restored_recovered.dxf").apply { writeBytes(dxfBytes) }
@@ -412,8 +460,14 @@ class ExternalCadImportRobolectricTest {
             )
         )
 
-        val restoredVm = CadWorkspaceViewModel(app, savedState)
-        drainMainAndIdle()
+        val restoredVm = CadWorkspaceViewModel(
+            application = app,
+            savedStateHandle = savedState,
+            releaseFeedFetcher = offlineFetcher
+        )
+        waitForBoundedCondition {
+            restoredVm.uiState.value.incomingImportState is CadIncomingImportState.AwaitingUnsavedDecision
+        }
 
         val awaiting = restoredVm.uiState.value.incomingImportState as? CadIncomingImportState.AwaitingUnsavedDecision
         assertTrue(awaiting != null)
@@ -429,7 +483,11 @@ class ExternalCadImportRobolectricTest {
                 CadWorkspaceViewModel.KEY_EXT_DISPLAY_NAME to "interrupted.dxf"
             )
         )
-        val midReadVm = CadWorkspaceViewModel(app, midReadSavedState)
+        val midReadVm = CadWorkspaceViewModel(
+            application = app,
+            savedStateHandle = midReadSavedState,
+            releaseFeedFetcher = offlineFetcher
+        )
         val failed = midReadVm.uiState.value.incomingImportState as? CadIncomingImportState.Failed
         assertTrue(failed != null)
         assertEquals(CadImportErrorKind.IO_ERROR, failed!!.errorKind)

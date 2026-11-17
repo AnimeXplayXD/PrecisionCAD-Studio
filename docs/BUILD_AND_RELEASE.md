@@ -65,7 +65,27 @@
 
 ---
 
-## 5. Open-Source Licensing, Visual Asset Copyright & Third-Party Notices
+## 5. CI Test, Lint Topology & Stall Watchdog Safeguards
+
+- **Separated Serial Gates (`.github/workflows/build-signed-apk.yml`)**:
+  - The signed-APK job sets `timeout-minutes: 60` overall and executes unit tests, Robolectric Compose UI tests, and `:app:lintRelease` as five separate serial steps (`timeout-minutes: 15` each) prior to APK assembly — never combined in a single Gradle invocation and never using `continue-on-error: true` or `abortOnError = false`.
+  - Every Gradle gate invokes `--no-daemon --no-parallel --max-workers=2 --no-configuration-cache --console=plain --info --stacktrace`, while `app/build.gradle.kts` enables per-test `STARTED`/`PASSED`/`FAILED`/`SKIPPED` logging (`maxParallelForks = 1`) so stalled tests identify exact class and method names immediately.
+- **Standalone PR Lint (`.github/workflows/lint.yml`)**:
+  - Runs `:app:lintRelease` with `timeout-minutes: 15` on `pull_request` and `workflow_dispatch` (avoiding duplicate `lintRelease` execution on branch/tag pushes where `build-signed-apk.yml` already enforces `:app:lintRelease`) using an isolated, step-scoped throwaway keystore deleted on exit.
+- **Non-Secret Watchdog & Report Artifacts**:
+  - `scripts/ci-gradle-diagnostics.sh` wraps each CI Gradle step (`--watchdog-seconds 720`). If a step stays active past 12 minutes (or exits non-zero), it records non-secret host CPU/RAM/disk metrics, process command names (`ps ... comm`), and two spaced `jcmd Thread.print -l` samples (`25s` apart) into `$RUNNER_TEMP/precisioncad-ci-diagnostics/` without logging environment variables, passwords, or keystore secrets.
+  - Both workflows upload test XML/HTML (`app/build/test-results/testDebugUnitTest/`, `app/build/reports/tests/testDebugUnitTest/`), lint reports (`app/build/reports/lint-results-release.*`), and diagnostics (`precisioncad-ci-diagnostics` / `precisioncad-lint-diagnostics`) using `if: always()`.
+- **Local Per-Class Reproduction Commands**:
+  ```bash
+  ./gradlew :app:testDebugUnitTest --tests 'com.precisioncad.studio.PrecisionCADUnitTest' --no-daemon --console=plain --info --stacktrace
+  ./gradlew :app:testDebugUnitTest --tests 'com.precisioncad.studio.CadIncomingDocumentRouterTest' --no-daemon --console=plain --info --stacktrace
+  ./gradlew :app:testDebugUnitTest --tests 'com.precisioncad.studio.ExternalCadImportRobolectricTest' --no-daemon --console=plain --info --stacktrace
+  ./gradlew :app:testDebugUnitTest --tests 'com.precisioncad.studio.PrecisionCADRobolectricTest' --no-daemon --console=plain --info --stacktrace
+  ```
+
+---
+
+## 6. Open-Source Licensing, Visual Asset Copyright & Third-Party Notices
 
 - **First-Party Source Code**: Licensed under the [Apache License, Version 2.0](../LICENSE) (with required Section 4(d) attributions and exclusions in [`NOTICE`](../NOTICE)).
 - **Application Identity, Icons & Visual Assets (`All Rights Reserved`)**: The **PrecisionCAD Studio** name, official `com.precisioncad.studio` application identity, and all launcher icons / brand artwork are **Copyright © 2026 AnimeXplayXD — All Rights Reserved** and are excluded from the Apache-2.0 license grant as defined in [`NOTICE`](../NOTICE) and [`TRADEMARKS.md`](../TRADEMARKS.md).

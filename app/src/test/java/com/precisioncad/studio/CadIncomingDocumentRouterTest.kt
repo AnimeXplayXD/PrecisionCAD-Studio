@@ -23,6 +23,8 @@ import com.precisioncad.studio.cad.model.CadEntity
 import com.precisioncad.studio.cad.model.CadLayer
 import com.precisioncad.studio.cad.model.CadUnit
 import com.precisioncad.studio.cad.model.Point2D
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -39,6 +41,7 @@ import org.robolectric.annotation.Config
 import java.io.File
 import java.security.MessageDigest
 import java.util.Locale
+import kotlin.time.Duration.Companion.seconds
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -213,8 +216,10 @@ class CadIncomingDocumentRouterTest {
         )
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `stageAndValidateRequest stages ASCII DXF and PCAD via FileProvider with exact SHA-256 and parses geometry`() = runTest {
+    fun `stageAndValidateRequest stages ASCII DXF and PCAD via FileProvider with exact SHA-256 and parses geometry`() = runTest(timeout = 10.seconds) {
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
         val dxfBytes = sampleDxfString(lineEndX = 145.0).toByteArray(Charsets.UTF_8)
         val (_, dxfUri) = writeExportFileAndGetUri("bracket_rev3.dxf", dxfBytes)
         val dxfReq = IncomingDocumentRequest(
@@ -227,7 +232,11 @@ class CadIncomingDocumentRouterTest {
             intentFingerprint = "fp-dxf-1"
         )
 
-        val dxfOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(context, dxfReq)
+        val dxfOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
+            context = context,
+            request = dxfReq,
+            ioDispatcher = ioDispatcher
+        )
         assertTrue(dxfOutcome is CadImportStageOutcome.Success)
         val stagedDxf = (dxfOutcome as CadImportStageOutcome.Success).document
         assertEquals(CadExternalFormat.DXF, stagedDxf.format)
@@ -248,7 +257,11 @@ class CadIncomingDocumentRouterTest {
             hasReadGrantFlag = true,
             intentFingerprint = "fp-pcad-1"
         )
-        val pcadOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(context, pcadReq)
+        val pcadOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
+            context = context,
+            request = pcadReq,
+            ioDispatcher = ioDispatcher
+        )
         assertTrue(pcadOutcome is CadImportStageOutcome.Success)
         val stagedPcad = (pcadOutcome as CadImportStageOutcome.Success).document
         assertEquals(CadExternalFormat.PCAD, stagedPcad.format)
@@ -256,21 +269,25 @@ class CadIncomingDocumentRouterTest {
         assertEquals(1, stagedPcad.entityCount)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
-    fun `stageAndValidateRequest rejects empty, corrupt, STEP octet-stream, oversized, low-storage, missing, and SecurityException URIs`() = runTest {
+    fun `stageAndValidateRequest rejects empty, corrupt, STEP octet-stream, oversized, low-storage, missing, and SecurityException URIs`() = runTest(timeout = 10.seconds) {
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
         // 1. Empty 0-byte file
         val (_, emptyUri) = writeExportFileAndGetUri("empty.dxf", ByteArray(0))
         val emptyOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
-            context,
-            IncomingDocumentRequest("r1", emptyUri, "application/dxf", emptyList(), "empty.dxf", true, "fp1")
+            context = context,
+            request = IncomingDocumentRequest("r1", emptyUri, "application/dxf", emptyList(), "empty.dxf", true, "fp1"),
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.EMPTY_FILE, (emptyOutcome as CadImportStageOutcome.Failure).errorKind)
 
         // 2. Corrupt DXF content
         val (_, corruptUri) = writeExportFileAndGetUri("corrupt.dxf", "not a dxf file at all".toByteArray())
         val corruptOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
-            context,
-            IncomingDocumentRequest("r2", corruptUri, "image/vnd.dxf", emptyList(), "corrupt.dxf", true, "fp2")
+            context = context,
+            request = IncomingDocumentRequest("r2", corruptUri, "image/vnd.dxf", emptyList(), "corrupt.dxf", true, "fp2"),
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.MALFORMED_CONTENT, (corruptOutcome as CadImportStageOutcome.Failure).errorKind)
 
@@ -280,8 +297,9 @@ class CadIncomingDocumentRouterTest {
             "ISO-10303-21;\nHEADER;\nDATA;\nEND-ISO-10303-21;".toByteArray()
         )
         val stepOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
-            context,
-            IncomingDocumentRequest("r3", stepUri, "application/octet-stream", emptyList(), "cad_part.bin", true, "fp3")
+            context = context,
+            request = IncomingDocumentRequest("r3", stepUri, "application/octet-stream", emptyList(), "cad_part.bin", true, "fp3"),
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.UNSUPPORTED_FORMAT, (stepOutcome as CadImportStageOutcome.Failure).errorKind)
 
@@ -289,8 +307,9 @@ class CadIncomingDocumentRouterTest {
         val (deletedFile, missingUri) = writeExportFileAndGetUri("gone.dxf", sampleDxfString().toByteArray())
         assertTrue(deletedFile.delete())
         val missingOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
-            context,
-            IncomingDocumentRequest("r4", missingUri, "image/vnd.dxf", emptyList(), "gone.dxf", true, "fp4")
+            context = context,
+            request = IncomingDocumentRequest("r4", missingUri, "image/vnd.dxf", emptyList(), "gone.dxf", true, "fp4"),
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.FILE_NOT_FOUND, (missingOutcome as CadImportStageOutcome.Failure).errorKind)
 
@@ -299,7 +318,8 @@ class CadIncomingDocumentRouterTest {
         val storageOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
             context = context,
             request = IncomingDocumentRequest("r5", validUri, "image/vnd.dxf", emptyList(), "valid.dxf", true, "fp5"),
-            availableBytesProvider = { 512L }
+            availableBytesProvider = { 512L },
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.INSUFFICIENT_STORAGE, (storageOutcome as CadImportStageOutcome.Failure).errorKind)
         assertTrue(storageOutcome.retryable)
@@ -309,8 +329,9 @@ class CadIncomingDocumentRouterTest {
             .create("com.test.denied.provider")
         val deniedUri = Uri.parse("content://com.test.denied.provider/locked.dxf")
         val deniedOutcome = CadIncomingDocumentRouter.stageAndValidateRequest(
-            context,
-            IncomingDocumentRequest("r6", deniedUri, "image/vnd.dxf", emptyList(), "locked.dxf", false, "fp6")
+            context = context,
+            request = IncomingDocumentRequest("r6", deniedUri, "image/vnd.dxf", emptyList(), "locked.dxf", false, "fp6"),
+            ioDispatcher = ioDispatcher
         )
         assertEquals(CadImportErrorKind.PERMISSION_DENIED, (deniedOutcome as CadImportStageOutcome.Failure).errorKind)
     }
